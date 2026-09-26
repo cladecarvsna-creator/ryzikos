@@ -1,0 +1,31 @@
+[package]
+name = "everos-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+linked_list_allocator = "0.10"
+smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dns", "socket-dhcpv4"] }
+embedded-tls = { version = "0.19", default-features = false }
+embedded-io = "0.7"
+rand_core = { version = "0.6", default-features = false }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }
+zune-png = { version = "0.5.2", default-features = false }
+zune-jpeg = { version = "0.5.15", default-features = false }
+zune-core = { version = "0.5.3", default-features = false }
+libm = "0.2"
+
+[build-dependencies]
+cc = "1"
