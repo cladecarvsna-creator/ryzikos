@@ -1,25 +1,31 @@
-//! The taskbar, as in Windows 11: Start, the search box, Task View and
-//! the app buttons in the middle; the ^ button for hidden icons, the
-//! layout, network and volume, the clock and "Show desktop" at the right.
+//! The RyzikOS dock and menu bar.
 //!
-//! Pinned apps always have a button; other apps get one while they are
-//! open on the current desktop. A dot under a button shows the app is
-//! open, a longer one that it has the keyboard. Right-click pins and
-//! unpins; the pins are kept in the user's AppData folder on the disk.
-//! Resting the mouse on a button shows what it is.
+//! The dock floats over the bottom of the screen: the launcher (the
+//! RyzikOS logo), the apps, and after a divider Search and Task View.
+//! Pinned apps are always there; other apps join while they are open on
+//! the current desktop. A dot under an icon shows the app is open, a
+//! longer one in the accent colour that it has the keyboard. Icons rise
+//! a little under the mouse. Right-click pins and unpins; the pins are
+//! kept in the user's AppData folder on the disk.
+//!
+//! The menu bar runs along the top: the logo, which opens the system
+//! menu, and the name of the app in front at the left; the ^ button for
+//! hidden icons, the layout, network and volume, and the date and clock
+//! at the right. Their flyouts open downwards. Resting the mouse on a
+//! button shows what it is.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::anim::ONE;
 use super::canvas::{Canvas, Rect};
-use super::icons::{Pic, MEDIUM};
+use super::icons::{Pic, LARGE, MEDIUM};
 use super::popup::{Builder, Cmd};
 use super::search::{self, Search};
-use super::text::UI;
+use super::text::{UI, UI_BOLD};
 use super::theme;
 use super::tray::{self, Panel};
-use super::{draw_start_logo, App, Desktop, Hover, APPS, SPREAD, TASKBAR_H};
+use super::{App, Desktop, Hover, APPS, MENUBAR_H, SPREAD, TASKBAR_H};
 use crate::{fs, interrupts, serial, users};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,9 +36,21 @@ pub enum TaskItem {
     App(App),
 }
 
-const BUTTON: i32 = 44;
+/// A square in the dock holding one 48 pixel icon.
+const SLOT: i32 = 56;
 const GAP: i32 = 4;
-const SEARCH_W: i32 = 216;
+/// Room for the divider before Search and Task View.
+const DIVIDER: i32 = 17;
+const DOCK_H: i32 = 68;
+/// Space under the dock, above the bottom of the screen.
+const DOCK_MARGIN: i32 = 8;
+const DOCK_PAD: i32 = 8;
+const DOCK_RADIUS: i32 = 20;
+/// How far an icon rises under the mouse.
+const LIFT: i32 = 4;
+/// Buttons in the menu bar: the layout, quick settings, the clock, ^
+/// and the logo.
+pub const TRAY_BUTTONS: usize = 5;
 /// How long the mouse rests on something before its tooltip shows.
 const TIP_DELAY: u64 = interrupts::TIMER_HZ * 6 / 10;
 
@@ -46,14 +64,14 @@ pub const DEFAULT_PINS: [App; 5] = [
 ];
 
 /// The icons behind ^: the disk, Settings and About.
-const HIDDEN: [&str; 3] = ["Local Disk (C:)", "Settings", "About EverOS"];
+const HIDDEN: [&str; 3] = ["Local Disk (C:)", "Settings", "About RyzikOS"];
 
 impl Desktop<'_> {
     // ---- buttons -----------------------------------------------------------
 
-    /// Everything in the middle of the taskbar, from the left.
+    /// Everything in the dock, from the left.
     pub(super) fn task_items(&self) -> Vec<TaskItem> {
-        let mut out = alloc::vec![TaskItem::Start, TaskItem::Search, TaskItem::TaskView];
+        let mut out = alloc::vec![TaskItem::Start];
         out.extend(self.pins.iter().map(|&a| TaskItem::App(a)));
         // then open apps that are not pinned, in the order they opened
         let mut open: Vec<App> = APPS
@@ -65,36 +83,31 @@ impl Desktop<'_> {
             .collect();
         open.sort_by_key(|a| self.windows[a.index()].opened);
         out.extend(open.into_iter().map(TaskItem::App));
+        out.extend([TaskItem::Search, TaskItem::TaskView]);
         out
     }
 
-    fn item_width(item: TaskItem) -> i32 {
-        match item {
-            TaskItem::Search => SEARCH_W,
-            _ => BUTTON,
-        }
+    /// The dock's glass, around its icons.
+    pub(super) fn dock_rect(&self) -> Rect {
+        let n = self.task_items().len() as i32;
+        let w = n * SLOT + (n - 1) * GAP + DIVIDER + 2 * DOCK_PAD;
+        let y = self.height - DOCK_MARGIN - DOCK_H;
+        Rect::new((self.width - w) / 2, y, w, DOCK_H)
     }
 
-    /// The buttons and where they are, centred like Windows 11.
+    /// The icons and where they are, centred in the dock.
     pub(super) fn task_layout(&self) -> Vec<(TaskItem, Rect)> {
-        let items = self.task_items();
-        let total: i32 = items
-            .iter()
-            .map(|&i| Self::item_width(i) + GAP)
-            .sum::<i32>()
-            - GAP;
-        let mut x = (self.width - total) / 2;
-        let top = self.height - TASKBAR_H;
-        items
+        let dock = self.dock_rect();
+        let mut x = dock.x + DOCK_PAD;
+        let y = dock.y + 4;
+        self.task_items()
             .into_iter()
             .map(|item| {
-                let w = Self::item_width(item);
-                let r = if item == TaskItem::Search {
-                    Rect::new(x + 2, top + 7, w - 4, 34)
-                } else {
-                    Rect::new(x, top + 4, w, 40)
-                };
-                x += w + GAP;
+                if item == TaskItem::Search {
+                    x += DIVIDER;
+                }
+                let r = Rect::new(x, y, SLOT, SLOT);
+                x += SLOT + GAP;
                 (item, r)
             })
             .collect()
@@ -114,25 +127,30 @@ impl Desktop<'_> {
             .map(|(i, _)| i)
     }
 
-    /// Tray button `i` from the left: the layout, quick settings, the
-    /// clock, and the ^ for hidden icons (left of the layout).
+    /// Menu bar button `i`: the layout, quick settings, the clock, the
+    /// ^ for hidden icons (left of the layout) and the logo at the left.
+    /// They reach the top edge of the screen, so the mouse can't miss.
     pub(super) fn tray_rect(&self, i: usize) -> Rect {
-        let top = self.height - TASKBAR_H + 4;
+        let (y, h) = (0, MENUBAR_H);
+        let clock = Rect::new(self.width - 8 - 156, y, 156, h);
+        let quick = Rect::new(clock.x - 4 - 60, y, 60, h);
+        let layout = Rect::new(quick.x - 4 - 46, y, 46, h);
         match i {
-            0 => Rect::new(self.width - 240, top, 52, 40),
-            1 => Rect::new(self.width - 184, top, 72, 40),
-            2 => Rect::new(self.width - 110, top, 100, 40),
-            _ => Rect::new(self.width - 280, top, 36, 40),
+            0 => layout,
+            1 => quick,
+            2 => clock,
+            3 => Rect::new(layout.x - 4 - 30, y, 30, h),
+            _ => Rect::new(0, y, 50, h),
         }
     }
 
-    /// The thin "Show desktop" strip at the very right.
+    /// "Show desktop" has no button in RyzikOS: Win+D does it.
     pub(super) fn show_desktop_rect(&self) -> Rect {
-        Rect::new(self.width - 8, self.height - TASKBAR_H, 8, TASKBAR_H)
+        Rect::default()
     }
 
     pub(super) fn search_panel(&self) -> Rect {
-        Search::panel(self.width, self.height, TASKBAR_H)
+        Search::panel(self.width, self.height, TASKBAR_H, MENUBAR_H)
     }
 
     // ---- clicks ------------------------------------------------------------
@@ -144,15 +162,20 @@ impl Desktop<'_> {
         if self.show_desktop_rect().contains(x, y) {
             return self.toggle_show_desktop();
         }
-        match (0..4).find(|&i| self.tray_rect(i).contains(x, y)) {
-            Some(0) => {
-                self.toggle_layout = true;
-                return;
+        if y < MENUBAR_H {
+            match (0..TRAY_BUTTONS).find(|&i| self.tray_rect(i).contains(x, y)) {
+                Some(0) => self.toggle_layout = true,
+                Some(1) => self.open_panel(Panel::Quick),
+                Some(2) => self.open_panel(Panel::Calendar),
+                Some(3) => self.open_panel(Panel::Hidden),
+                Some(_) => {
+                    let r = self.tray_rect(4);
+                    let menu = self.system_menu(r.x, r.bottom() + 4);
+                    self.show_popup(menu);
+                }
+                None => {}
             }
-            Some(1) => return self.open_panel(Panel::Quick),
-            Some(2) => return self.open_panel(Panel::Calendar),
-            Some(_) => return self.open_panel(Panel::Hidden),
-            None => {}
+            return;
         }
         match self.task_at(x, y) {
             Some(TaskItem::Start) => self.open_menu(),
@@ -175,15 +198,19 @@ impl Desktop<'_> {
     }
 
     fn taskbar_menu(&mut self, x: i32, y: i32) {
-        let top = self.height - TASKBAR_H - 8;
+        if y < MENUBAR_H {
+            let menu = self.system_menu(x, MENUBAR_H + 4);
+            return self.show_popup(menu);
+        }
+        let top = self.dock_rect().y - 8;
         let menu = match self.task_at(x, y) {
             Some(TaskItem::App(app)) => {
                 let r = self.task_rect(TaskItem::App(app)).unwrap_or_default();
                 let mut b = Builder::default().item(app.title(), Cmd::Open(app)).sep();
                 b = if self.pins.contains(&app) {
-                    b.item("Unpin from taskbar", Cmd::Unpin(app))
+                    b.item("Remove from Dock", Cmd::Unpin(app))
                 } else {
-                    b.item("Pin to taskbar", Cmd::Pin(app))
+                    b.item("Keep in Dock", Cmd::Pin(app))
                 };
                 if self.windows[app.index()].open {
                     b = b.item("Close window", Cmd::Close(app));
@@ -197,13 +224,30 @@ impl Desktop<'_> {
                 .item("Task View", Cmd::TaskView)
                 .item("Show desktop", Cmd::ShowDesktop)
                 .sep()
-                .item("Taskbar settings", Cmd::Open(App::Settings))
+                .item("Dock settings", Cmd::Open(App::Settings))
                 .at(x - 20, top, true, self.screen()),
         };
         self.show_popup(menu);
     }
 
-    /// The menu of Start's right-click and Win+X.
+    /// The menu under the logo in the menu bar.
+    fn system_menu(&self, x: i32, y: i32) -> super::popup::Popup {
+        Builder::default()
+            .item("About RyzikOS", Cmd::Open(App::About))
+            .item("Settings", Cmd::Open(App::Settings))
+            .sep()
+            .keyed("Search", "Win+S", Cmd::Search)
+            .keyed("Task View", "Win+Tab", Cmd::TaskView)
+            .keyed("Show desktop", "Win+D", Cmd::ShowDesktop)
+            .sep()
+            .keyed("Lock", "Win+L", Cmd::Lock)
+            .item("Sign out", Cmd::SignOut)
+            .item("Restart", Cmd::Restart)
+            .item("Shut down", Cmd::ShutDown)
+            .at(x, y, false, self.screen())
+    }
+
+    /// The menu of the launcher's right-click and Win+X.
     pub(super) fn start_menu_popup(&self, x: i32, y: i32) -> super::popup::Popup {
         Builder::default()
             .item("Terminal", Cmd::Open(App::Terminal))
@@ -403,7 +447,13 @@ impl Desktop<'_> {
         };
         let w = UI.width(&text) + 20;
         let x = (anchor.x + anchor.w / 2 - w / 2).clamp(4, self.width - w - 4);
-        let r = Rect::new(x, self.height - TASKBAR_H - 40, w, 30);
+        // under the menu bar, or over the dock
+        let y = if anchor.y < MENUBAR_H {
+            MENUBAR_H + 6
+        } else {
+            self.dock_rect().y - 38
+        };
+        let r = Rect::new(x, y, w, 30);
         self.damage(r.inset(-12));
         self.tip = Some((r, text));
     }
@@ -412,7 +462,7 @@ impl Desktop<'_> {
         let (text, anchor): (String, Rect) = match hover {
             Hover::Task(item) => {
                 let text = match item {
-                    TaskItem::Start => String::from("Start"),
+                    TaskItem::Start => String::from("Launcher"),
                     TaskItem::Search => String::from("Search"),
                     TaskItem::TaskView => String::from("Task View"),
                     TaskItem::App(a) if self.windows[a.index()].open => self.window_title(a),
@@ -434,15 +484,16 @@ impl Desktop<'_> {
                         s
                     }
                     2 => String::from(self.date.as_str()),
-                    _ => String::from("Show hidden icons"),
+                    3 => String::from("Show hidden icons"),
+                    _ => String::from("RyzikOS"),
                 };
                 (text, self.tray_rect(i))
             }
             Hover::ShowDesktop => (String::from("Show desktop"), self.show_desktop_rect()),
             Hover::Hidden(i) => {
                 let r = tray::hidden_icon_rect(self.panel_rect(Panel::Hidden), i as i32);
-                // above the flyout, not the taskbar
-                return Some((String::from(HIDDEN[i]), r.offset(0, -60)));
+                // under the flyout, not the menu bar
+                return Some((String::from(HIDDEN[i]), r.offset(0, 60)));
             }
             _ => return None,
         };
@@ -457,7 +508,7 @@ impl Desktop<'_> {
             let p = self.panel_rect(Panel::Hidden);
             let a = tray::hidden_icon_rect(p, i as i32);
             r.x = (a.x + a.w / 2 - r.w / 2).clamp(4, self.width - r.w - 4);
-            r.y = p.y - 38;
+            r.y = p.bottom() + 8;
         }
         if !c.visible(r.inset(-12)) {
             return;
@@ -471,16 +522,29 @@ impl Desktop<'_> {
     // ---- drawing -----------------------------------------------------------
 
     pub(super) fn draw_taskbar(&self, c: &mut Canvas) {
-        let top = self.height - TASKBAR_H;
-        let bar = Rect::new(0, top, self.width, TASKBAR_H);
-        if !c.visible(bar) {
+        self.draw_menu_bar(c);
+        self.draw_dock(c);
+    }
+
+    fn draw_dock(&self, c: &mut Canvas) {
+        let dock = self.dock_rect();
+        if !c.visible(dock.inset(-SPREAD)) {
             return;
         }
-        // see-through, like acrylic
-        c.fill_round_alpha(bar, 0, theme::taskbar(), 220);
-        c.fill_rect(0, top, self.width, 1, theme::frame());
+        // frosted glass floating over the wallpaper
+        c.shadow(dock, DOCK_RADIUS, 12, 3, 70);
+        c.fill_round_alpha(dock, DOCK_RADIUS, theme::taskbar(), 200);
+        c.outline_round_alpha(dock, DOCK_RADIUS, theme::frame(), ONE * 3 / 4);
+        let edge = Rect::new(dock.x + 1, dock.y + 1, dock.w - 2, dock.h - 2);
+        c.outline_round_alpha(edge, DOCK_RADIUS - 1, theme::glass(), ONE / 3);
 
-        for (item, r) in self.task_layout() {
+        let layout = self.task_layout();
+        if let Some((_, r)) = layout.iter().find(|(i, _)| *i == TaskItem::Search) {
+            // the divider before Search and Task View
+            let x = r.x - GAP / 2 - DIVIDER / 2;
+            c.fill_rect(x, dock.y + 14, 1, dock.h - 28, theme::thumb());
+        }
+        for (item, r) in layout {
             if !c.visible(r) {
                 continue;
             }
@@ -491,39 +555,62 @@ impl Desktop<'_> {
                 TaskItem::App(a) => self.focused == Some(a) && self.windows[a.index()].visible(),
             };
             let lit = self.hover.level(Hover::Task(item));
-            if item == TaskItem::Search {
-                self.draw_search_box(c, r, lit);
-                continue;
-            }
-            if active {
-                c.fill_round_alpha(r, 5, theme::glass(), 200);
-                c.outline_round(r, 5, theme::stroke());
-            } else if lit > 0 {
-                c.fill_round_alpha(r, 5, theme::glass(), 140 * lit / ONE);
-            }
+            let lift = if active { LIFT / 2 } else { 0 }.max(LIFT * lit / ONE);
+            let (x, y) = (r.x + (SLOT - LARGE as i32) / 2, r.y + 1 - lift);
             match item {
-                TaskItem::Start => draw_start_logo(c, r.x + 10, r.y + 8),
-                TaskItem::TaskView => task_view_icon(c, r.x + 11, r.y + 10),
-                TaskItem::App(a) => {
-                    self.icons.draw_medium(c, a, r.x + 10, r.y + 7);
-                    let w = self.windows[a.index()];
-                    if w.open && !w.away {
-                        // a pill under open apps, longer for the active one
-                        let (len, color) = if active {
-                            (16, theme::accent())
-                        } else {
-                            (6, theme::thumb())
-                        };
-                        let pill = Rect::new(r.x + (r.w - len) / 2, r.bottom() - 4, len, 3);
-                        c.fill_round(pill, 1, color);
+                TaskItem::Start => self.icons.draw_logo(c, LARGE, x, y),
+                TaskItem::Search | TaskItem::TaskView => {
+                    let tile = Rect::new(x + 2, y + 2, LARGE as i32 - 4, LARGE as i32 - 4);
+                    let face = if active {
+                        theme::accent()
+                    } else {
+                        theme::control_lit()
+                    };
+                    c.fill_round(tile, 12, face);
+                    c.outline_round(tile, 12, theme::stroke());
+                    let ink = if active {
+                        theme::on_accent()
+                    } else {
+                        theme::text()
+                    };
+                    let (cx, cy) = (tile.x + tile.w / 2, tile.y + tile.h / 2);
+                    if item == TaskItem::Search {
+                        search::magnifier(c, cx - 3, cy - 3, 2, ink);
+                    } else {
+                        task_view_icon(c, cx - 11, cy - 10, ink, face);
                     }
                 }
-                TaskItem::Search => {}
+                TaskItem::App(a) => self.icons.draw(c, a, LARGE, x, y),
+            }
+            let open = match item {
+                TaskItem::App(a) => {
+                    let w = self.windows[a.index()];
+                    w.open && !w.away
+                }
+                _ => active,
+            };
+            if open {
+                // a dot under open apps, a longer bar for the one in front
+                let (len, color) = if active {
+                    (14, theme::accent())
+                } else {
+                    (5, theme::text_dim())
+                };
+                let dot = Rect::new(r.x + (r.w - len) / 2, r.y + LARGE as i32 + 5, len, 4);
+                c.fill_round(dot, 2, color);
             }
         }
+    }
 
-        // the tray: ^, layout, network and volume, clock and date
-        for i in 0..4 {
+    fn draw_menu_bar(&self, c: &mut Canvas) {
+        let bar = Rect::new(0, 0, self.width, MENUBAR_H);
+        if !c.visible(bar) {
+            return;
+        }
+        c.fill_round_alpha(bar, 0, theme::taskbar(), 210);
+        c.fill_rect(0, MENUBAR_H - 1, self.width, 1, theme::frame());
+
+        for i in 0..TRAY_BUTTONS {
             let r = self.tray_rect(i);
             let open = match i {
                 1 => self.panel == Some(Panel::Quick),
@@ -537,14 +624,27 @@ impl Desktop<'_> {
                 self.hover.level(Hover::Tray(i))
             };
             if lit > 0 {
-                c.fill_round_alpha(r, 5, theme::glass(), 170 * lit / ONE);
+                let face = Rect::new(r.x, r.y + 3, r.w, r.h - 6);
+                c.fill_round_alpha(face, 6, theme::glass(), 190 * lit / ONE);
             }
         }
+
+        // the logo and the name of the app in front
+        let logo = self.tray_rect(4);
+        self.icons
+            .draw_logo(c, 20, logo.x + 16, logo.y + (logo.h - 20) / 2);
+        let name = match self.focused {
+            Some(app) if self.windows[app.index()].visible() => app.title(),
+            _ => "RyzikOS",
+        };
+        let ty = (MENUBAR_H - UI.line_height) / 2;
+        c.draw_text_in(&UI_BOLD, logo.right() + 4, ty, name, theme::text());
+
         let chevron = self.tray_rect(3);
-        let (cx, cy) = (chevron.x + chevron.w / 2, chevron.y + 19);
-        let up = self.panel != Some(Panel::Hidden);
+        let (cx, cy) = (chevron.x + chevron.w / 2, chevron.y + chevron.h / 2);
+        let down = self.panel != Some(Panel::Hidden);
         for k in 0..2 {
-            let (dy, ey) = if up { (3, -2) } else { (-2, 3) };
+            let (dy, ey) = if down { (-2, 3) } else { (3, -2) };
             c.line(cx - 5, cy + dy + k, cx, cy + ey + k, theme::text());
             c.line(cx, cy + ey + k, cx + 5, cy + dy + k, theme::text());
         }
@@ -552,59 +652,16 @@ impl Desktop<'_> {
         c.text_centered(layout, tray::layout_label(self.layout), theme::text());
         let quick = self.tray_rect(1);
         let bg = theme::taskbar();
-        let y = quick.y + 12;
-        tray::network_icon(c, quick.x + 14, y, self.tray.net, theme::text(), bg);
-        tray::volume_icon(c, quick.x + 42, y, self.tray.volume, theme::text());
+        let y = quick.y + (quick.h - 16) / 2;
+        tray::network_icon(c, quick.x + 10, y, self.tray.net, theme::text(), bg);
+        tray::volume_icon(c, quick.x + 36, y, self.tray.volume, theme::text());
         let clock = self.tray_rect(2);
-        let line = |i: i32| Rect::new(clock.x, clock.y + 2 + i * 18, clock.w, 18);
-        c.text_centered(line(0), self.clock.as_str(), theme::text());
-        c.text_centered(line(1), self.date.as_str(), theme::text());
-
-        let sd = self.show_desktop_rect();
-        c.fill_rect(sd.x, sd.y + 12, 1, sd.h - 24, theme::thumb());
-        let lit = self.hover.level(Hover::ShowDesktop);
-        if lit > 0 {
-            c.fill_round_alpha(sd.offset(1, 0), 0, theme::glass(), 160 * lit / ONE);
-        }
-    }
-
-    fn draw_search_box(&self, c: &mut Canvas, r: Rect, lit: i32) {
-        let open = self.search.open;
-        let face = if open {
-            theme::control_lit()
-        } else {
-            super::canvas::mix(
-                theme::control(),
-                theme::control_lit(),
-                (lit * 255 / ONE) as u32,
-            )
-        };
-        c.fill_round(r, r.h / 2, face);
-        c.outline_round(r, r.h / 2, theme::frame());
-        if open {
-            c.fill_rect(r.x + 16, r.bottom() - 2, r.w - 32, 2, theme::accent());
-        }
-        search::magnifier(c, r.x + 21, r.y + 15, 1, theme::text());
-        let ty = r.y + (r.h - UI.line_height) / 2;
-        let q = self.search.query.as_str();
-        if q.is_empty() {
-            c.draw_text(r.x + 40, ty, "Search", theme::text_dim());
-            if open && self.cursor_on {
-                c.fill_rect(r.x + 40, ty, 1, UI.line_height, theme::text());
-            }
-        } else {
-            // the end of the text when it is too long
-            let mut shown = q;
-            while UI.width(shown) > r.w - 60 {
-                let mut it = shown.chars();
-                it.next();
-                shown = it.as_str();
-            }
-            let w = c.draw_text(r.x + 40, ty, shown, theme::text());
-            if open && self.cursor_on {
-                c.fill_rect(r.x + 41 + w, ty, 1, UI.line_height, theme::text());
-            }
-        }
+        let date_w = UI.width(self.date.as_str());
+        let time_w = UI_BOLD.width(self.clock.as_str());
+        let x = clock.x + (clock.w - date_w - 10 - time_w) / 2;
+        c.draw_text(x, ty, self.date.as_str(), theme::text_dim());
+        let x = x + date_w + 10;
+        c.draw_text_in(&UI_BOLD, x, ty, self.clock.as_str(), theme::text());
     }
 
     /// The ^ flyout: small icons that don't fit in the tray.
@@ -637,11 +694,11 @@ impl Desktop<'_> {
 }
 
 /// Two overlapping windows, for the Task View button.
-fn task_view_icon(c: &mut Canvas, x: i32, y: i32) {
-    c.outline_round(Rect::new(x, y, 14, 14), 2, theme::text());
-    c.fill_round(Rect::new(x + 7, y + 6, 15, 14), 2, theme::taskbar());
-    c.fill_round(Rect::new(x + 8, y + 7, 14, 13), 2, theme::text());
-    c.fill_round(Rect::new(x + 10, y + 9, 10, 9), 1, theme::taskbar());
+fn task_view_icon(c: &mut Canvas, x: i32, y: i32, ink: u32, bg: u32) {
+    c.outline_round(Rect::new(x, y, 14, 14), 2, ink);
+    c.fill_round(Rect::new(x + 7, y + 6, 15, 14), 2, bg);
+    c.fill_round(Rect::new(x + 8, y + 7, 14, 13), 2, ink);
+    c.fill_round(Rect::new(x + 10, y + 9, 10, 9), 1, bg);
 }
 
 fn itoa(n: i32) -> crate::StackString<12> {

@@ -1,30 +1,40 @@
-//! The start menu, in the style of Windows 11: a search box, pinned apps,
-//! recently opened apps, an "All apps" list and a power button.
+//! The RyzikOS launcher, opened with the logo in the dock or the Win key:
+//! the logo and a search box along the top, every app in a grid of big
+//! icons, the apps opened lately as a row of chips, and at the bottom the
+//! user with round buttons to lock, sign out, restart and shut down.
 //!
-//! Typing while the menu is open searches the apps; Enter starts the
+//! Typing while the launcher is open searches the apps; Enter starts the
 //! best match.
 
 use super::anim::{self, Fader, ONE};
-use super::canvas::{mix, Canvas, Color, Rect};
-use super::icons::Icons;
+use super::canvas::{mix, rgb, Canvas, Color, Rect};
+use super::icons::{Icons, LARGE};
 use super::text::{UI, UI_BOLD};
 use super::theme;
 use super::{App, APPS};
 use crate::keyboard::Key;
 use crate::{users, StackString};
 
-pub const W: i32 = 640;
-pub const H: i32 = 540;
-const RADIUS: i32 = 8;
-const FOOTER: i32 = 64;
+pub const W: i32 = 620;
+pub const H: i32 = 516;
+const RADIUS: i32 = 20;
+const FOOTER: i32 = 76;
 const MAX_RECENT: usize = 4;
 const MAX_TARGETS: usize = 20;
+
+/// Apps in a row of the grid, and the size of each cell.
+const PER_ROW: usize = 5;
+const CELL_W: i32 = 114;
+const CELL_H: i32 = 96;
+/// Where the grid and the row of recent apps start, from the top.
+const GRID_Y: i32 = 108;
+const RECENT_Y: i32 = 336;
 
 /// What the desktop should do after an event.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
-    /// The menu changed and must be drawn again.
+    /// The launcher changed and must be drawn again.
     Redraw,
     Open(App),
     Close,
@@ -34,40 +44,35 @@ pub enum Action {
     SignOut,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-    Pinned,
-    AllApps,
-}
-
-/// Something in the menu that can be clicked.
+/// Something in the launcher that can be clicked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
     App(App),
-    AllApps,
-    Back,
-    Power,
-    Restart,
-    ShutDown,
-    User,
+    /// A chip in the row of recent apps.
+    Recent(App),
     Lock,
     SignOut,
-    /// The Sign out button in the footer.
-    SignOutButton,
+    Restart,
+    ShutDown,
 }
+
+/// The round buttons in the footer, from the left.
+const POWER: [(Target, &str); 4] = [
+    (Target::Lock, "Lock"),
+    (Target::SignOut, "Sign out"),
+    (Target::Restart, "Restart"),
+    (Target::ShutDown, "Shut down"),
+];
 
 pub struct StartMenu {
     pub open: bool,
-    view: View,
     search: StackString<32>,
-    power_open: bool,
-    user_open: bool,
     /// Most recently opened first.
     recent: [Option<App>; MAX_RECENT],
     hover: Fader<Target>,
 }
 
-/// Apps in alphabetical order, for "All apps".
+/// Apps in alphabetical order, for search results.
 const SORTED: [App; 9] = [
     App::About,
     App::Browser,
@@ -80,43 +85,35 @@ const SORTED: [App; 9] = [
     App::Terminal,
 ];
 
-/// Pinned apps in a row, and where "Recommended" starts below them.
-const PINNED_PER_ROW: usize = 6;
-const RECOMMENDED_Y: i32 = 316;
-
 impl StartMenu {
     pub fn new() -> Self {
         Self {
             open: false,
-            view: View::Pinned,
             search: StackString::new(),
-            power_open: false,
-            user_open: false,
             recent: [None; MAX_RECENT],
             hover: Fader::new(anim::ms(120)),
         }
     }
 
-    /// Where the menu panel sits on a screen of the given size.
-    pub fn panel(width: i32, height: i32, taskbar: i32) -> Rect {
-        Rect::new((width - W) / 2, height - taskbar - 12 - H, W, H)
+    /// Where the launcher sits on a screen of the given size: centred
+    /// above the dock, under the menu bar.
+    pub fn panel(width: i32, height: i32, dock: i32, menu_bar: i32) -> Rect {
+        let y = (height - dock - 12 - H).max(menu_bar + 8);
+        Rect::new((width - W) / 2, y, W, H)
     }
 
     pub fn show(&mut self) {
         self.open = true;
-        self.view = View::Pinned;
         self.search.clear();
-        self.power_open = false;
-        self.user_open = false;
         self.hover.jump(None);
     }
 
-    /// Fade hover highlights. Returns whether the menu must be redrawn.
+    /// Fade hover highlights. Returns whether the launcher must be redrawn.
     pub fn tick(&mut self) -> bool {
         self.hover.tick()
     }
 
-    /// Remember an app for "Recommended".
+    /// Remember an app for the row of recent apps.
     pub fn note_opened(&mut self, app: App) {
         let old = self.recent;
         self.recent[0] = Some(app);
@@ -143,24 +140,28 @@ impl StartMenu {
     // ---- layout ------------------------------------------------------------
 
     fn search_box(p: Rect) -> Rect {
-        Rect::new(p.x + 32, p.y + 24, p.w - 64, 36)
+        Rect::new(p.right() - 24 - 280, p.y + 22, 280, 36)
     }
 
     fn footer(p: Rect) -> Rect {
         Rect::new(p.x, p.bottom() - FOOTER, p.w, FOOTER)
     }
 
-    fn power_flyout(p: Rect) -> Rect {
-        Rect::new(p.right() - 196, p.bottom() - FOOTER - 92, 180, 88)
+    /// Round power button `i` of POWER in the footer.
+    fn power_button(p: Rect, i: usize) -> Rect {
+        let f = Self::footer(p);
+        let x = f.right() - 24 - 4 * 40 - 3 * 10 + i as i32 * 50;
+        Rect::new(x, f.y + (f.h - 40) / 2, 40, 40)
     }
 
-    fn user_flyout(p: Rect) -> Rect {
-        Rect::new(p.x + 32, p.bottom() - FOOTER - 92, 180, 88)
+    /// The chip of a recent app, `x` pixels from the left edge.
+    fn chip(p: Rect, x: i32, app: App) -> Rect {
+        Rect::new(p.x + x, p.y + RECENT_Y + 30, UI.width(app.title()) + 52, 40)
     }
 
     /// Everything clickable, and where it is.
     fn targets(&self, p: Rect) -> ([(Target, Rect); MAX_TARGETS], usize) {
-        let mut out = [(Target::Back, Rect::default()); MAX_TARGETS];
+        let mut out = [(Target::Lock, Rect::default()); MAX_TARGETS];
         let mut n = 0;
         let mut push = |t: Target, r: Rect| {
             if n < MAX_TARGETS {
@@ -168,75 +169,40 @@ impl StartMenu {
                 n += 1;
             }
         };
-        if self.power_open {
-            let f = Self::power_flyout(p);
-            push(Target::Restart, Rect::new(f.x + 4, f.y + 4, f.w - 8, 38));
-            push(Target::ShutDown, Rect::new(f.x + 4, f.y + 46, f.w - 8, 38));
+        for (i, (t, _)) in POWER.into_iter().enumerate() {
+            push(t, Self::power_button(p, i));
         }
-        if self.user_open {
-            let f = Self::user_flyout(p);
-            push(Target::Lock, Rect::new(f.x + 4, f.y + 4, f.w - 8, 38));
-            push(Target::SignOut, Rect::new(f.x + 4, f.y + 46, f.w - 8, 38));
-        }
-        let footer = Self::footer(p);
-        push(
-            Target::User,
-            Rect::new(footer.x + 32, footer.y + 10, 200, 44),
-        );
-        push(
-            Target::Power,
-            Rect::new(footer.right() - 64, footer.y + 12, 40, 40),
-        );
-        push(
-            Target::SignOutButton,
-            Rect::new(footer.right() - 184, footer.y + 12, 112, 40),
-        );
 
         if !self.search.as_str().is_empty() {
             for (i, app) in self.matches().enumerate() {
                 push(
                     Target::App(app),
-                    Rect::new(p.x + 32, p.y + 112 + i as i32 * 52, p.w - 64, 48),
+                    Rect::new(p.x + 24, p.y + 108 + i as i32 * 52, p.w - 48, 48),
                 );
             }
             return (out, n);
         }
-        match self.view {
-            View::Pinned => {
-                push(
-                    Target::AllApps,
-                    Rect::new(p.right() - 144, p.y + 80, 112, 28),
-                );
-                for (i, app) in APPS.into_iter().enumerate() {
-                    let (col, row) = ((i % PINNED_PER_ROW) as i32, (i / PINNED_PER_ROW) as i32);
-                    push(
-                        Target::App(app),
-                        Rect::new(p.x + 32 + col * 96, p.y + 120 + row * 90, 96, 88),
-                    );
-                }
-                for (i, app) in self.recent.into_iter().flatten().enumerate() {
-                    let (col, row) = ((i % 2) as i32, (i / 2) as i32);
-                    let w = (p.w - 64) / 2;
-                    push(
-                        Target::App(app),
-                        Rect::new(
-                            p.x + 32 + col * w,
-                            p.y + RECOMMENDED_Y + 28 + row * 56,
-                            w - 8,
-                            52,
-                        ),
-                    );
-                }
+        let left = p.x + (p.w - PER_ROW as i32 * CELL_W) / 2;
+        for (i, app) in APPS.into_iter().enumerate() {
+            let (col, row) = ((i % PER_ROW) as i32, (i / PER_ROW) as i32);
+            push(
+                Target::App(app),
+                Rect::new(
+                    left + col * CELL_W,
+                    p.y + GRID_Y + row * (CELL_H + 8),
+                    CELL_W,
+                    CELL_H,
+                ),
+            );
+        }
+        let mut x = 24;
+        for app in self.recent() {
+            let r = Self::chip(p, x, app);
+            if r.right() > p.right() - 24 {
+                break;
             }
-            View::AllApps => {
-                push(Target::Back, Rect::new(p.right() - 120, p.y + 80, 88, 28));
-                for (i, app) in SORTED.into_iter().enumerate() {
-                    push(
-                        Target::App(app),
-                        Rect::new(p.x + 32, p.y + 120 + i as i32 * 48, p.w - 64, 44),
-                    );
-                }
-            }
+            push(Target::Recent(app), r);
+            x += r.w + 10;
         }
         (out, n)
     }
@@ -258,52 +224,19 @@ impl StartMenu {
     }
 
     pub fn on_click(&mut self, p: Rect, x: i32, y: i32) -> Action {
-        let target = self.target_at(p, x, y);
-        if self.power_open && !matches!(target, Some(Target::Restart | Target::ShutDown)) {
-            self.power_open = false;
-            return Action::Redraw;
-        }
-        if self.user_open && !matches!(target, Some(Target::Lock | Target::SignOut)) {
-            self.user_open = false;
-            return Action::Redraw;
-        }
-        match target {
-            Some(Target::App(app)) => Action::Open(app),
-            Some(Target::AllApps) => {
-                self.view = View::AllApps;
-                Action::Redraw
-            }
-            Some(Target::Back) => {
-                self.view = View::Pinned;
-                Action::Redraw
-            }
-            Some(Target::Power) => {
-                self.power_open = true;
-                Action::Redraw
-            }
-            Some(Target::User) => {
-                self.user_open = true;
-                Action::Redraw
-            }
+        match self.target_at(p, x, y) {
+            Some(Target::App(app) | Target::Recent(app)) => Action::Open(app),
+            Some(Target::Lock) => Action::Lock,
+            Some(Target::SignOut) => Action::SignOut,
             Some(Target::Restart) => Action::Restart,
             Some(Target::ShutDown) => Action::ShutDown,
-            Some(Target::Lock) => Action::Lock,
-            Some(Target::SignOut | Target::SignOutButton) => Action::SignOut,
             None => Action::None,
         }
     }
 
     pub fn on_key(&mut self, key: Key) -> Action {
         match key {
-            Key::Escape | Key::Super => {
-                if self.power_open || self.user_open {
-                    self.power_open = false;
-                    self.user_open = false;
-                    Action::Redraw
-                } else {
-                    Action::Close
-                }
-            }
+            Key::Escape | Key::Super => Action::Close,
             Key::Enter => match self.matches().next() {
                 Some(app) if !self.search.as_str().is_empty() => Action::Open(app),
                 _ => Action::None,
@@ -330,31 +263,26 @@ impl StartMenu {
             let mut m = c.sub(Rect::new(0, 0, c.width, c.height));
             m.clip_round(p, RADIUS);
             m.fill_round_alpha(p, 0, theme::panel(), 250);
+            // the logo and the name, with the search box beside them
+            icons.draw_logo(&mut m, 32, p.x + 24, p.y + 24);
+            m.draw_text_in(&UI_BOLD, p.x + 66, p.y + 30, "RyzikOS", theme::text());
             self.draw_search(&mut m, p, blink);
-            if !self.search.as_str().is_empty() {
-                self.draw_results(&mut m, p, icons);
+            if self.search.as_str().is_empty() {
+                self.draw_grid(&mut m, p, icons);
             } else {
-                match self.view {
-                    View::Pinned => self.draw_pinned(&mut m, p, icons),
-                    View::AllApps => self.draw_all_apps(&mut m, p, icons),
-                }
+                self.draw_results(&mut m, p, icons);
             }
             self.draw_footer(&mut m, p);
         }
         c.outline_round(p, RADIUS, theme::frame());
     }
 
-    fn highlight(&self, c: &mut Canvas, target: Target, r: Rect) {
+    fn highlight(&self, c: &mut Canvas, target: Target, r: Rect, radius: i32) {
         let level = self.hover.level(target);
         if level > 0 {
-            c.fill_round_alpha(r, 6, theme::control_lit(), level);
-            c.outline_round_alpha(r, 6, theme::stroke(), level);
+            c.fill_round_alpha(r, radius, theme::control_lit(), level);
+            c.outline_round_alpha(r, radius, theme::stroke(), level);
         }
-    }
-
-    /// A button face that lights up to white under the mouse.
-    fn face(&self, target: Target, base: Color) -> Color {
-        mix(base, theme::control_lit(), self.lit(target))
     }
 
     /// Hover level of a target as a `mix` amount.
@@ -364,25 +292,12 @@ impl StartMenu {
 
     fn draw_search(&self, c: &mut Canvas, p: Rect, blink: bool) {
         let r = Self::search_box(p);
-        c.fill_round(r, r.h / 2, theme::light());
+        c.fill_round(r, r.h / 2, theme::control_lit());
         c.outline_round(r, r.h / 2, theme::frame());
-        c.fill_rect(r.x + 18, r.bottom() - 1, r.w - 36, 1, theme::accent());
-        // magnifying glass
-        let lens = Rect::new(r.x + 16, r.y + 10, 12, 12);
-        c.outline_round(lens, 6, theme::text());
-        c.outline_round(lens.inset(1), 5, theme::text());
-        for i in 0..2 {
-            c.line(
-                r.x + 26 + i,
-                r.y + 21,
-                r.x + 30 + i,
-                r.y + 25,
-                theme::text(),
-            );
-        }
+        super::search::magnifier(c, r.x + 20, r.y + r.h / 2 - 2, 1, theme::text_dim());
         let ty = r.y + (r.h - UI.line_height) / 2;
         if self.search.as_str().is_empty() {
-            c.draw_text(r.x + 40, ty, "Type here to search apps", theme::text_dim());
+            c.draw_text(r.x + 40, ty, "Search apps", theme::text_dim());
             if blink {
                 c.fill_rect(r.x + 40, ty, 1, UI.line_height, theme::text());
             }
@@ -395,7 +310,8 @@ impl StartMenu {
     }
 
     fn draw_results(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
-        c.draw_text_in(&UI_BOLD, p.x + 40, p.y + 84, "Best match", theme::text());
+        let heading = "Best match";
+        c.draw_text_in(&UI_BOLD, p.x + 32, p.y + 80, heading, theme::text());
         let (targets, n) = self.targets(p);
         let mut first = true;
         for &(t, r) in &targets[..n] {
@@ -404,78 +320,52 @@ impl StartMenu {
             };
             if first {
                 // Enter opens this one
-                c.fill_round(r, 6, theme::accent_light());
+                c.fill_round(r, 12, theme::accent_light());
                 first = false;
             }
-            self.highlight(c, t, r);
+            self.highlight(c, t, r, 12);
             icons.draw_medium(c, app, r.x + 12, r.y + 12);
             c.draw_text(r.x + 48, r.y + 6, app.title(), theme::text());
             c.draw_text(r.x + 48, r.y + 25, "App", theme::text_dim());
         }
         if first {
             let text = "No apps match your search";
-            c.draw_text(p.x + 40, p.y + 120, text, theme::text_dim());
+            c.draw_text(p.x + 32, p.y + 112, text, theme::text_dim());
         }
     }
 
-    fn draw_pinned(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
-        c.draw_text_in(&UI_BOLD, p.x + 56, p.y + 86, "Pinned", theme::text());
-        let rec_y = p.y + RECOMMENDED_Y;
-        c.draw_text_in(&UI_BOLD, p.x + 56, rec_y, "Recommended", theme::text());
+    fn draw_grid(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
+        c.draw_text_in(&UI_BOLD, p.x + 32, p.y + 80, "Apps", theme::text());
+        let rec_y = p.y + RECENT_Y;
+        c.fill_rect(p.x + 24, rec_y - 12, p.w - 48, 1, theme::stroke());
+        c.draw_text_in(&UI_BOLD, p.x + 32, rec_y, "Recent", theme::text());
         let (targets, n) = self.targets(p);
         let mut recent = 0;
         for &(t, r) in &targets[..n] {
             match t {
-                Target::AllApps => {
-                    let face = self.face(t, theme::control());
-                    c.fill_round(r, 4, face);
-                    c.outline_round(r, 4, theme::stroke());
-                    c.text_centered(r, "All apps  ›", theme::text());
-                }
-                // pinned apps are in the grid, recent ones below it
-                Target::App(app) if r.y < rec_y => {
-                    self.highlight(c, t, r);
-                    icons.draw_large(c, app, r.x + 24, r.y + 8);
-                    c.text_centered(
-                        Rect::new(r.x, r.y + 60, r.w, 20),
-                        app.title(),
-                        theme::text(),
-                    );
-                }
                 Target::App(app) => {
+                    self.highlight(c, t, r, 16);
+                    // icons rise a little under the mouse, as in the dock
+                    let lift = 3 * self.hover.level(t) / ONE;
+                    let x = r.x + (r.w - LARGE as i32) / 2;
+                    icons.draw_large(c, app, x, r.y + 10 - lift);
+                    let label = Rect::new(r.x, r.y + 64, r.w, 20);
+                    c.text_centered(label, app.title(), theme::text());
+                }
+                Target::Recent(app) => {
                     recent += 1;
-                    self.highlight(c, t, r);
-                    icons.draw_medium(c, app, r.x + 12, r.y + 14);
-                    c.draw_text(r.x + 48, r.y + 7, app.title(), theme::text());
-                    c.draw_text(r.x + 48, r.y + 26, "Recently opened", theme::text_dim());
+                    let face = mix(theme::control(), theme::control_lit(), self.lit(t));
+                    c.fill_round(r, r.h / 2, face);
+                    c.outline_round(r, r.h / 2, theme::stroke());
+                    icons.draw_medium(c, app, r.x + 12, r.y + 8);
+                    c.draw_text(r.x + 42, r.y + 11, app.title(), theme::text());
                 }
                 _ => {}
             }
         }
         if recent == 0 {
             let text = "Apps you open will show up here.";
-            c.draw_text(p.x + 56, rec_y + 36, text, theme::text_dim());
-        }
-    }
-
-    fn draw_all_apps(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
-        c.draw_text_in(&UI_BOLD, p.x + 56, p.y + 86, "All apps", theme::text());
-        let (targets, n) = self.targets(p);
-        for &(t, r) in &targets[..n] {
-            match t {
-                Target::Back => {
-                    let face = self.face(t, theme::control());
-                    c.fill_round(r, 4, face);
-                    c.outline_round(r, 4, theme::stroke());
-                    c.text_centered(r, "‹  Back", theme::text());
-                }
-                Target::App(app) => {
-                    self.highlight(c, t, r);
-                    icons.draw_medium(c, app, r.x + 12, r.y + 10);
-                    c.draw_text(r.x + 48, r.y + 13, app.title(), theme::text());
-                }
-                _ => {}
-            }
+            c.draw_text(p.x + 32, rec_y + 40, text, theme::text_dim());
         }
     }
 
@@ -483,36 +373,9 @@ impl StartMenu {
         let f = Self::footer(p);
         c.fill(f, theme::footer());
         c.fill_rect(f.x, f.y, f.w, 1, theme::stroke());
-        let (targets, n) = self.targets(p);
-        for &(t, r) in &targets[..n] {
-            match t {
-                Target::Power | Target::User => {
-                    let open = if t == Target::Power {
-                        self.power_open
-                    } else {
-                        self.user_open
-                    };
-                    let lit = if open { 255 } else { self.lit(t) };
-                    let bg = mix(theme::footer(), theme::control_lit(), lit);
-                    if lit > 0 {
-                        c.fill_round(r, 6, bg);
-                    }
-                    if t == Target::Power {
-                        power_symbol(c, r.x + 20, r.y + 20, theme::text(), bg);
-                    }
-                }
-                Target::SignOutButton => {
-                    let bg = mix(theme::footer(), theme::control_lit(), self.lit(t));
-                    c.fill_round(r, 6, bg);
-                    c.outline_round(r, 6, theme::stroke());
-                    sign_out_symbol(c, r.x + 22, r.y + 20);
-                    c.draw_text(r.x + 40, r.y + 11, "Sign out", theme::text());
-                }
-                _ => {}
-            }
-        }
-        let avatar = Rect::new(f.x + 44, f.y + 16, 32, 32);
-        c.fill_round(avatar, 16, theme::accent());
+
+        let avatar = Rect::new(f.x + 24, f.y + 18, 40, 40);
+        c.fill_round(avatar, 20, theme::accent());
         let name = users::current_name().unwrap_or_default();
         let mut initial = [0u8; 4];
         let initial = name
@@ -522,42 +385,44 @@ impl StartMenu {
             .unwrap_or('?')
             .to_ascii_uppercase()
             .encode_utf8(&mut initial);
-        c.text_centered_in(&UI_BOLD, avatar, initial, 0xffffff);
-        c.draw_text(f.x + 88, f.y + 23, name.as_str(), theme::text());
+        c.text_centered_in(&UI_BOLD, avatar, initial, theme::on_accent());
+        c.draw_text_in(&UI_BOLD, f.x + 76, f.y + 18, name.as_str(), theme::text());
 
-        for (open, fl) in [
-            (self.power_open, Self::power_flyout(p)),
-            (self.user_open, Self::user_flyout(p)),
-        ] {
-            if !open {
-                continue;
+        // under the name: what the button under the mouse does
+        let mut hint = "Signed in";
+        for (i, (t, label)) in POWER.into_iter().enumerate() {
+            let r = Self::power_button(p, i);
+            let lit = self.lit(t);
+            if lit > 0 {
+                hint = label;
             }
-            c.shadow(fl, 8, 10, 2, 90);
-            c.fill_round(fl, 8, theme::menu());
-            c.outline_round(fl, 8, theme::stroke());
-            for &(t, r) in &targets[..n] {
-                let label = match t {
-                    Target::Restart => "Restart",
-                    Target::ShutDown => "Shut down",
-                    Target::Lock => "Lock",
-                    Target::SignOut => "Sign out",
-                    _ => continue,
-                };
-                let bg = mix(theme::menu(), theme::hover(), self.lit(t));
-                if self.lit(t) > 0 {
-                    c.fill_round(r, 5, bg);
-                }
-                match t {
-                    Target::Restart => restart_symbol(c, r.x + 20, r.y + 19, theme::text(), bg),
-                    Target::ShutDown => power_symbol(c, r.x + 20, r.y + 19, theme::text(), bg),
-                    Target::Lock => lock_symbol(c, r.x + 20, r.y + 19, bg),
-                    _ => sign_out_symbol(c, r.x + 20, r.y + 19),
-                }
-                c.draw_text(r.x + 40, r.y + 10, label, theme::text());
+            let bg = mix(theme::control(), theme::control_lit(), lit);
+            let bg = if t == Target::ShutDown && lit > 0 {
+                mix(bg, WARM, lit)
+            } else {
+                bg
+            };
+            c.fill_round(r, 20, bg);
+            c.outline_round(r, 20, theme::stroke());
+            let ink = if t == Target::ShutDown && lit > 128 {
+                0xffffff
+            } else {
+                theme::text()
+            };
+            let (x, y) = (r.x + 20, r.y + 20);
+            match t {
+                Target::Lock => lock_symbol(c, x, y, ink, bg),
+                Target::SignOut => sign_out_symbol(c, x, y, ink),
+                Target::Restart => restart_symbol(c, x, y, ink, bg),
+                _ => power_symbol(c, x, y, ink, bg),
             }
         }
+        c.draw_text(f.x + 76, f.y + 38, hint, theme::text_dim());
     }
 }
+
+/// The warm orange of the RyzikOS logo, for Shut down.
+const WARM: Color = rgb(0xff, 0x9f, 0x43);
 
 /// A power symbol centred at (x, y): a ring open at the top and a bar.
 pub fn power_symbol(c: &mut Canvas, x: i32, y: i32, fg: Color, bg: Color) {
@@ -578,24 +443,24 @@ pub fn restart_symbol(c: &mut Canvas, x: i32, y: i32, fg: Color, bg: Color) {
 }
 
 /// A padlock centred at (x, y).
-fn lock_symbol(c: &mut Canvas, x: i32, y: i32, bg: Color) {
+fn lock_symbol(c: &mut Canvas, x: i32, y: i32, fg: Color, bg: Color) {
     let shackle = Rect::new(x - 5, y - 9, 10, 12);
-    c.outline_round(shackle, 5, theme::text());
-    c.outline_round(shackle.inset(1), 4, theme::text());
+    c.outline_round(shackle, 5, fg);
+    c.outline_round(shackle.inset(1), 4, fg);
     c.fill_rect(x - 3, y - 4, 6, 4, bg);
-    c.fill_round(Rect::new(x - 8, y - 2, 16, 11), 2, theme::text());
+    c.fill_round(Rect::new(x - 8, y - 2, 16, 11), 2, fg);
     c.fill_rect(x - 1, y + 2, 2, 3, bg);
 }
 
 /// An arrow leaving a door, centred at (x, y).
-fn sign_out_symbol(c: &mut Canvas, x: i32, y: i32) {
-    c.fill_rect(x - 8, y - 8, 2, 16, theme::text());
-    c.fill_rect(x - 8, y - 8, 8, 2, theme::text());
-    c.fill_rect(x - 8, y + 6, 8, 2, theme::text());
-    c.fill_rect(x - 3, y - 1, 12, 2, theme::text());
+fn sign_out_symbol(c: &mut Canvas, x: i32, y: i32, fg: Color) {
+    c.fill_rect(x - 8, y - 8, 2, 16, fg);
+    c.fill_rect(x - 8, y - 8, 8, 2, fg);
+    c.fill_rect(x - 8, y + 6, 8, 2, fg);
+    c.fill_rect(x - 3, y - 1, 12, 2, fg);
     for i in 0..4 {
-        c.fill_rect(x + 5 - i, y - 4 + i, 2, 1, theme::text());
-        c.fill_rect(x + 5 - i, y + 3 - i, 2, 1, theme::text());
+        c.fill_rect(x + 5 - i, y - 4 + i, 2, 1, fg);
+        c.fill_rect(x + 5 - i, y + 3 - i, 2, 1, fg);
     }
 }
 

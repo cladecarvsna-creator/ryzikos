@@ -148,7 +148,7 @@ h2 { font-size: 20px; margin: 8px 0 16px; }
 </style>
 <div class="hero">
   <h1>EverBrowser</h1>
-  <p>Браузер EverOS: свой HTML, CSS и JavaScript (QuickJS), написанный с нуля на Rust.</p>
+  <p>Браузер RyzikOS: свой HTML, CSS и JavaScript (QuickJS), написанный с нуля на Rust.</p>
   <form action="https://html.duckduckgo.com/html/"><input type="text" name="q" placeholder="Поиск в DuckDuckGo"><input type="submit" value="Найти"></form>
 </div>
 <main>

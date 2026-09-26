@@ -72,7 +72,7 @@ pub fn draw(c: &mut Canvas) {
         rgb(0xff, 0x70, 0x70),
     );
 
-    c.text_centered(Rect::new(0, 8, w, 16), "EverOS graphics", 0xffffff);
+    c.text_centered(Rect::new(0, 8, w, 16), "RyzikOS graphics", 0xffffff);
 }
 
 fn palette(i: usize) -> u32 {

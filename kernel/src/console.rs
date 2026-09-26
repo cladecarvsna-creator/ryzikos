@@ -445,7 +445,7 @@ impl Console {
         fb.fill_rect(0, BAR_HEIGHT - 1, fb.width, 1, Rgb::new(0x9a, 0x8c, 0xff));
         fb.fill_circle(14, 12, 6, Color::Yellow.rgb());
         fb.fill_circle(14, 12, 3, Rgb::new(0x2a, 0x3c, 0x8c));
-        fb.draw_text(28, 4, "EverOS", Color::White.rgb(), None);
+        fb.draw_text(28, 4, "RyzikOS", Color::White.rgb(), None);
         let x = fb.width.saturating_sub((self.status_len + 1) * font::WIDTH);
         for (i, &c) in self.status[..self.status_len].iter().enumerate() {
             fb.draw_char(x + i * font::WIDTH, 4, c, Rgb::new(0xdc, 0xe0, 0xff), None);

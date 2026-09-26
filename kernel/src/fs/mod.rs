@@ -312,12 +312,12 @@ pub fn ensure_home(user: &str) {
     }
 }
 
-const WELCOME: &str = "Welcome to EverOS!\r\n\
+const WELCOME: &str = "Welcome to RyzikOS!\r\n\
 \r\n\
 This note is a file on the disk. Change it, press Ctrl+S, restart\r\n\
-EverOS and it will still be here.\r\n\
+RyzikOS and it will still be here.\r\n\
 \r\n\
-Добро пожаловать в EverOS! Этот текст хранится на диске.\r\n\
+Добро пожаловать в RyzikOS! Этот текст хранится на диске.\r\n\
 Раскладка переключается Alt+Shift.\r\n";
 
 /// A name in `dir` that is not taken yet: `base`, `base (2)`, ... with

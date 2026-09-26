@@ -33,7 +33,7 @@ impl Shell {
     }
 
     pub fn prompt(&self) {
-        console::print_colored(Color::LightGreen, format_args!("everos"));
+        console::print_colored(Color::LightGreen, format_args!("ryzikos"));
         console::print_colored(Color::LightGray, format_args!("> "));
     }
 
@@ -120,7 +120,7 @@ impl Shell {
                 println!("  echo    echo <text> > <file> writes a file");
                 println!("  notepad open Notepad (notepad <file> opens a file)");
                 println!("  explorer open File Explorer (explorer <folder>)");
-                println!("  settings open Settings; 'about' shows About EverOS");
+                println!("  settings open Settings; 'about' shows About RyzikOS");
                 println!("  theme   theme light | theme dark");
                 println!("  wallpaper <picture> or 'wallpaper next' changes the background");
                 println!("  restart restart the computer; 'shutdown' turns it off");
@@ -341,7 +341,7 @@ fn passwd(args: &str) {
 
 fn open(app: App) {
     if !gui::request_open(app) {
-        println!("No graphics: GRUB started EverOS in text mode.");
+        println!("No graphics: GRUB started RyzikOS in text mode.");
     }
 }
 

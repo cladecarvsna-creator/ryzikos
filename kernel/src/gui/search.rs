@@ -1,5 +1,5 @@
-//! Search from the taskbar, like Windows 11: typing in the search box
-//! next to Start finds apps (by their English and Russian names) and
+//! Search, opened from the dock: typing in the box at the top of the
+//! panel finds apps (by their English and Russian names) and
 //! files and folders on the disk. Results come in groups under the best
 //! match, the right side shows the chosen one with what can be done
 //! with it, and Enter opens it.
@@ -23,8 +23,10 @@ use crate::keyboard::Key;
 use crate::serial;
 
 pub const W: i32 = 800;
-pub const H: i32 = 580;
-const RADIUS: i32 = 8;
+pub const H: i32 = 636;
+/// The strip at the top with the search box.
+const FIELD: i32 = 60;
+const RADIUS: i32 = 16;
 /// How much of the disk is read, at most.
 const MAX_ENTRIES: usize = 4000;
 const MAX_DEPTH: usize = 10;
@@ -145,9 +147,20 @@ impl Search {
         }
     }
 
-    /// Where the panel sits: centred above the taskbar.
-    pub fn panel(width: i32, height: i32, taskbar: i32) -> Rect {
-        Rect::new((width - W) / 2, height - taskbar - 12 - H, W, H)
+    /// Where the panel sits: centred above the dock, under the menu bar.
+    pub fn panel(width: i32, height: i32, dock: i32, menu_bar: i32) -> Rect {
+        let y = (height - dock - 12 - H).max(menu_bar + 8);
+        Rect::new((width - W) / 2, y, W, H)
+    }
+
+    /// The search box at the top of the panel `p`.
+    pub fn field(p: Rect) -> Rect {
+        Rect::new(p.x + 24, p.y + 16, p.w - 48, 40)
+    }
+
+    /// The panel under the search box.
+    fn body(p: Rect) -> Rect {
+        Rect::new(p.x, p.y + FIELD, p.w, p.h - FIELD)
     }
 
     pub fn show(&mut self) {
@@ -367,11 +380,13 @@ impl Search {
     // ---- input -----------------------------------------------------------------
 
     pub fn set_hover(&mut self, p: Rect, top: &[App], x: i32, y: i32) -> bool {
+        let p = Self::body(p);
         let hover = self.target_at(p, top, x, y);
         core::mem::replace(&mut self.hover, hover) != hover
     }
 
     pub fn on_click(&mut self, p: Rect, top: &[App], pins: &[App], x: i32, y: i32) -> Action {
+        let p = Self::body(p);
         match self.target_at(p, top, x, y) {
             Some(Target::Tab(t)) => {
                 self.tab = t;
@@ -451,18 +466,57 @@ impl Search {
         }
     }
 
-    pub fn draw(&self, c: &mut Canvas, p: Rect, icons: &Icons, top: &[App], pins: &[App]) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &self,
+        c: &mut Canvas,
+        p: Rect,
+        icons: &Icons,
+        top: &[App],
+        pins: &[App],
+        blink: bool,
+    ) {
         c.shadow(p, RADIUS, 16, 4, 120);
         {
             let mut m = c.sub(Rect::new(0, 0, c.width, c.height));
             m.clip_round(p, RADIUS);
-            self.draw_inside(&mut m, p, icons, top, pins);
+            m.fill(p, theme::panel());
+            self.draw_field(&mut m, Self::field(p), blink);
+            self.draw_inside(&mut m, Self::body(p), icons, top, pins);
         }
         c.outline_round(p, RADIUS, theme::frame());
     }
 
+    /// The search box: a pill with the magnifier, the words typed and
+    /// the caret.
+    fn draw_field(&self, c: &mut Canvas, r: Rect, blink: bool) {
+        c.fill_round(r, r.h / 2, theme::control_lit());
+        c.outline_round(r, r.h / 2, theme::accent());
+        magnifier(c, r.x + 22, r.y + r.h / 2 - 2, 1, theme::text());
+        let ty = r.y + (r.h - UI.line_height) / 2;
+        let q = self.query.as_str();
+        if q.is_empty() {
+            let hint = "Search apps, files and folders";
+            c.draw_text(r.x + 42, ty, hint, theme::text_dim());
+            if blink {
+                c.fill_rect(r.x + 42, ty, 1, UI.line_height, theme::text());
+            }
+        } else {
+            // the end of the text when it is too long
+            let mut shown = q;
+            while UI.width(shown) > r.w - 64 {
+                let mut it = shown.chars();
+                it.next();
+                shown = it.as_str();
+            }
+            let w = c.draw_text(r.x + 42, ty, shown, theme::text());
+            if blink {
+                c.fill_rect(r.x + 43 + w, ty, 1, UI.line_height, theme::text());
+            }
+        }
+    }
+
     fn draw_inside(&self, m: &mut Canvas, p: Rect, icons: &Icons, top: &[App], pins: &[App]) {
-        m.fill(p, theme::panel());
         for (t, label, r) in Self::tab_rects(p) {
             self.highlight(m, Target::Tab(t), r);
             let on = t == self.tab;
@@ -574,8 +628,8 @@ impl Search {
             let label = match (t, hit) {
                 (Target::Open, _) => "Open",
                 (Target::Location, _) => "Open file location",
-                (Target::Pin, Hit::App(a)) if pins.contains(a) => "Unpin from taskbar",
-                _ => "Pin to taskbar",
+                (Target::Pin, Hit::App(a)) if pins.contains(a) => "Remove from Dock",
+                _ => "Keep in Dock",
             };
             let (ix, iy) = (r.x + 14, r.y + 11);
             match t {
@@ -614,7 +668,7 @@ fn score(name: &str, q: &str) -> Option<u32> {
 }
 
 /// A magnifying glass with its lens centred at (x, y), `k` times the
-/// size of the one in the taskbar box.
+/// size of the one in the search box.
 pub fn magnifier(c: &mut Canvas, x: i32, y: i32, k: i32, ink: u32) {
     let r = 6 * k;
     let lens = Rect::new(x - r, y - r, 2 * r, 2 * r);

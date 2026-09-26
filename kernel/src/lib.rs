@@ -46,7 +46,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     let boot = unsafe { multiboot::parse(multiboot_info) };
     CONSOLE.lock().init(boot.framebuffer);
 
-    console::print_colored(Color::LightCyan, format_args!("EverOS"));
+    console::print_colored(Color::LightCyan, format_args!("RyzikOS"));
     println!(" - a hobby operating system in ASM and Rust");
     println!();
 
@@ -82,7 +82,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
 
 /// The greeting at the top of the terminal.
 fn print_banner() {
-    console::print_colored(Color::LightCyan, format_args!("EverOS"));
+    console::print_colored(Color::LightCyan, format_args!("RyzikOS"));
     println!(" - a hobby operating system in ASM and Rust");
     println!("Type 'help' for a list of commands, 'paint' or 'calc' to open an app.");
     println!();
