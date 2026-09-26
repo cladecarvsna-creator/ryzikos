@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use super::canvas::{rgb, Canvas, Rect};
+use super::canvas::{mix, rgb, Canvas, Rect};
 use super::{App, APPS};
 use crate::serial;
 
@@ -36,7 +36,13 @@ struct Set([Vec<u32>; 3]);
 pub struct Icons {
     apps: Vec<Set>,
     pics: [Set; 4],
+    /// The RyzikOS logo at each of LOGO_SIZES.
+    logo: Vec<(usize, Vec<u32>)>,
 }
+
+/// Sizes the RyzikOS logo is made at: the boot screen, About, the dock,
+/// the launcher and the menu bar.
+pub const LOGO_SIZES: [usize; 5] = [128, 64, 48, 32, 20];
 
 static ICONS: AtomicPtr<Icons> = AtomicPtr::new(core::ptr::null_mut());
 
@@ -97,11 +103,16 @@ impl Icons {
             pic(include_bytes!("../../assets/icons/recycle-bin.png")),
             recycle_full(include_bytes!("../../assets/icons/recycle-bin.png")),
         ];
+        // not counted: the boot test knows how many app pictures there are
+        let logo = match Picture::from_file(include_bytes!("../../assets/ryzikos-logo.png")) {
+            Some(p) => LOGO_SIZES.iter().map(|&n| (n, p.shrink(n))).collect(),
+            None => Vec::new(),
+        };
         // for the boot test
         let mut line = crate::StackString::<40>::new();
         let _ = write!(line, "\nicons: loaded {} pictures\n", loaded);
         serial::write_str(line.as_str());
-        Icons { apps, pics }
+        Icons { apps, pics, logo }
     }
 
     fn app(&self, app: App, size: usize) -> &[u32] {
@@ -123,6 +134,28 @@ impl Icons {
 
     pub fn draw_small(&self, c: &mut Canvas, app: App, x: i32, y: i32) {
         self.draw(c, app, SMALL, x, y);
+    }
+
+    /// Draw the RyzikOS logo `size` pixels square (one of LOGO_SIZES).
+    pub fn draw_logo(&self, c: &mut Canvas, size: usize, x: i32, y: i32) {
+        self.draw_logo_faded(c, size, x, y, 256);
+    }
+
+    /// The logo faded in from black by `fade` (0 to 256).
+    pub fn draw_logo_faded(&self, c: &mut Canvas, size: usize, x: i32, y: i32, fade: u32) {
+        let Some((n, pixels)) = self.logo.iter().find(|(n, _)| *n == size) else {
+            return;
+        };
+        let n = *n as i32;
+        if fade >= 256 {
+            c.blit_alpha(x, y, n, n, pixels);
+            return;
+        }
+        let dim: Vec<u32> = pixels
+            .iter()
+            .map(|&p| (p & 0xff00_0000) | mix(0, p & 0xff_ffff, fade.min(255)))
+            .collect();
+        c.blit_alpha(x, y, n, n, &dim);
     }
 
     pub fn draw_pic(&self, c: &mut Canvas, pic: Pic, size: usize, x: i32, y: i32) {

@@ -1,12 +1,11 @@
-//! Starting, restarting and shutting down, with the animations Windows
-//! has: the logo with a ring of dots circling under it while EverOS
-//! starts, and "Restarting" or "Shutting down" with the same dots over
+//! Starting, restarting and shutting down: the RyzikOS logo with a ring
+//! of dots circling under it while the system starts, and "Restarting" or "Shutting down" with the same dots over
 //! the blurred wallpaper before the power goes.
 
 use super::anim::{self, ease_in_out, Tween, ONE};
 use super::canvas::{mix, rgb, Canvas, Rect};
 use super::text::{HEADING, UI};
-use super::{draw_start_logo_at, Desktop, Phase};
+use super::{Desktop, Phase};
 use crate::{interrupts, serial};
 
 /// How long the boot screen shows at least.
@@ -74,13 +73,13 @@ impl Desktop<'_> {
         let ms = elapsed_ms(since);
         // the logo fades in first
         let fade = (ms * ONE as u64 / 500).min(ONE as u64) as u32;
-        let (lx, ly) = (self.width / 2 - 60, self.height / 2 - 110);
-        draw_start_logo_at(c, lx, ly, 5, fade);
-        let label = Rect::new(0, ly + 140, self.width, 40);
+        let (lx, ly) = (self.width / 2 - 64, self.height / 2 - 120);
+        self.icons.draw_logo_faded(c, 128, lx, ly, fade);
+        let label = Rect::new(0, ly + 146, self.width, 40);
         c.text_centered_in(
             &HEADING,
             label,
-            "EverOS",
+            "RyzikOS",
             mix(0, 0xffffff, fade * 230 / 256),
         );
         if ms > 400 {

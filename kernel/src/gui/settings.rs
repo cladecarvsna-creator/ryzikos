@@ -1,7 +1,7 @@
 //! Settings, like the Windows 11 app: pages in a list on the left and
 //! cards of settings on the right. Most rows show how the system is set
 //! up; the keyboard layout can be switched here, the About page opens
-//! "About EverOS", and Personalization changes the look: light or dark
+//! "About RyzikOS", and Personalization changes the look: light or dark
 //! mode, the accent colour and the desktop background.
 
 use alloc::format;
@@ -271,7 +271,7 @@ impl Settings {
                     personalize::set_wallpaper(&path);
                 } else {
                     self.error =
-                        Some("EverOS can't show that file. Pick a PNG, JPEG or BMP picture.");
+                        Some("RyzikOS can't show that file. Pick a PNG, JPEG or BMP picture.");
                 }
                 true
             }
@@ -396,7 +396,7 @@ impl Settings {
                             &format!("{} MB", info.memory_mib),
                         ),
                         ("Storage", "Where your files are saved", &storage),
-                        ("Uptime", "Time since EverOS started", &uptime),
+                        ("Uptime", "Time since RyzikOS started", &uptime),
                     ],
                 );
             }
@@ -416,7 +416,7 @@ impl Settings {
                     &[
                         ("Ethernet", "Status", info.net.label()),
                         ("IPv4 address", "Given by DHCP", address),
-                        ("Network adapter", "The card EverOS talks to", adapter),
+                        ("Network adapter", "The card RyzikOS talks to", adapter),
                     ],
                 );
             }
@@ -470,15 +470,15 @@ impl Settings {
                 self.rows(
                     c,
                     &[
-                        ("Device name", "", "EVEROS-PC"),
+                        ("Device name", "", "RYZIKOS-PC"),
                         (
                             "Operating system",
                             "",
-                            &format!("EverOS {}", super::about::VERSION),
+                            &format!("RyzikOS {}", super::about::VERSION),
                         ),
                         ("Processor", "", "x86_64, long mode"),
                         ("Bootloader", "", info.bootloader),
-                        ("About EverOS", "Version, license and this computer", ""),
+                        ("About RyzikOS", "Version, license and this computer", ""),
                     ],
                 );
                 self.draw_button(c, Button::OpenAbout, "Open");

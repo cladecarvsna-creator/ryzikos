@@ -1,10 +1,10 @@
-//! "About EverOS", like winver on Windows: the name, the version and a
-//! few facts about this computer, with an OK button.
+//! "About RyzikOS": the logo, the name, the version and a few facts
+//! about this computer, with an OK button.
 
 use alloc::format;
 use alloc::string::String;
 
-use super::canvas::{rgb, Canvas, Rect};
+use super::canvas::{Canvas, Rect};
 use super::settings::Info;
 use super::text::{HEADING, UI_BOLD};
 use super::{icons, theme, App, MouseEvent, MouseKind};
@@ -48,12 +48,12 @@ impl About {
         c.fill_rect(0, 0, CLIENT_W, CLIENT_H, theme::light());
 
         // the logo and the name
-        draw_logo(c, 32, 30);
-        c.draw_text_in(&HEADING, 104, 36, "EverOS", theme::text());
+        icons::get().draw_logo(c, 64, 28, 26);
+        c.draw_text_in(&HEADING, 104, 36, "RyzikOS", theme::text());
         c.fill_rect(24, 110, CLIENT_W - 48, 1, theme::stroke());
 
         let mut y = 128;
-        c.draw_text_in(&UI_BOLD, 32, y, "EverOS", theme::text());
+        c.draw_text_in(&UI_BOLD, 32, y, "RyzikOS", theme::text());
         y += 22;
         c.draw_text(32, y, &format!("Version {}", VERSION), theme::text());
         y += 22;
@@ -83,21 +83,5 @@ impl About {
         icons::get().draw_large(c, App::About, CLIENT_W - 32 - 48, 36);
 
         theme::accent_button(c, ok_rect(), "OK", self.pressed);
-    }
-}
-
-/// The four blue squares of the Start button, three times bigger.
-pub fn draw_logo(c: &mut Canvas, x: i32, y: i32) {
-    for (i, color) in [
-        rgb(0x2a, 0x9c, 0xf4),
-        rgb(0x18, 0x84, 0xe8),
-        rgb(0x10, 0x74, 0xd8),
-        rgb(0x0a, 0x60, 0xc4),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (col, row) = ((i % 2) as i32, (i / 2) as i32);
-        c.fill_round(Rect::new(x + col * 30, y + row * 30, 28, 28), 4, color);
     }
 }

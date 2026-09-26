@@ -25,7 +25,7 @@ use crate::{interrupts, serial, users};
 const CELL_W: i32 = 92;
 const CELL_H: i32 = 102;
 const LEFT: i32 = 6;
-const TOP: i32 = 6;
+const TOP: i32 = super::MENUBAR_H + 6;
 /// The apps with a shortcut on the desktop.
 const SHORTCUTS: [App; 7] = [
     App::Browser,
@@ -541,9 +541,9 @@ impl Desktop<'_> {
             DeskItem::App(a) => {
                 let b = b.sep();
                 if self.pins.contains(a) {
-                    b.item("Unpin from taskbar", Cmd::Unpin(*a))
+                    b.item("Remove from Dock", Cmd::Unpin(*a))
                 } else {
-                    b.item("Pin to taskbar", Cmd::Pin(*a))
+                    b.item("Keep in Dock", Cmd::Pin(*a))
                 }
             }
             DeskItem::Entry { name, dir } => {

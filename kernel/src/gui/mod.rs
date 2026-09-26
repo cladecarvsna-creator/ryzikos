@@ -1,6 +1,7 @@
-//! The graphical desktop in the style of Windows 11: a background with a
-//! bloom, icons, windows with rounded corners and soft shadows, a
-//! centred taskbar with a start menu and a clock, and the mouse pointer.
+//! The RyzikOS desktop: a background with a bloom, icons, windows with
+//! rounded corners, round caption buttons and soft shadows, a menu bar
+//! along the top with the clock, a floating dock at the bottom with the
+//! launcher, and the mouse pointer.
 //!
 //! Everything is drawn into a back buffer in memory and then copied to
 //! the screen, so nothing flickers. Only the areas that changed (the
@@ -8,11 +9,11 @@
 //!
 //! Before the desktop comes the sign-in screen (login.rs). Windows zoom
 //! and fade when they open and close and fly to the taskbar when
-//! minimised, the start menu slides up, and highlights fade in and out.
+//! minimised, the launcher slides up, and highlights fade in and out.
 //! Animations follow the timer, and each frame redraws only what moves.
 //!
-//! The taskbar (taskbar.rs) has search (search.rs), pinned apps and Task
-//! View; windows live on virtual desktops (desktops.rs); the desktop has
+//! The dock and the menu bar (taskbar.rs) have search (search.rs), pinned
+//! apps and Task View; windows live on virtual desktops (desktops.rs); the desktop has
 //! icons with a selection rectangle and the Recycle Bin (deskicons.rs).
 
 mod about;
@@ -98,7 +99,10 @@ const LOCK: u8 = 0x40;
 const RESTART: u8 = 0x41;
 const SHUT_DOWN: u8 = 0x42;
 
-const TASKBAR_H: i32 = 48;
+/// The strip at the bottom the dock floats in; windows stay above it.
+const TASKBAR_H: i32 = 80;
+/// The menu bar along the top of the screen.
+const MENUBAR_H: i32 = 30;
 const TITLE_H: i32 = 32;
 const BORDER: i32 = 1;
 const WINDOW_RADIUS: i32 = 8;
@@ -148,7 +152,7 @@ impl App {
             App::Demo => "Graphics",
             App::Browser => "Browser",
             App::Settings => "Settings",
-            App::About => "About EverOS",
+            App::About => "About RyzikOS",
         }
     }
 
@@ -358,12 +362,14 @@ impl Window {
         Rect::new(self.rect.x, self.rect.y, self.rect.w, TITLE_H)
     }
 
+    /// The round caption buttons at the left of the title bar, with a
+    /// little room around the dots for the mouse.
     fn close_button(&self) -> Rect {
-        Rect::new(self.rect.right() - 46, self.rect.y, 46, TITLE_H)
+        caption_button(self.rect, 0)
     }
 
     fn minimize_button(&self) -> Rect {
-        self.close_button().offset(-46, 0)
+        caption_button(self.rect, 1)
     }
 
     /// Everything the window draws on, shadow included.
@@ -403,9 +409,10 @@ enum Phase {
 enum Hover {
     Minimize(App),
     Close(App),
-    /// A button in the middle of the taskbar.
+    /// A button in the dock.
     Task(TaskItem),
-    /// A tray button: the layout, quick settings, the clock or ^.
+    /// A menu bar button: the layout, quick settings, the clock, ^ or
+    /// the logo.
     Tray(usize),
     ShowDesktop,
     Quick(tray::Target),
@@ -531,7 +538,9 @@ impl<'a> Desktop<'a> {
             let (x, y) = app.default_position();
             // keep windows on small screens
             let x = x.min(width - w - 2 * BORDER).max(0);
-            let y = y.min(height - TASKBAR_H - h - TITLE_H - BORDER).max(0);
+            let y = y
+                .min(height - TASKBAR_H - h - TITLE_H - BORDER)
+                .max(MENUBAR_H);
             windows[app.index()].rect = Rect::new(x, y, w + 2 * BORDER, h + TITLE_H + BORDER);
         }
         let mut pool = SURFACES.take();
@@ -1206,7 +1215,7 @@ impl<'a> Desktop<'a> {
         let w = self.windows[app.index()];
         // keep part of the title bar on the screen
         let x = x.clamp(80 - w.rect.w, self.width - 80);
-        let y = y.clamp(0, self.height - TASKBAR_H - TITLE_H);
+        let y = y.clamp(MENUBAR_H, self.height - TASKBAR_H - TITLE_H);
         if (x, y) != (w.rect.x, w.rect.y) {
             self.damage(w.bounds());
             self.windows[app.index()].rect.x = x;
@@ -1463,6 +1472,7 @@ impl<'a> Desktop<'a> {
             let over_desktop = !self.tv.open
                 && self.popup.is_none()
                 && self.mouse_y < self.height - TASKBAR_H
+                && self.mouse_y >= MENUBAR_H
                 && self.window_at(self.mouse_x, self.mouse_y).is_none();
             self.icons_hover(self.mouse_x, self.mouse_y, over_desktop);
         }
@@ -1546,12 +1556,14 @@ impl<'a> Desktop<'a> {
                 };
             }
         }
+        if y < MENUBAR_H {
+            return (0..taskbar::TRAY_BUTTONS)
+                .find(|&i| self.tray_rect(i).contains(x, y))
+                .map(Hover::Tray);
+        }
         if y >= self.height - TASKBAR_H {
             if self.show_desktop_rect().contains(x, y) {
                 return Some(Hover::ShowDesktop);
-            }
-            if let Some(i) = (0..4).find(|&i| self.tray_rect(i).contains(x, y)) {
-                return Some(Hover::Tray(i));
             }
             return self.task_at(x, y).map(Hover::Task);
         }
@@ -1671,6 +1683,13 @@ impl<'a> Desktop<'a> {
                 return;
             }
         }
+        if y < MENUBAR_H {
+            if self.tv.open {
+                self.close_task_view(false);
+            }
+            self.taskbar_press(x, y, right);
+            return;
+        }
         if y >= self.height - TASKBAR_H {
             let task_view_button = self
                 .task_rect(TaskItem::TaskView)
@@ -1787,17 +1806,17 @@ impl<'a> Desktop<'a> {
 
     // ---- tray ------------------------------------------------------------------
 
-    /// Where a tray flyout sits: above the taskbar, at the right.
+    /// Where a tray flyout sits: under the menu bar, at the right.
     fn panel_rect(&self, panel: Panel) -> Rect {
         let (w, h) = panel.size();
         let x = if panel == Panel::Hidden {
-            // over its ^ button
+            // under its ^ button
             let b = self.tray_rect(3);
             b.x + b.w / 2 - w / 2
         } else {
-            self.width - 12 - w
+            self.width - 8 - w
         };
-        Rect::new(x, self.height - TASKBAR_H - 12 - h, w, h)
+        Rect::new(x, MENUBAR_H + 8, w, h)
     }
 
     fn damage_panel(&mut self) {
@@ -1866,7 +1885,7 @@ impl<'a> Desktop<'a> {
     }
 
     fn damage_tray(&mut self) {
-        self.damage(self.tray_rect(0).union(&self.tray_rect(2)));
+        self.damage(self.tray_rect(3).union(&self.tray_rect(2)));
     }
 
     fn open_menu(&mut self) {
@@ -1914,7 +1933,7 @@ impl<'a> Desktop<'a> {
     }
 
     fn menu_panel(&self) -> Rect {
-        StartMenu::panel(self.width, self.height, TASKBAR_H)
+        StartMenu::panel(self.width, self.height, TASKBAR_H, MENUBAR_H)
     }
 
     /// The start menu, with room for its shadow.
@@ -1922,8 +1941,12 @@ impl<'a> Desktop<'a> {
         self.menu_panel().inset(-SPREAD)
     }
 
+    /// The dock with its shadow, and the menu bar (it names the app in
+    /// front).
     fn damage_taskbar(&mut self) {
-        self.damage(Rect::new(0, self.height - TASKBAR_H, self.width, TASKBAR_H));
+        let top = self.height - TASKBAR_H - SPREAD;
+        self.damage(Rect::new(0, top, self.width, TASKBAR_H + SPREAD));
+        self.damage(Rect::new(0, 0, self.width, MENUBAR_H + 1));
     }
 
     // ---- drawing -----------------------------------------------------------
@@ -2045,8 +2068,8 @@ impl<'a> Desktop<'a> {
         }
         if self.search.open {
             let top = self.top_apps();
-            self.search
-                .draw(c, self.search_panel(), self.icons, &top, &self.pins);
+            let (p, blink) = (self.search_panel(), self.cursor_on);
+            self.search.draw(c, p, self.icons, &top, &self.pins, blink);
         }
         if self.panel.is_some() || self.panel_anim.value() > 0 {
             self.draw_panel(c, scratch);
@@ -2185,36 +2208,51 @@ impl<'a> Desktop<'a> {
         };
         let title_bar = Rect::new(r.x, r.y, r.w, TITLE_H);
         win.fill(title_bar, title_face);
-        self.icons.draw_small(win, app, r.x + 12, r.y + 8);
-        let text = if focused {
+        let ink = if focused {
             theme::text()
         } else {
             theme::text_dim()
         };
+        // the icon and title in the middle, clear of the buttons
         let title = self.window_title(app);
-        win.draw_text(r.x + 38, r.y + 8, &title, text);
+        let room = r.w - 2 * 76;
+        let title = search::fit(&title, room - 24);
+        let tw = text::UI.width(&title) + 24;
+        let tx = r.x + (r.w - tw) / 2;
+        self.icons.draw_small(win, app, tx, r.y + 8);
+        win.draw_text(tx + 24, r.y + 8, &title, ink);
 
-        // caption buttons: flat until the mouse is over them
-        let close = Rect::new(r.right() - 46, r.y, 46, TITLE_H);
-        let min = close.offset(-46, 0);
-        let lit = self.hover.level(Hover::Minimize(app)) as u32;
-        if lit > 0 {
-            win.fill(min, mix(title_face, theme::text(), 25 * lit / 256));
+        // round caption buttons: coral closes, amber minimises; grey on
+        // windows in the back until the mouse comes near
+        let near = self
+            .hover
+            .level(Hover::Close(app))
+            .max(self.hover.level(Hover::Minimize(app)));
+        for (k, hover, color) in [
+            (0, Hover::Close(app), rgb(0xf2, 0x5c, 0x54)),
+            (1, Hover::Minimize(app), rgb(0xff, 0x9f, 0x43)),
+        ] {
+            let b = caption_button(r, k);
+            let dot = Rect::new(b.x + 4, b.y + 4, 14, 14);
+            let face = if focused || near > 0 {
+                color
+            } else {
+                mix(title_face, theme::thumb(), 150)
+            };
+            win.fill_round(dot, 7, face);
+            win.outline_round_alpha(dot, 7, mix(face, 0, 60), ONE / 2);
+            let lit = self.hover.level(hover).max(near / 2) as u32;
+            if lit > 0 {
+                let ink = mix(face, rgb(0x3a, 0x1a, 0x10), lit * 255 / 256);
+                let (cx, cy) = (dot.x + 7, dot.y + 7);
+                if k == 0 {
+                    win.line(cx - 3, cy - 3, cx + 3, cy + 3, ink);
+                    win.line(cx + 3, cy - 3, cx - 3, cy + 3, ink);
+                } else {
+                    win.fill_rect(cx - 3, cy, 7, 1, ink);
+                }
+            }
         }
-        let (mx, my) = (min.x + 18, min.y + 16);
-        win.fill_rect(mx, my, 10, 1, text);
-
-        let lit = self.hover.level(Hover::Close(app)) as u32;
-        if lit > 0 {
-            win.fill(
-                close,
-                mix(title_face, rgb(0xc4, 0x2b, 0x1c), lit * 255 / 256),
-            );
-        }
-        let close_glyph = mix(text, 0xffffff, lit * 255 / 256);
-        let (cx, cy) = (close.x + 18, close.y + 11);
-        win.line(cx, cy, cx + 9, cy + 9, close_glyph);
-        win.line(cx + 9, cy, cx, cy + 9, close_glyph);
 
         let client = Rect::new(
             r.x + BORDER,
@@ -2236,7 +2274,8 @@ impl<'a> Desktop<'a> {
     /// The start menu, sliding up and fading in while it opens.
     fn draw_menu(&self, c: &mut Canvas, scratch: &mut [u32]) {
         let blink = self.cursor_on && self.start.open;
-        self.draw_sliding(c, scratch, self.menu_panel(), self.menu.value(), |c, p| {
+        let panel = self.menu_panel();
+        self.draw_sliding(c, scratch, panel, self.menu.value(), true, |c, p| {
             self.start.draw(c, p, self.icons, blink)
         });
     }
@@ -2253,7 +2292,7 @@ impl<'a> Desktop<'a> {
             // in place: the shadow and frame the sliding version adds
             c.shadow(r, 8, SPREAD, 4, 120);
         }
-        self.draw_sliding(c, scratch, r, self.panel_anim.value(), |c, p| {
+        self.draw_sliding(c, scratch, r, self.panel_anim.value(), false, |c, p| {
             let mut m = c.sub(Rect::new(0, 0, c.width, c.height));
             m.clip_round(p, 8);
             match panel {
@@ -2268,27 +2307,34 @@ impl<'a> Desktop<'a> {
     }
 
     /// A flyout `panel` that is `p` of the way in (ONE is fully shown):
-    /// lower down and see-through while it slides up from the taskbar.
+    /// see-through while it slides up out of the dock (`up`) or down out
+    /// of the menu bar.
     fn draw_sliding(
         &self,
         c: &mut Canvas,
         scratch: &mut [u32],
         panel: Rect,
         p: i32,
+        up: bool,
         draw: impl Fn(&mut Canvas, Rect),
     ) {
         if p >= ONE {
             draw(c, panel);
             return;
         }
+        let travel = if up { 48 } else { -24 };
         let r = panel.inset(-SPREAD);
-        if !c.visible(r.union(&r.offset(0, 48))) || p <= 0 {
+        if !c.visible(r.union(&r.offset(0, travel))) || p <= 0 {
             return;
         }
-        let frame = panel.offset(0, (ONE - p) * 48 / ONE);
-        // it rises from behind the taskbar
+        let frame = panel.offset(0, (ONE - p) * travel / ONE);
+        // it comes out from behind the dock or the menu bar
         let mut m = c.sub(Rect::new(0, 0, c.width, c.height));
-        m.clip_to(Rect::new(0, 0, self.width, self.height - TASKBAR_H));
+        m.clip_to(if up {
+            Rect::new(0, 0, self.width, self.height - TASKBAR_H)
+        } else {
+            Rect::new(0, MENUBAR_H, self.width, self.height - MENUBAR_H)
+        });
         m.shadow(frame, 8, SPREAD, 4, 120 * p / ONE);
         {
             let mut side = Canvas::new(scratch, panel.w as usize, panel.h as usize);
@@ -2400,6 +2446,11 @@ fn fade_row(out: &mut [u32], a: &[u32], b: &[u32], alpha: u32) {
     }
 }
 
+/// Caption button `k` (0 close, 1 minimise) of a window framed by `r`.
+fn caption_button(r: Rect, k: i32) -> Rect {
+    Rect::new(r.x + 10 + k * 22, r.y + 5, 22, 22)
+}
+
 /// Write one pixel to a framebuffer that is not 32-bit XRGB.
 fn put_pixel(fb: &Framebuffer, x: usize, y: usize, p: u32) {
     let color = crate::framebuffer::Rgb::new((p >> 16) as u8, (p >> 8) as u8, p as u8);
@@ -2450,33 +2501,6 @@ fn draw_wallpaper(c: &mut Canvas) {
     for (radius, alpha) in [(petal * 3 / 4, 50), (petal / 2, 70), (petal / 4, 90)] {
         let r = Rect::new(cx - radius, cy - radius, 2 * radius, 2 * radius);
         c.fill_round_alpha(r, radius, rgb(0xe4, 0xf2, 0xff), alpha);
-    }
-}
-
-/// The start button: four rounded squares.
-pub(crate) fn draw_start_logo(c: &mut Canvas, x: i32, y: i32) {
-    draw_start_logo_at(c, x, y, 1, 256);
-}
-
-/// The logo `scale` times bigger, faded in from black by `fade` (0 to 256).
-fn draw_start_logo_at(c: &mut Canvas, x: i32, y: i32, scale: i32, fade: u32) {
-    for (i, color) in [
-        rgb(0x2a, 0x9c, 0xf4),
-        rgb(0x18, 0x84, 0xe8),
-        rgb(0x10, 0x74, 0xd8),
-        rgb(0x0a, 0x60, 0xc4),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (col, row) = ((i % 2) as i32, (i / 2) as i32);
-        let r = Rect::new(
-            x + col * 12 * scale,
-            y + row * 12 * scale,
-            11 * scale,
-            11 * scale,
-        );
-        c.fill_round(r, 2 * scale, mix(0, color, fade));
     }
 }
 
@@ -2602,9 +2626,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
                 // the caret in the search box
                 desk.damage(desk.menu_rect());
             } else if desk.search.open {
-                if let Some(r) = desk.task_rect(TaskItem::Search) {
-                    desk.damage(r);
-                }
+                desk.damage(Search::field(desk.search_panel()));
             } else if let Some((i, _)) = &desk.desk_icons.renaming {
                 let r = desk.icon_rect(*i).inset(-8);
                 desk.damage(r);
