@@ -113,6 +113,7 @@ impl Shell {
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
                 println!("  devices list the PC's hardware and which parts have drivers");
+                println!("  install install RyzikOS on a hard disk (from the live CD)");
                 println!("  update  show the version and a downloaded update (update undo removes it)");
                 println!("  beep    play the volume sound on the ES1370 sound card");
                 println!("  store   open the App Store to install programs");
@@ -208,6 +209,30 @@ impl Shell {
                     gui::request_file(&self.path(args));
                 } else {
                     error("File not found");
+                }
+            }
+            "install" => {
+                // `install` opens the installer; `install erase 1` or
+                // `install keep 1` installs on Disk 1 without asking
+                let words: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+                if !crate::install::available() {
+                    error("Only the live CD can install RyzikOS");
+                } else if words.is_empty() {
+                    open(App::Installer);
+                } else if let (Some(&how @ ("erase" | "keep")), Some(Ok(n))) =
+                    (words.first(), words.get(1).map(|n| n.parse::<usize>()))
+                {
+                    let result = if n == 0 {
+                        Err(alloc::string::String::from("disks are numbered from 1"))
+                    } else {
+                        crate::install::install(n - 1, how == "erase", |_| {})
+                    };
+                    match result {
+                        Ok(()) => println!("RyzikOS is installed on Disk {}. Restart to start it.", n),
+                        Err(e) => error(&e),
+                    }
+                } else {
+                    error("Usage: install, or install erase|keep <disk number>");
                 }
             }
             "update" => {

@@ -1,8 +1,14 @@
 //! Reading the multiboot2 information structure GRUB passes to the kernel.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::framebuffer::{ColorField, Framebuffer};
+use crate::sync::IrqMutex;
 
 const TAG_END: u32 = 0;
+const TAG_CMDLINE: u32 = 1;
+const TAG_MODULE: u32 = 3;
 const TAG_BOOTLOADER_NAME: u32 = 2;
 const TAG_BASIC_MEMINFO: u32 = 4;
 const TAG_FRAMEBUFFER: u32 = 8;
@@ -14,6 +20,29 @@ pub struct BootInfo {
     pub bootloader: &'static str,
     /// Memory above 1 MiB, in KiB, as reported by the BIOS.
     pub upper_memory_kib: u32,
+}
+
+/// Files GRUB loaded next to the kernel (`module2` in grub.cfg), by
+/// name. The live CD brings the files the installer writes this way,
+/// so it works from a USB stick too, where RyzikOS can't read the stick.
+static MODULES: IrqMutex<Vec<(String, Vec<u8>)>> = IrqMutex::new(Vec::new());
+/// Whether GRUB started the kernel with "live" on its command line.
+static LIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A file GRUB loaded, copied.
+pub fn module(name: &str) -> Option<Vec<u8>> {
+    MODULES.lock().iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())
+}
+
+/// Started from the live CD (or USB stick) rather than an installed disk.
+pub fn live() -> bool {
+    LIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+unsafe fn c_string(addr: usize, max: usize) -> &'static str {
+    let bytes = core::slice::from_raw_parts(addr as *const u8, max);
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    core::str::from_utf8(&bytes[..len]).unwrap_or("")
 }
 
 unsafe fn read<T: Copy>(addr: usize) -> T {
@@ -39,6 +68,22 @@ pub unsafe fn parse(info: usize) -> BootInfo {
                 let bytes = core::slice::from_raw_parts((tag + 8) as *const u8, size - 8);
                 let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
                 boot.bootloader = core::str::from_utf8(&bytes[..len]).unwrap_or("unknown");
+            }
+            TAG_CMDLINE => {
+                let line = c_string(tag + 8, size - 8);
+                if line.split_whitespace().any(|w| w == "live") {
+                    LIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            TAG_MODULE => {
+                // copied into the heap: nothing else keeps that memory free
+                let start = read::<u32>(tag + 8) as usize;
+                let end = read::<u32>(tag + 12) as usize;
+                let name = c_string(tag + 16, size - 16);
+                if end > start {
+                    let data = core::slice::from_raw_parts(start as *const u8, end - start);
+                    MODULES.lock().push((String::from(name), data.to_vec()));
+                }
             }
             TAG_BASIC_MEMINFO => boot.upper_memory_kib = read::<u32>(tag + 12),
             TAG_FRAMEBUFFER if read::<u8>(tag + 29) == FRAMEBUFFER_TYPE_RGB => {

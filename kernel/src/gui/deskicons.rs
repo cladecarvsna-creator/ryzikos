@@ -318,6 +318,10 @@ impl Desktop<'_> {
         self.desk_icons.seen = Some(changes);
         let old_area = self.icons_area();
         let mut items = alloc::vec![DeskItem::ThisPc, DeskItem::Bin];
+        // the live CD's desktop starts the installer, like other live CDs
+        if crate::install::available() {
+            items.push(DeskItem::App(App::Installer));
+        }
         items.extend(SHORTCUTS.into_iter().map(DeskItem::App));
         if let Some(dir) = desktop_dir() {
             for info in fs::list(&dir).unwrap_or_default() {

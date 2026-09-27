@@ -35,6 +35,8 @@ pub enum Error {
     Full,
     Io,
     Unformatted,
+    /// Only zeros: never formatted.
+    Blank,
     NoDisk,
     ReadOnly,
 }
@@ -50,6 +52,7 @@ impl Error {
             Error::Full => "The disk is full.",
             Error::Io => "The disk could not be read or written.",
             Error::Unformatted => "The disk has an unknown format.",
+            Error::Blank => "The disk is blank.",
             Error::NoDisk => "There is no disk or disc here.",
             Error::ReadOnly => "The disc can only be read, not changed.",
         }
@@ -87,6 +90,8 @@ struct OtherDisk {
     detail: String,
     bytes: u64,
     volume: Option<fat::Volume>,
+    /// The disk itself, while it has no volume open.
+    disk: Option<drive::Disk>,
     status: &'static str,
 }
 
@@ -122,25 +127,56 @@ fn say(parts: &[&str]) {
     serial::write_str("\n");
 }
 
-/// Find the disks and drives and open their file systems. The first
-/// disk that holds FAT32 (or is blank, and gets formatted) keeps the
-/// system's files.
+/// A file an installed RyzikOS keeps on its disk; the disk that has it
+/// holds the system's files, and the live CD's GRUB looks for it.
+pub const INSTALLED_MARK: &str = "/boot/ryzikos-installed.txt";
+
+/// Find the disks and drives and open their file systems. From the live
+/// CD the system's files are kept in memory and no disk is changed.
+/// Otherwise the disk RyzikOS is installed on keeps them, or else the
+/// first disk that holds FAT32 (or is blank, and gets formatted).
 pub fn init() {
+    let live = crate::multiboot::live();
     let mut storage = Storage::None;
-    let mut volume = None;
     let (disks, cds) = drive::find_all();
     if disks.is_empty() {
         serial::write_str("fs: no hard disk\n");
     }
-    let mut others = Vec::new();
-    for (i, disk) in disks.into_iter().enumerate() {
+    if live {
+        serial::write_str("fs: live CD, the system's files are kept in memory\n");
+    }
+    // open every disk first, then pick the system disk
+    let mut opened = Vec::new();
+    for disk in disks {
         let detail = drive::describe(disk.model(), disk.bus());
         let bytes = disk.sectors() * 512;
         let mb = alloc::format!("{} MiB", bytes >> 20);
         say(&["fs: found disk ", &detail, ", ", &mb]);
-        let opened = fat::Volume::open(fat::Device::Disk(disk));
-        if volume.is_none() {
-            match opened {
+        let result = fat::Volume::open(fat::Device::Disk(disk), false);
+        opened.push((detail, bytes, result));
+    }
+    let system = if live {
+        None
+    } else {
+        let installed = opened.iter_mut().position(|(_, _, r)| {
+            r.as_mut().is_ok_and(|(v, _)| v.exists(INSTALLED_MARK))
+        });
+        installed.or_else(|| {
+            opened
+                .iter()
+                .position(|(_, _, r)| matches!(r, Ok(_) | Err((Error::Blank, _))))
+        })
+    };
+    let mut volume = None;
+    let mut others = Vec::new();
+    let mut number = 0;
+    for (i, (detail, bytes, result)) in opened.into_iter().enumerate() {
+        if Some(i) == system {
+            let result = match result {
+                Err((Error::Blank, dev)) => fat::Volume::open(dev, true),
+                r => r,
+            };
+            match result {
                 Ok((v, formatted)) => {
                     serial::write_str(if formatted {
                         "fs: formatted a blank disk as FAT32\n"
@@ -152,31 +188,18 @@ pub fn init() {
                     *SYSTEM_DETAIL.lock() = detail;
                     continue;
                 }
-                Err(e) => say(&["fs: disk not usable: ", e.message()]),
+                Err((e, dev)) => {
+                    say(&["fs: disk not usable: ", e.message()]);
+                    others.push(other(&mut number, detail, bytes, Err((e, dev))));
+                }
             }
+        } else {
+            others.push(other(&mut number, detail, bytes, result));
         }
-        let name = alloc::format!("Disk {}", i + 1);
-        let path = alloc::format!("/{}", name);
-        let (volume, status) = match opened {
-            Ok((v, formatted)) => {
-                say(&["fs: ", &name, if formatted { " was blank, formatted as FAT32" } else { " has FAT32" }]);
-                (Some(v), "FAT32")
-            }
-            Err(Error::Unformatted) => (None, "Unknown format, can't be opened"),
-            Err(_) => (None, "Can't be read"),
-        };
-        others.push(OtherDisk {
-            path,
-            name,
-            detail,
-            bytes,
-            volume,
-            status,
-        });
     }
     if volume.is_none() {
         let dev = fat::Device::Ram(vec![0; RAM_DISK]);
-        if let Ok((v, _)) = fat::Volume::open(dev) {
+        if let Ok((v, _)) = fat::Volume::open(dev, true) {
             serial::write_str("fs: files are kept in memory only\n");
             volume = Some(v);
             storage = Storage::Memory;
@@ -203,6 +226,41 @@ pub fn init() {
         .collect();
     *DISCS.lock() = slots;
     refresh_disc();
+}
+
+/// A disk that doesn't keep the system's files, at "/Disk N".
+fn other(
+    number: &mut usize,
+    detail: String,
+    bytes: u64,
+    result: Result<(fat::Volume, bool), (Error, fat::Device)>,
+) -> OtherDisk {
+    *number += 1;
+    let name = alloc::format!("Disk {}", number);
+    let path = alloc::format!("/{}", name);
+    let (volume, disk, status) = match result {
+        Ok((v, _)) => {
+            say(&["fs: ", &name, " has FAT32"]);
+            (Some(v), None, "FAT32")
+        }
+        Err((e, dev)) => {
+            let status = match e {
+                Error::Blank => "Blank",
+                Error::Unformatted => "Unknown format, can't be opened",
+                _ => "Can't be read",
+            };
+            (None, dev.into_disk(), status)
+        }
+    };
+    OtherDisk {
+        path,
+        name,
+        detail,
+        bytes,
+        volume,
+        disk,
+        status,
+    }
 }
 
 /// Read the disc in a drive, if one is in.
@@ -658,4 +716,117 @@ pub fn app_data(user: &str) -> String {
         let _ = create_dir(&dir);
     }
     dir
+}
+
+// ---- installing RyzikOS -------------------------------------------------------
+
+/// A disk RyzikOS can be installed on (one of the other disks).
+#[derive(Clone)]
+pub struct InstallDisk {
+    pub index: usize,
+    pub name: String,
+    /// Model and bus.
+    pub detail: String,
+    pub bytes: u64,
+    /// "FAT32", "Blank", "Unknown format..."
+    pub status: &'static str,
+    /// FAT32 in the first partition with room before it for the boot
+    /// loader: RyzikOS can go next to the files without formatting.
+    pub keep: bool,
+    /// Bytes in use, for a FAT32 disk.
+    pub used: u64,
+}
+
+/// The disks RyzikOS can be installed on. `boot_sectors` is how much
+/// room the boot loader needs at the start of the disk.
+pub fn install_disks(boot_sectors: u64) -> Vec<InstallDisk> {
+    let mut others = OTHERS.lock();
+    others
+        .iter_mut()
+        .enumerate()
+        .map(|(index, d)| {
+            let (keep, used) = match d.volume.as_mut() {
+                Some(v) => {
+                    let mut mbr = [0u8; 512];
+                    let first = v.read_sectors(0, &mut mbr).is_ok()
+                        && mbr[510..] == [0x55, 0xaa]
+                        && u32::from_le_bytes([mbr[454], mbr[455], mbr[456], mbr[457]]) as u64
+                            == v.start();
+                    (first && v.start() > boot_sectors, v.bytes - v.free_bytes())
+                }
+                None => (false, 0),
+            };
+            InstallDisk {
+                index,
+                name: d.name.clone(),
+                detail: d.detail.clone(),
+                bytes: d.volume.as_ref().map_or(d.bytes, |v| v.bytes),
+                status: d.status,
+                keep,
+                used,
+            }
+        })
+        .collect()
+}
+
+/// Where another disk's files are: "/Disk 1".
+pub fn other_path(index: usize) -> String {
+    OTHERS.lock()[index].path.clone()
+}
+
+/// Erase another disk: one FAT32 partition over all of it (up to 64 GiB).
+pub fn erase_disk(index: usize) -> Result<(), Error> {
+    let mut others = OTHERS.lock();
+    let d = others.get_mut(index).ok_or(Error::NoDisk)?;
+    let mut dev = match (d.volume.take(), d.disk.take()) {
+        (Some(v), _) => v.into_device(),
+        (None, Some(disk)) => fat::Device::Disk(disk),
+        (None, None) => return Err(Error::NoDisk),
+    };
+    let formatted = fat::format(&mut dev);
+    let result = match formatted {
+        Ok(_) => fat::Volume::open(dev, false),
+        Err(e) => Err((e, dev)),
+    };
+    CHANGES.fetch_add(1, Ordering::Relaxed);
+    match result {
+        Ok((v, _)) => {
+            d.volume = Some(v);
+            d.status = "FAT32";
+            say(&["fs: erased ", &d.name, ", now FAT32"]);
+            Ok(())
+        }
+        Err((e, dev)) => {
+            d.disk = dev.into_disk();
+            d.status = "Can't be read";
+            Err(e)
+        }
+    }
+}
+
+/// Make another disk start GRUB: `boot` (GRUB's boot.img) goes in the
+/// first sector, keeping the partition table, and `core` (core.img)
+/// right after it, before the first partition. The first partition is
+/// marked active.
+pub fn write_boot_loader(index: usize, boot: &[u8], core: &[u8]) -> Result<(), Error> {
+    let mut others = OTHERS.lock();
+    let v = others
+        .get_mut(index)
+        .and_then(|d| d.volume.as_mut())
+        .ok_or(Error::NoDisk)?;
+    let sectors = core.len().div_ceil(512) as u64;
+    if boot.len() < 440 || sectors + 1 >= v.start() {
+        return Err(Error::Full);
+    }
+    let mut mbr = [0u8; 512];
+    v.read_sectors(0, &mut mbr)?;
+    mbr[..440].copy_from_slice(&boot[..440]);
+    for p in 0..4 {
+        mbr[446 + p * 16] = if p == 0 { 0x80 } else { 0 };
+    }
+    let mut padded = core.to_vec();
+    padded.resize(sectors as usize * 512, 0);
+    v.write_sectors(1, &padded)?;
+    v.write_sectors(0, &mbr)?;
+    Ok(())
 }

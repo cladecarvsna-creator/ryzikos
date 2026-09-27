@@ -37,13 +37,22 @@ $(KERNEL): $(ASM_OBJ) $(RUST_LIB) linker.ld
 	ld -n --gc-sections -z noexecstack --no-warn-rwx-segments -T linker.ld -o $@ $(ASM_OBJ) $(RUST_LIB)
 	grub-file --is-x86-multiboot2 $@
 
+# GRUB for a hard disk RyzikOS is installed on: core.img goes in the
+# sectors before the first partition and holds every module it needs.
+GRUB_PC    := /usr/lib/grub/i386-pc
+DISK_GRUB  := biosdisk part_msdos fat normal multiboot2 gzio all_video test loadenv configfile echo
+
 MEDIA      := iso/media/Pictures iso/media/Videos $(wildcard programs/*)
 
 # The disc also carries sample photos and a video (made by
 # scripts/gen-media.py) and the programs, which RyzikOS reads at /Disc.
 $(ISO): $(KERNEL) iso/boot/grub/grub.cfg $(MEDIA)
 	@mkdir -p $(BUILD)/iso/boot/grub
-	cp $(KERNEL) $(BUILD)/iso/boot/kernel.bin
+	rm -f $(BUILD)/iso/boot/kernel.bin
+	gzip -9 -n -c $(KERNEL) > $(BUILD)/iso/boot/kernel.gz
+	@mkdir -p $(BUILD)/iso/boot/grub/ryzikos
+	grub-mkimage -O i386-pc -o $(BUILD)/iso/boot/grub/ryzikos/core.img -p '(,msdos1)/boot/grub' $(DISK_GRUB)
+	cp $(GRUB_PC)/boot.img $(BUILD)/iso/boot/grub/ryzikos/boot.img
 	sed 's/@BUILD@/$(RYZIKOS_BUILD)/' iso/boot/grub/grub.cfg > $(BUILD)/iso/boot/grub/grub.cfg
 	rm -rf $(BUILD)/iso/Pictures $(BUILD)/iso/Videos $(BUILD)/iso/Programs
 	cp -r iso/media/. $(BUILD)/iso/

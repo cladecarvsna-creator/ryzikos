@@ -84,8 +84,9 @@ pub struct StartMenu {
 }
 
 /// Apps in alphabetical order, for search results.
-const SORTED: [App; 12] = [
+const SORTED: [App; 14] = [
     App::About,
+    App::Installer,
     App::Store,
     App::Browser,
     App::Calculator,
@@ -97,6 +98,7 @@ const SORTED: [App; 12] = [
     App::Terminal,
     App::Notepad,
     App::Video,
+    App::Welcome,
 ];
 
 impl StartMenu {
@@ -156,7 +158,7 @@ impl StartMenu {
     fn matches(&self) -> impl Iterator<Item = App> + '_ {
         SORTED
             .into_iter()
-            .filter(|a| contains_ignore_case(a.title(), self.search.as_str()))
+            .filter(|a| a.listed() && contains_ignore_case(a.title(), self.search.as_str()))
     }
 
     // ---- layout ------------------------------------------------------------
