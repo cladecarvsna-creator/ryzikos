@@ -68,7 +68,7 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::About => include_bytes!("../../assets/icons/about.bmp"),
         App::Calculator => include_bytes!("../../assets/icons/calculator.png"),
         App::Browser => include_bytes!("../../assets/icons/browser.png"),
-        App::Demo => return None,
+        App::Photos | App::Video | App::Store | App::Program => return None,
     })
 }
 
@@ -556,16 +556,69 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
                 }
             }
         }
-        App::Demo => {
+        App::Photos => {
+            // a landscape: sky, sun and hills on a warm tile
             {
                 let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
                 s.clip_round(tile, 8);
-                s.vertical_gradient(tile, rgb(0x16, 0x20, 0x5c), rgb(0x6a, 0x1c, 0x5c));
+                s.vertical_gradient(tile, rgb(0x4c, 0xb8, 0xff), rgb(0xb8, 0xe4, 0xff));
+                s.fill_polygon(
+                    &[(x, y + 40), (x + 16, y + 22), (x + 30, y + 36), (x + 30, y + 48), (x, y + 48)],
+                    rgb(0x2e, 0xa0, 0x56),
+                );
+                s.fill_polygon(
+                    &[(x + 12, y + 48), (x + 32, y + 26), (x + 48, y + 42), (x + 48, y + 48)],
+                    rgb(0x1c, 0x7c, 0x44),
+                );
             }
-            c.fill_round(Rect::new(x + 15, y + 15, 18, 18), 9, rgb(0xff, 0xc0, 0x40));
-            c.fill_round(Rect::new(x + 9, y + 10, 8, 8), 4, rgb(0x60, 0xc0, 0xff));
-            c.fill_round(Rect::new(x + 33, y + 31, 6, 6), 3, rgb(0xff, 0x70, 0x70));
-            c.outline_round(tile, 8, rgb(0x10, 0x10, 0x30));
+            c.fill_round(Rect::new(x + 31, y + 8, 11, 11), 5, rgb(0xff, 0xd0, 0x40));
+            c.outline_round(tile, 8, rgb(0x1c, 0x6c, 0xb0));
+        }
+        App::Video => {
+            // a play button on a red-orange tile with film holes
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0xff, 0x6a, 0x3c), rgb(0xd8, 0x1c, 0x4c));
+            }
+            for i in 0..5 {
+                c.fill_round(Rect::new(x + 6 + i * 8, y + 4, 5, 4), 1, rgb(0xff, 0xe0, 0xd8));
+                c.fill_round(Rect::new(x + 6 + i * 8, y + 40, 5, 4), 1, rgb(0xff, 0xe0, 0xd8));
+            }
+            c.fill_polygon(&[(x + 18, y + 14), (x + 18, y + 34), (x + 35, y + 24)], 0xffffff);
+            c.outline_round(tile, 8, rgb(0x90, 0x10, 0x30));
+        }
+        App::Program => {
+            // a small window holding four tiles, on a teal tile
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0x2c, 0xc4, 0xb0), rgb(0x0e, 0x84, 0x90));
+            }
+            let win = Rect::new(x + 9, y + 10, 30, 28);
+            c.fill_round(win, 4, rgb(0xf6, 0xfa, 0xfa));
+            c.fill_rect(win.x + 2, win.y + 6, win.w - 4, 1, rgb(0xb0, 0xd0, 0xd0));
+            let colors = [
+                rgb(0xff, 0x8a, 0x3c),
+                rgb(0x3c, 0x9c, 0xff),
+                rgb(0x6c, 0xc8, 0x40),
+                rgb(0xb0, 0x6c, 0xf0),
+            ];
+            for (i, color) in colors.into_iter().enumerate() {
+                let (cx, cy) = ((i % 2) as i32, (i / 2) as i32);
+                c.fill_round(Rect::new(win.x + 5 + cx * 11, win.y + 10 + cy * 8, 9, 6), 2, color);
+            }
+            c.outline_round(tile, 8, rgb(0x06, 0x5c, 0x66));
+        }
+        App::Store => {
+            // a shopping bag on a violet to blue tile
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0x8a, 0x5c, 0xf0), rgb(0x1a, 0x73, 0xe8));
+            }
+            super::store::bag_icon(c, x - 4, y - 4);
+            c.outline_round(tile, 8, rgb(0x40, 0x24, 0x9c));
         }
         App::Browser => {
             // a globe on a blue tile

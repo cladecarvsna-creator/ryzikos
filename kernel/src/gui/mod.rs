@@ -21,7 +21,6 @@ mod anim;
 mod browser;
 mod calc;
 mod canvas;
-mod demo;
 mod deskicons;
 mod desktops;
 mod explorer;
@@ -33,6 +32,8 @@ mod login;
 mod notepad;
 mod paint;
 mod personalize;
+mod photos;
+mod store;
 mod picture;
 mod popup;
 mod power;
@@ -44,6 +45,7 @@ mod terminal;
 mod text;
 mod theme;
 mod tray;
+mod video;
 mod wallpaper;
 #[rustfmt::skip]
 pub mod webfont;
@@ -81,7 +83,7 @@ static BACK_BUFFER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 static WALLPAPER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// Window contents. Each app draws into its own part only when its content
 /// changes, so moving a window just copies pixels.
-static SURFACES: StaticBuffer<{ 6 * 1024 * 1024 }> = StaticBuffer::new();
+static SURFACES: StaticBuffer<{ 8 * 1024 * 1024 }> = StaticBuffer::new();
 /// The blurred wallpaper behind the sign-in panel.
 static BACKDROP: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// The screen being faded away when signing in or locking.
@@ -89,6 +91,8 @@ static SNAPSHOT: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// Where a zooming window or the sliding start menu is drawn before it
 /// is scaled and blended onto the screen.
 static SCRATCH: StaticBuffer<{ MAX_W * 1000 }> = StaticBuffer::new();
+
+pub use about::VERSION;
 
 /// Whether the desktop is running (the shell asks before opening apps).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -119,22 +123,29 @@ pub enum App {
     Notepad,
     Paint,
     Calculator,
-    Demo,
+    Photos,
+    Video,
+    Store,
     Browser,
     Settings,
     About,
+    /// A downloaded program (.rzapp) in its own window.
+    Program,
 }
 
-const APPS: [App; 9] = [
+const APPS: [App; 12] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
     App::Paint,
     App::Calculator,
-    App::Demo,
+    App::Photos,
+    App::Video,
+    App::Store,
     App::Browser,
     App::Settings,
     App::About,
+    App::Program,
 ];
 
 impl App {
@@ -145,14 +156,17 @@ impl App {
     fn title(self) -> &'static str {
         match self {
             App::Terminal => "Terminal",
-            App::Explorer => "File Explorer",
-            App::Notepad => "Notepad",
-            App::Paint => "Paint",
+            App::Explorer => "Files",
+            App::Notepad => "Text Editor",
+            App::Paint => "Draw",
             App::Calculator => "Calculator",
-            App::Demo => "Graphics",
+            App::Photos => "Photos",
+            App::Video => "Video Player",
+            App::Store => "App Store",
             App::Browser => "Browser",
             App::Settings => "Settings",
             App::About => "About RyzikOS",
+            App::Program => "Program",
         }
     }
 
@@ -163,10 +177,13 @@ impl App {
             App::Notepad => (notepad::CLIENT_W, notepad::CLIENT_H),
             App::Paint => (paint::CLIENT_W, paint::CLIENT_H),
             App::Calculator => (calc::CLIENT_W, calc::CLIENT_H),
-            App::Demo => (demo::CLIENT_W, demo::CLIENT_H),
+            App::Photos => (photos::CLIENT_W, photos::CLIENT_H),
+            App::Video => (video::CLIENT_W, video::CLIENT_H),
+            App::Store => (store::CLIENT_W, store::CLIENT_H),
             App::Browser => (browser::CLIENT_W, browser::CLIENT_H),
             App::Settings => (settings::CLIENT_W, settings::CLIENT_H),
             App::About => (about::CLIENT_W, about::CLIENT_H),
+            App::Program => (browser::PROGRAM_W, browser::PROGRAM_H),
         }
     }
 
@@ -178,10 +195,13 @@ impl App {
             App::Notepad => "notepad",
             App::Paint => "paint",
             App::Calculator => "calculator",
-            App::Demo => "graphics",
+            App::Photos => "photos",
+            App::Video => "video",
+            App::Store => "store",
             App::Browser => "browser",
             App::Settings => "settings",
             App::About => "about",
+            App::Program => "program",
         }
     }
 
@@ -193,14 +213,17 @@ impl App {
     fn keywords(self) -> &'static str {
         match self {
             App::Terminal => "cmd console shell command терминал консоль командная",
-            App::Explorer => "files folders this pc проводник файлы папки компьютер",
-            App::Notepad => "text editor блокнот текст редактор",
-            App::Paint => "draw picture рисование паинт",
+            App::Explorer => "files folders explorer computer проводник файлы папки компьютер",
+            App::Notepad => "notepad text editor блокнот текст редактор",
+            App::Paint => "paint draw picture рисование паинт рисовалка",
             App::Calculator => "calc калькулятор",
-            App::Demo => "demo графика демо",
+            App::Photos => "photo picture image viewer gallery фото фотографии просмотр картинки изображения галерея",
+            App::Video => "video movie player avi видео фильм плеер кино",
+            App::Store => "app store programs install games download магазин программы приложения установить игры скачать",
             App::Browser => "web internet browser браузер интернет",
             App::Settings => "control panel options параметры настройки",
             App::About => "about system winver о системе",
+            App::Program => "",
         }
     }
 
@@ -211,11 +234,20 @@ impl App {
             App::Notepad => (520, 170),
             App::Paint => (520, 150),
             App::Calculator => (1440, 90),
-            App::Demo => (760, 330),
+            App::Photos => (300, 60),
+            App::Video => (360, 90),
+            App::Store => (400, 80),
             App::Browser => (200, 40),
             App::Settings => (420, 140),
             App::About => (680, 280),
+            App::Program => (440, 110),
         }
+    }
+
+    /// Apps the launcher and search list: a program window only opens
+    /// with a program in it.
+    pub(super) fn listed(self) -> bool {
+        self != App::Program
     }
 }
 
@@ -488,6 +520,13 @@ pub struct Desktop<'a> {
     browser: Box<browser::Browser>,
     notepad: Box<notepad::Notepad>,
     explorer: Box<explorer::Explorer>,
+    photos: Box<photos::Photos>,
+    store: Box<store::Store>,
+    /// The window a program runs in.
+    program: Box<browser::Browser>,
+    /// Its title when last drawn, to notice when the title bar changes.
+    program_title: String,
+    video: Box<video::Video>,
     settings: settings::Settings,
     about: about::About,
     /// The window the mouse was last over, for hover highlights.
@@ -609,6 +648,11 @@ impl<'a> Desktop<'a> {
             browser: Box::new(browser::Browser::new()),
             notepad: Box::new(notepad::Notepad::new()),
             explorer: Box::new(explorer::Explorer::new()),
+            photos: Box::new(photos::Photos::new()),
+            store: Box::new(store::Store::new()),
+            program: Box::new(browser::Browser::program()),
+            program_title: String::new(),
+            video: Box::new(video::Video::new()),
             settings: settings::Settings::new(),
             about: about::About::new(),
             hover_app: None,
@@ -937,7 +981,7 @@ impl<'a> Desktop<'a> {
     /// in the title bar, so their whole window is drawn again.
     fn app_changed(&mut self, app: App) {
         match app {
-            App::Notepad | App::Explorer => {
+            App::Notepad | App::Explorer | App::Photos | App::Video | App::Program => {
                 self.stale[app.index()] = true;
                 self.damage_window(app);
             }
@@ -950,6 +994,9 @@ impl<'a> Desktop<'a> {
         match app {
             App::Notepad => self.notepad.title(),
             App::Explorer => self.explorer.title(),
+            App::Photos => self.photos.title(),
+            App::Video => self.video.title(),
+            App::Program => self.program.program_title(),
             _ => String::from(app.title()),
         }
     }
@@ -965,6 +1012,25 @@ impl<'a> Desktop<'a> {
         }
         if let Some(path) = self.explorer.open_request.take() {
             self.open_file(&path);
+        }
+        while let Some(req) = browser::take_desktop_request() {
+            if let Some(path) = req.strip_prefix("open:") {
+                if fs::is_dir(path) {
+                    self.show_folder(path);
+                } else {
+                    self.open_file(path);
+                }
+            } else if let Some(path) = req.strip_prefix("folder:") {
+                self.show_folder(path);
+            }
+        }
+        if let Some(path) = self.store.open_request.take() {
+            self.open_file(&path);
+        }
+        if let Some(path) = self.photos.edit_request.take() {
+            self.open(App::Paint);
+            self.paint.open_file(&path);
+            self.damage_client(App::Paint);
         }
         let file = FILE_REQUEST.lock().take();
         if let Some(path) = file {
@@ -991,12 +1057,46 @@ impl<'a> Desktop<'a> {
         self.damage_client(App::Settings);
     }
 
-    /// Open a file: pictures in Paint, everything else in Notepad.
+    /// Open a file: pictures in Photos, videos in Video Player, web
+    /// pages and downloaded programs in the browser, everything else in
+    /// the text editor.
     fn open_file(&mut self, path: &str) {
         if picture::is_picture(path) {
-            self.open(App::Paint);
-            self.paint.open_file(path);
-            self.damage_client(App::Paint);
+            self.open(App::Photos);
+            self.photos.open_file(path);
+            self.app_changed(App::Photos);
+            return;
+        }
+        if video::is_video(path) {
+            self.open(App::Video);
+            self.video.open_file(path);
+            self.app_changed(App::Video);
+            return;
+        }
+        if path.to_ascii_lowercase().ends_with(crate::web::LINK_EXT) {
+            // a desktop shortcut: open what it points at
+            match crate::web::link_target(path) {
+                Some(target) if !target.to_ascii_lowercase().ends_with(crate::web::LINK_EXT) => {
+                    if fs::exists(&target) {
+                        self.open_file(&target);
+                    } else {
+                        serial::write_str("desktop: the shortcut's program is gone\n");
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if path.to_ascii_lowercase().ends_with(crate::web::PROGRAM_EXT) {
+            self.open(App::Program);
+            self.program.open_file(path);
+            self.app_changed(App::Program);
+            return;
+        }
+        if browser::is_page(path) {
+            self.open(App::Browser);
+            self.browser.open_file(path);
+            self.damage_client(App::Browser);
             return;
         }
         self.open(App::Notepad);
@@ -1025,7 +1125,9 @@ impl<'a> Desktop<'a> {
             serial::write_str("\ndesktop: opened ");
             serial::write_str(app.title());
             serial::write_str("\n");
-            self.start.note_opened(app);
+            if app.listed() {
+                self.start.note_opened(app);
+            }
             self.animate(app, Motion::Zoom, ONE);
         } else if w.minimized {
             w.minimized = false;
@@ -1037,6 +1139,9 @@ impl<'a> Desktop<'a> {
         if app == App::Explorer {
             self.explorer.start();
             self.stale[app.index()] = true;
+        }
+        if app == App::Store {
+            self.store.start();
         }
         self.focus(app);
         self.damage_taskbar();
@@ -1051,6 +1156,12 @@ impl<'a> Desktop<'a> {
             self.focus(app);
             self.app_changed(app);
             return;
+        }
+        if app == App::Video {
+            self.video.stop();
+        }
+        if app == App::Program {
+            self.program.close_program();
         }
         self.damage_window(app);
         // it stays in the stacking order until it has faded out
@@ -1138,6 +1249,7 @@ impl<'a> Desktop<'a> {
                 self.desk_icons.forget();
                 self.refresh_icons();
             }
+            Cmd::ArrangeIcons => self.arrange_icons(),
             Cmd::Personalize => self.open_settings(settings::Page::Personalization),
             Cmd::DisplaySettings => self.open_settings(settings::Page::System),
             Cmd::NextBackground => next_wallpaper(),
@@ -1332,7 +1444,11 @@ impl<'a> Desktop<'a> {
             App::Explorer => self.explorer.on_key(key),
             App::Settings => self.settings.on_key(key),
             App::Paint => self.paint.on_key(key),
-            App::Demo | App::About => false,
+            App::Photos => self.photos.on_key(key),
+            App::Video => self.video.on_key(key),
+            App::Store => self.store.on_key(key),
+            App::Program => self.program.on_key(key),
+            App::About => false,
         };
         if changed {
             self.cursor_on = true;
@@ -1410,6 +1526,10 @@ impl<'a> Desktop<'a> {
                 Some(App::Explorer) => self.explorer.on_wheel(ev.wheel),
                 Some(App::Settings) => self.settings.on_wheel(ev.wheel),
                 Some(App::Paint) => self.paint.on_wheel(ev.wheel),
+                Some(App::Photos) => self.photos.on_wheel(ev.wheel),
+                Some(App::Video) => self.video.on_wheel(ev.wheel),
+                Some(App::Store) => self.store.on_wheel(ev.wheel),
+                Some(App::Program) => self.program.on_wheel(ev.wheel),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -1508,6 +1628,9 @@ impl<'a> Desktop<'a> {
             App::Browser => self.browser.on_hover(x, y),
             App::Notepad => self.notepad.on_hover(x, y),
             App::Explorer => self.explorer.on_hover(x, y),
+            App::Video => self.video.on_hover(x, y),
+            App::Store => self.store.on_hover(x, y),
+            App::Program => self.program.on_hover(x, y),
             _ => false,
         }
     }
@@ -1793,7 +1916,11 @@ impl<'a> Desktop<'a> {
             App::Explorer => self.explorer.on_mouse(ev),
             App::Settings => self.settings.on_mouse(ev),
             App::About => self.about.on_mouse(ev),
-            App::Terminal | App::Demo => false,
+            App::Photos => self.photos.on_mouse(ev),
+            App::Video => self.video.on_mouse(ev),
+            App::Store => self.store.on_mouse(ev),
+            App::Program => self.program.on_mouse(ev),
+            App::Terminal => false,
         };
         if core::mem::take(&mut self.settings.switch_layout) {
             self.toggle_layout = true;
@@ -1919,6 +2046,17 @@ impl<'a> Desktop<'a> {
                 self.close_menu();
                 self.open(app);
             }
+            start::Action::Program(i) => {
+                let path = self.start.program(i).map(String::from);
+                self.close_menu();
+                if let Some(path) = path {
+                    self.open_file(&path);
+                }
+            }
+            start::Action::GetPrograms => {
+                self.close_menu();
+                self.open(App::Store);
+            }
             start::Action::Restart => {
                 self.close_menu();
                 self.power(power::Power::Restart);
@@ -2019,7 +2157,10 @@ impl<'a> Desktop<'a> {
                     App::Terminal => self.terminal.draw(&mut c, focused && self.cursor_on),
                     App::Paint => self.paint.draw(&mut c),
                     App::Calculator => self.calc.draw(&mut c),
-                    App::Demo => demo::draw(&mut c),
+                    App::Photos => self.photos.draw(&mut c),
+                    App::Video => self.video.draw(&mut c),
+                    App::Store => self.store.draw(&mut c),
+                    App::Program => self.program.draw(&mut c),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
@@ -2351,7 +2492,7 @@ impl<'a> Desktop<'a> {
 
 /// What asking before emptying the Recycle Bin says.
 const CONFIRM_LINES: [&str; 1] =
-    ["Are you sure you want to permanently delete everything in the Recycle Bin?"];
+    ["Are you sure you want to permanently delete everything in the Trash?"];
 
 // ---- pictures ---------------------------------------------------------------
 
@@ -2611,6 +2752,26 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if desk.browser.tick() {
             desk.damage_client(App::Browser);
         }
+        if desk.windows[App::Photos.index()].open && desk.photos.tick() {
+            desk.app_changed(App::Photos);
+        }
+        if desk.windows[App::Video.index()].open && desk.video.tick() {
+            desk.app_changed(App::Video);
+        }
+        if desk.store.busy() && desk.store.tick() {
+            desk.app_changed(App::Store);
+        }
+        if desk.windows[App::Program.index()].open && desk.program.tick() {
+            let title = desk.program.program_title();
+            if title != desk.program_title {
+                desk.program_title = title;
+                // the title bar and the menu bar show the program's name
+                desk.app_changed(App::Program);
+                desk.damage_taskbar();
+            } else {
+                desk.damage_client(App::Program);
+            }
+        }
         if CONSOLE.lock().take_changed() {
             desk.damage_client(App::Terminal);
         }
@@ -2664,7 +2825,11 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
 
         desk.render();
         // pages loading in the background keep the loop going
-        let busy = desk.browser.busy();
+        let busy = desk.browser.busy()
+            || desk.program.busy()
+            || (desk.windows[App::Photos.index()].open && desk.photos.busy())
+            || (desk.windows[App::Video.index()].open && desk.video.busy())
+            || desk.store.busy();
         interrupts::wait_for_interrupt(|| {
             busy || !KEYBOARD_BYTES.is_empty() || !MOUSE_BYTES.is_empty() || !REQUESTS.is_empty()
         });

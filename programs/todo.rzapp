@@ -1,0 +1,54 @@
+<!doctype html>
+<title>To-Do List</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f4f1ea; color: #2a2620; }
+.card { width: 560px; margin: 32px auto; background: white; border-radius: 16px; border: 1px solid #e4ddcf; padding: 24px 28px; }
+h1 { font-size: 30px; margin: 0 0 4px; }
+p { color: #7a7266; margin: 0 0 18px; }
+form { display: flex; gap: 8px; margin-bottom: 14px; }
+input[type=text] { flex: 1; font-size: 17px; padding: 10px 14px; border: 1px solid #d8d0c0; border-radius: 10px; }
+button { background: #e0892b; color: white; border: 0; border-radius: 10px; padding: 10px 18px; font-size: 16px; font-weight: bold; }
+.item { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-top: 1px solid #f0ebe1; font-size: 17px; }
+.item span { flex: 1; }
+.done span { text-decoration: line-through; color: #a8a092; }
+.tick { width: 26px; height: 26px; border-radius: 13px; border: 2px solid #e0892b; text-align: center; line-height: 24px; color: white; font-weight: bold; }
+.done .tick { background: #e0892b; }
+.x { color: #b8ad9c; font-size: 20px; padding: 0 6px; }
+.foot { color: #7a7266; margin-top: 12px; font-size: 14px; }
+</style>
+<div class="card">
+  <h1>To-Do List</h1>
+  <p>Write what you need to do. The list is kept when you close the program.</p>
+  <form id="f"><input type="text" id="t" placeholder="Something to do"><button>Add</button></form>
+  <div id="list"></div>
+  <div class="foot" id="foot"></div>
+</div>
+<script>
+let items = [];
+try { items = JSON.parse(localStorage.getItem('todo-items') || '[]'); } catch (e) { items = []; }
+const save = () => localStorage.setItem('todo-items', JSON.stringify(items));
+function draw() {
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  items.forEach((it, i) => {
+    const row = document.createElement('div');
+    row.className = 'item' + (it.done ? ' done' : '');
+    const tick = document.createElement('div'); tick.className = 'tick'; tick.textContent = it.done ? 'v' : '';
+    tick.addEventListener('click', () => { it.done = !it.done; save(); draw(); });
+    const text = document.createElement('span'); text.textContent = it.text;
+    const x = document.createElement('div'); x.className = 'x'; x.textContent = 'x';
+    x.addEventListener('click', () => { items.splice(i, 1); save(); draw(); });
+    row.appendChild(tick); row.appendChild(text); row.appendChild(x);
+    list.appendChild(row);
+  });
+  const left = items.filter(i => !i.done).length;
+  document.getElementById('foot').textContent = items.length ? left + ' of ' + items.length + ' left to do' : 'Nothing to do yet.';
+}
+document.getElementById('f').addEventListener('submit', e => {
+  e.preventDefault();
+  const t = document.getElementById('t');
+  const v = t.value.trim();
+  if (v) { items.push({ text: v, done: false }); save(); t.value = ''; draw(); }
+});
+draw();
+</script>

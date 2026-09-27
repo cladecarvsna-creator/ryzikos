@@ -1,7 +1,7 @@
-//! The RyzikOS launcher, opened with the logo in the dock or the Win key:
-//! the logo and a search box along the top, every app in a grid of big
-//! icons, the apps opened lately as a row of chips, and at the bottom the
-//! user with round buttons to lock, sign out, restart and shut down.
+//! The RyzikOS launcher, opened with the logo in the dock or the Super
+//! key: the user and round buttons to lock, sign out, restart and shut
+//! down along the top, a wide search box, every app in a grid of big
+//! icons, and the programs downloaded in the browser as a row of chips.
 //!
 //! Typing while the launcher is open searches the apps; Enter starts the
 //! best match.
@@ -14,21 +14,25 @@ use super::theme;
 use super::{App, APPS};
 use crate::keyboard::Key;
 use crate::{users, StackString};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 pub const W: i32 = 620;
-pub const H: i32 = 516;
-const RADIUS: i32 = 20;
-const FOOTER: i32 = 76;
+pub const H: i32 = 476;
+const RADIUS: i32 = 24;
 const MAX_RECENT: usize = 4;
-const MAX_TARGETS: usize = 20;
+const MAX_TARGETS: usize = 24;
+const MAX_PROGRAMS: usize = 6;
 
 /// Apps in a row of the grid, and the size of each cell.
-const PER_ROW: usize = 5;
-const CELL_W: i32 = 114;
+const PER_ROW: usize = 6;
+const CELL_W: i32 = 96;
 const CELL_H: i32 = 96;
-/// Where the grid and the row of recent apps start, from the top.
-const GRID_Y: i32 = 108;
-const RECENT_Y: i32 = 336;
+/// Where the search box, the grid and the row of programs start, from
+/// the top.
+const SEARCH_Y: i32 = 78;
+const GRID_Y: i32 = 158;
+const PROGRAMS_Y: i32 = 382;
 
 /// What the desktop should do after an event.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,6 +41,10 @@ pub enum Action {
     /// The launcher changed and must be drawn again.
     Redraw,
     Open(App),
+    /// Run installed program `i` (see `StartMenu::program`).
+    Program(usize),
+    /// Open the browser's Programs page.
+    GetPrograms,
     Close,
     Restart,
     ShutDown,
@@ -48,8 +56,9 @@ pub enum Action {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
     App(App),
-    /// A chip in the row of recent apps.
-    Recent(App),
+    /// A chip in the row of programs.
+    Program(usize),
+    GetPrograms,
     Lock,
     SignOut,
     Restart,
@@ -70,19 +79,23 @@ pub struct StartMenu {
     /// Most recently opened first.
     recent: [Option<App>; MAX_RECENT],
     hover: Fader<Target>,
+    /// Installed programs (paths), read when the launcher opens.
+    programs: Vec<String>,
 }
 
 /// Apps in alphabetical order, for search results.
-const SORTED: [App; 9] = [
+const SORTED: [App; 11] = [
     App::About,
+    App::Store,
     App::Browser,
     App::Calculator,
-    App::Explorer,
-    App::Demo,
-    App::Notepad,
     App::Paint,
+    App::Explorer,
+    App::Photos,
     App::Settings,
     App::Terminal,
+    App::Notepad,
+    App::Video,
 ];
 
 impl StartMenu {
@@ -92,7 +105,13 @@ impl StartMenu {
             search: StackString::new(),
             recent: [None; MAX_RECENT],
             hover: Fader::new(anim::ms(120)),
+            programs: Vec::new(),
         }
+    }
+
+    /// The path of installed program `i`.
+    pub fn program(&self, i: usize) -> Option<&str> {
+        self.programs.get(i).map(|p| p.as_str())
     }
 
     /// Where the launcher sits on a screen of the given size: centred
@@ -106,6 +125,8 @@ impl StartMenu {
         self.open = true;
         self.search.clear();
         self.hover.jump(None);
+        self.programs = crate::web::installed_programs();
+        self.programs.truncate(MAX_PROGRAMS);
     }
 
     /// Fade hover highlights. Returns whether the launcher must be redrawn.
@@ -140,23 +161,23 @@ impl StartMenu {
     // ---- layout ------------------------------------------------------------
 
     fn search_box(p: Rect) -> Rect {
-        Rect::new(p.right() - 24 - 280, p.y + 22, 280, 36)
+        Rect::new(p.x + 24, p.y + SEARCH_Y, p.w - 48, 40)
     }
 
-    fn footer(p: Rect) -> Rect {
-        Rect::new(p.x, p.bottom() - FOOTER, p.w, FOOTER)
-    }
-
-    /// Round power button `i` of POWER in the footer.
+    /// Round power button `i` of POWER, at the top right.
     fn power_button(p: Rect, i: usize) -> Rect {
-        let f = Self::footer(p);
-        let x = f.right() - 24 - 4 * 40 - 3 * 10 + i as i32 * 50;
-        Rect::new(x, f.y + (f.h - 40) / 2, 40, 40)
+        let x = p.right() - 24 - 4 * 40 - 3 * 10 + i as i32 * 50;
+        Rect::new(x, p.y + 20, 40, 40)
     }
 
-    /// The chip of a recent app, `x` pixels from the left edge.
-    fn chip(p: Rect, x: i32, app: App) -> Rect {
-        Rect::new(p.x + x, p.y + RECENT_Y + 30, UI.width(app.title()) + 52, 40)
+    /// A chip in the row of programs, `x` pixels from the left edge.
+    fn chip(p: Rect, x: i32, label: &str) -> Rect {
+        Rect::new(p.x + x, p.y + PROGRAMS_Y + 30, UI.width(label) + 52, 40)
+    }
+
+    fn program_name(path: &str) -> &str {
+        let name = crate::fs::file_name(path);
+        name.strip_suffix(crate::web::PROGRAM_EXT).unwrap_or(name)
     }
 
     /// Everything clickable, and where it is.
@@ -177,13 +198,13 @@ impl StartMenu {
             for (i, app) in self.matches().enumerate() {
                 push(
                     Target::App(app),
-                    Rect::new(p.x + 24, p.y + 108 + i as i32 * 52, p.w - 48, 48),
+                    Rect::new(p.x + 24, p.y + GRID_Y + i as i32 * 52, p.w - 48, 48),
                 );
             }
             return (out, n);
         }
         let left = p.x + (p.w - PER_ROW as i32 * CELL_W) / 2;
-        for (i, app) in APPS.into_iter().enumerate() {
+        for (i, app) in APPS.into_iter().filter(|a| a.listed()).enumerate() {
             let (col, row) = ((i % PER_ROW) as i32, (i / PER_ROW) as i32);
             push(
                 Target::App(app),
@@ -196,13 +217,17 @@ impl StartMenu {
             );
         }
         let mut x = 24;
-        for app in self.recent() {
-            let r = Self::chip(p, x, app);
+        for (i, path) in self.programs.iter().enumerate() {
+            let r = Self::chip(p, x, Self::program_name(path));
             if r.right() > p.right() - 24 {
                 break;
             }
-            push(Target::Recent(app), r);
+            push(Target::Program(i), r);
             x += r.w + 10;
+        }
+        let get = Self::chip(p, x, "Get programs");
+        if get.right() <= p.right() - 24 {
+            push(Target::GetPrograms, get);
         }
         (out, n)
     }
@@ -225,7 +250,9 @@ impl StartMenu {
 
     pub fn on_click(&mut self, p: Rect, x: i32, y: i32) -> Action {
         match self.target_at(p, x, y) {
-            Some(Target::App(app) | Target::Recent(app)) => Action::Open(app),
+            Some(Target::App(app)) => Action::Open(app),
+            Some(Target::Program(i)) => Action::Program(i),
+            Some(Target::GetPrograms) => Action::GetPrograms,
             Some(Target::Lock) => Action::Lock,
             Some(Target::SignOut) => Action::SignOut,
             Some(Target::Restart) => Action::Restart,
@@ -263,16 +290,20 @@ impl StartMenu {
             let mut m = c.sub(Rect::new(0, 0, c.width, c.height));
             m.clip_round(p, RADIUS);
             m.fill_round_alpha(p, 0, theme::panel(), 250);
-            // the logo and the name, with the search box beside them
-            icons.draw_logo(&mut m, 32, p.x + 24, p.y + 24);
-            m.draw_text_in(&UI_BOLD, p.x + 66, p.y + 30, "RyzikOS", theme::text());
+            // a band of the accent colour behind the user and the buttons
+            let band = Rect::new(p.x, p.y, p.w, 150);
+            m.vertical_gradient(
+                band,
+                mix(theme::panel(), theme::accent(), 60),
+                theme::panel(),
+            );
+            self.draw_header(&mut m, p, icons);
             self.draw_search(&mut m, p, blink);
             if self.search.as_str().is_empty() {
                 self.draw_grid(&mut m, p, icons);
             } else {
                 self.draw_results(&mut m, p, icons);
             }
-            self.draw_footer(&mut m, p);
         }
         c.outline_round(p, RADIUS, theme::frame());
     }
@@ -311,7 +342,7 @@ impl StartMenu {
 
     fn draw_results(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
         let heading = "Best match";
-        c.draw_text_in(&UI_BOLD, p.x + 32, p.y + 80, heading, theme::text());
+        c.draw_text_in(&UI_BOLD, p.x + 32, p.y + GRID_Y - 30, heading, theme::text());
         let (targets, n) = self.targets(p);
         let mut first = true;
         for &(t, r) in &targets[..n] {
@@ -330,17 +361,16 @@ impl StartMenu {
         }
         if first {
             let text = "No apps match your search";
-            c.draw_text(p.x + 32, p.y + 112, text, theme::text_dim());
+            c.draw_text(p.x + 32, p.y + GRID_Y, text, theme::text_dim());
         }
     }
 
     fn draw_grid(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
-        c.draw_text_in(&UI_BOLD, p.x + 32, p.y + 80, "Apps", theme::text());
-        let rec_y = p.y + RECENT_Y;
+        c.draw_text_in(&UI_BOLD, p.x + 32, p.y + GRID_Y - 30, "Apps", theme::text());
+        let rec_y = p.y + PROGRAMS_Y;
         c.fill_rect(p.x + 24, rec_y - 12, p.w - 48, 1, theme::stroke());
-        c.draw_text_in(&UI_BOLD, p.x + 32, rec_y, "Recent", theme::text());
+        c.draw_text_in(&UI_BOLD, p.x + 32, rec_y, "Programs", theme::text());
         let (targets, n) = self.targets(p);
-        let mut recent = 0;
         for &(t, r) in &targets[..n] {
             match t {
                 Target::App(app) => {
@@ -352,28 +382,36 @@ impl StartMenu {
                     let label = Rect::new(r.x, r.y + 64, r.w, 20);
                     c.text_centered(label, app.title(), theme::text());
                 }
-                Target::Recent(app) => {
-                    recent += 1;
+                Target::Program(i) => {
                     let face = mix(theme::control(), theme::control_lit(), self.lit(t));
                     c.fill_round(r, r.h / 2, face);
                     c.outline_round(r, r.h / 2, theme::stroke());
-                    icons.draw_medium(c, app, r.x + 12, r.y + 8);
-                    c.draw_text(r.x + 42, r.y + 11, app.title(), theme::text());
+                    let name = Self::program_name(&self.programs[i]);
+                    // the first letter on a round tile stands for the icon
+                    let tile = Rect::new(r.x + 10, r.y + 8, 24, 24);
+                    c.fill_round(tile, 12, theme::accent());
+                    let mut buf = [0u8; 4];
+                    let first = name.chars().next().unwrap_or('?').to_ascii_uppercase();
+                    c.text_centered_in(&UI_BOLD, tile, first.encode_utf8(&mut buf), theme::on_accent());
+                    c.draw_text(r.x + 42, r.y + 11, name, theme::text());
+                }
+                Target::GetPrograms => {
+                    let face = mix(theme::accent_light(), theme::control_lit(), self.lit(t) / 2);
+                    c.fill_round(r, r.h / 2, face);
+                    c.outline_round(r, r.h / 2, mix(theme::accent(), theme::panel(), 140));
+                    let (cx, cy) = (r.x + 22, r.y + 20);
+                    c.fill_rect(cx - 6, cy - 1, 12, 2, theme::accent());
+                    c.fill_rect(cx - 1, cy - 6, 2, 12, theme::accent());
+                    c.draw_text(r.x + 42, r.y + 11, "Get programs", theme::accent());
                 }
                 _ => {}
             }
         }
-        if recent == 0 {
-            let text = "Apps you open will show up here.";
-            c.draw_text(p.x + 32, rec_y + 40, text, theme::text_dim());
-        }
     }
 
-    fn draw_footer(&self, c: &mut Canvas, p: Rect) {
-        let f = Self::footer(p);
-        c.fill(f, theme::footer());
-        c.fill_rect(f.x, f.y, f.w, 1, theme::stroke());
-
+    /// The user at the top left, the power buttons at the top right.
+    fn draw_header(&self, c: &mut Canvas, p: Rect, icons: &Icons) {
+        let f = Rect::new(p.x, p.y + 2, p.w, 76);
         let avatar = Rect::new(f.x + 24, f.y + 18, 40, 40);
         c.fill_round(avatar, 20, theme::accent());
         let name = users::current_name().unwrap_or_default();
@@ -386,10 +424,12 @@ impl StartMenu {
             .to_ascii_uppercase()
             .encode_utf8(&mut initial);
         c.text_centered_in(&UI_BOLD, avatar, initial, theme::on_accent());
+        // the logo sits on the avatar's corner
+        icons.draw_logo(c, 20, avatar.right() - 14, avatar.bottom() - 16);
         c.draw_text_in(&UI_BOLD, f.x + 76, f.y + 18, name.as_str(), theme::text());
 
         // under the name: what the button under the mouse does
-        let mut hint = "Signed in";
+        let mut hint = "RyzikOS 1.0";
         for (i, (t, label)) in POWER.into_iter().enumerate() {
             let r = Self::power_button(p, i);
             let lit = self.lit(t);

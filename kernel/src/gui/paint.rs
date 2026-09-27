@@ -254,7 +254,7 @@ impl Paint {
             // nowhere yet: straight into Pictures, no questions
             let dir = Self::pictures_folder();
             let _ = fs::create_dir(&dir);
-            let name = fs::unique_name(&dir, "Paint background", ".png");
+            let name = fs::unique_name(&dir, "Drawing background", ".png");
             if !self.save_to(&fs::join(&dir, &name)) {
                 return;
             }

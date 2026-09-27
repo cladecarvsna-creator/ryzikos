@@ -106,9 +106,14 @@ impl Shell {
                 println!("  clear   clear the screen (also Ctrl+L)");
                 println!("  echo    print the arguments");
                 println!("  info    screen, memory and uptime");
-                println!("  paint   open Paint");
+                println!("  paint   open Draw");
                 println!("  calc    open the calculator");
-                println!("  gfx     graphics demo");
+                println!("  photos  open Photos (photos <picture> shows one)");
+                println!("  video   open Video Player (video <file.avi> plays one)");
+                println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
+                println!("  drives  list the disks and CD/DVD drives");
+                println!("  store   open the App Store to install programs");
+                println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
                 println!("  browser open the web browser (browser <address> goes there)");
                 println!("  fetch   download a web page and show its title and links");
                 println!("  exit    close the terminal window");
@@ -118,8 +123,8 @@ impl Shell {
                 println!("  lock    show the lock screen");
                 println!("  ls      list a folder; cd, pwd, mkdir, rm, cat work with files");
                 println!("  echo    echo <text> > <file> writes a file");
-                println!("  notepad open Notepad (notepad <file> opens a file)");
-                println!("  explorer open File Explorer (explorer <folder>)");
+                println!("  notepad open Text Editor (notepad <file> opens a file)");
+                println!("  explorer open Files (explorer <folder>)");
                 println!("  settings open Settings; 'about' shows About RyzikOS");
                 println!("  theme   theme light | theme dark");
                 println!("  wallpaper <picture> or 'wallpaper next' changes the background");
@@ -177,7 +182,43 @@ impl Shell {
             "colors" => colors(),
             "paint" => open(App::Paint),
             "calc" => open(App::Calculator),
-            "gfx" => open(App::Demo),
+            "photos" | "video" => {
+                let app = if command == "photos" { App::Photos } else { App::Video };
+                if !args.trim().is_empty() {
+                    gui::request_file(&self.path(args));
+                }
+                open(app);
+            }
+            "store" | "apps" => open(App::Store),
+            "open" | "run" => {
+                // the desktop picks the app: programs get their own window
+                if args.trim().is_empty() {
+                    error("Usage: open <file>");
+                } else if fs::exists(&self.path(args)) {
+                    gui::request_file(&self.path(args));
+                } else {
+                    error("File not found");
+                }
+            }
+            "drives" | "disks" => {
+                fs::refresh_disc();
+                for d in fs::drives() {
+                    let size = if d.bytes > 0 {
+                        alloc::format!("{} MB", d.bytes / (1024 * 1024))
+                    } else {
+                        alloc::string::String::new()
+                    };
+                    println!("{:<16} {:<10} {:<24} {} {}", d.name, if d.ready { d.path.as_str() } else { "-" }, d.status, size, d.detail);
+                }
+            }
+            "disc" | "cd-rom" => {
+                if fs::refresh_disc() {
+                    println!("Disc: {}", fs::disc_label().unwrap_or_default());
+                    ls(fs::DISC_PATH);
+                } else {
+                    println!("There is no disc in the drive.");
+                }
+            }
             "browser" | "web" => {
                 if !args.trim().is_empty() {
                     gui::request_address(args.trim());

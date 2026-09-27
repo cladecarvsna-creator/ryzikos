@@ -23,6 +23,7 @@ truncate -s 64M "$disk"
 mkdir "$dir/www"
 echo '<html><head><title>EverOS test page</title></head><body><h1>It works</h1><a href="/x">x</a></body></html>' \
     > "$dir/www/index.html"
+echo '<title>Test program</title><p>hello</p>' > "$dir/www/test.rzapp"
 python3 -m http.server 8123 --bind 127.0.0.1 --directory "$dir/www" > /dev/null 2>&1 &
 web=$!
 
@@ -81,6 +82,8 @@ sign_in() {
 
 wait_for "fs: formatted a blank disk as FAT32" || fail "the blank disk was not formatted"
 echo "disk formatted"
+wait_for "fs: disc in the drive: RYZIKOS_1_0" || fail "the CD drive or the disc was not found"
+echo "the RyzikOS disc is readable"
 sign_in
 
 wait_for "desktop: opened Terminal" || fail "the desktop did not start"
@@ -106,11 +109,27 @@ wait_for "search: indexed" || fail "the taskbar search did not open"
 type_keys t e r m ret
 sleep 1
 
+# the browser downloads a program into Programs
+type_keys b r o w s e r spc 1 0 dot 0 dot 2 dot 2 shift-semicolon 8 1 2 3 slash t e s t dot r z a p p ret
+wait_for "browser: downloaded test.rzapp" || fail "the browser did not download the program"
+echo "the browser downloads programs"
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
+
+# Video Player plays the demo video from the disc
+type_keys v i d e o spc slash shift-d i s c slash shift-v i d e o s slash shift-r y z i k shift-o shift-s spc shift-d e m o dot a v i ret
+wait_for "video: opened RyzikOS Demo.avi, 250 frames" || fail "Video Player could not open the video on the disc"
+echo "Video Player plays video from the disc"
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
+
 # write a file on the disk, in root's home folder, and open it in
 # Notepad (which then has the keyboard)
 type_keys e c h o spc s a v e d minus o k spc shift-dot spc s a v e d dot t x t ret
 type_keys n o t e p a d spc s a v e d dot t x t ret
-wait_for "desktop: opened Notepad" || fail "the shell could not open Notepad"
+wait_for "desktop: opened Text Editor" || fail "the shell could not open the Text Editor"
 echo "file written, apps open from the shell"
 
 # start again from the same disk: the file must still be there

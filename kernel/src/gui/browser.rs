@@ -31,6 +31,9 @@ use crate::{interrupts, net};
 
 pub const CLIENT_W: i32 = 1500;
 pub const CLIENT_H: i32 = 900;
+/// A program's own window: only the page, no tabs, toolbar or status bar.
+pub const PROGRAM_W: i32 = 960;
+pub const PROGRAM_H: i32 = 720;
 
 const TABS_H: i32 = 40;
 const TOOLBAR_H: i32 = 48;
@@ -95,6 +98,8 @@ type ImagesDone = Rc<RefCell<Vec<(String, Image)>>>;
 
 struct Tab {
     id: u32,
+    /// In a program's own window: no toolbar, the page is everything.
+    bare: bool,
     page: Page,
     scroll: i32,
     history: Vec<Nav>,
@@ -141,6 +146,8 @@ struct Drawn {
 }
 
 pub struct Browser {
+    /// A program's own window rather than the browser.
+    bare: bool,
     tabs: Vec<Tab>,
     active: usize,
     strip_pressed: Option<StripPart>,
@@ -164,6 +171,27 @@ pub fn request_address(address: &str) {
     *REQUESTED.lock() = Some(address.to_string());
 }
 
+/// Files and folders pages asked the desktop to open (`ryzikos:` links).
+static DESKTOP_REQUESTS: IrqMutex<Vec<String>> = IrqMutex::new(Vec::new());
+
+/// What a page asked the desktop for: `open:<path>` or `folder:<path>`.
+pub fn take_desktop_request() -> Option<String> {
+    let mut q = DESKTOP_REQUESTS.lock();
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.remove(0))
+    }
+}
+
+/// Whether a file is a web page or a downloaded program, for the browser.
+pub fn is_page(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".html", ".htm", web::PROGRAM_EXT]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 /// An anti-aliased line `width` pixels thick, for toolbar icons.
 fn stroke(c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Color) {
     let (minx, maxx) = (x0.min(x1) - width, x0.max(x1) + width);
@@ -182,6 +210,15 @@ fn stroke(c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color:
             }
         }
     }
+}
+
+/// The arrow in the corner of a desktop shortcut's icon.
+pub fn shortcut_arrow(c: &mut Canvas, r: Rect) {
+    let (x, y) = (r.x as f32, r.y as f32);
+    let blue = 0x1a73e8;
+    stroke(c, x + 4.5, y + 11.5, x + 11.0, y + 5.0, 2.0, blue);
+    stroke(c, x + 6.5, y + 4.5, x + 11.5, y + 4.5, 2.0, blue);
+    stroke(c, x + 11.5, y + 4.5, x + 11.5, y + 9.5, 2.0, blue);
 }
 
 fn sqrt(v: f32) -> f32 {
@@ -211,7 +248,10 @@ fn address_rect() -> Rect {
 fn go_rect() -> Rect {
     Rect::new(CLIENT_W - 8 - 64, BAR_Y + 7, 64, BUTTON)
 }
-fn content_rect() -> Rect {
+fn content_rect(bare: bool) -> Rect {
+    if bare {
+        return Rect::new(0, 0, PROGRAM_W, PROGRAM_H);
+    }
     Rect::new(
         0,
         PAGE_Y,
@@ -219,7 +259,11 @@ fn content_rect() -> Rect {
         CLIENT_H - PAGE_Y - STATUS_H,
     )
 }
-fn scrollbar_rect() -> Rect {
+fn scrollbar_rect(bare: bool) -> Rect {
+    if bare {
+        // no scroll bar: the wheel and the keys still scroll
+        return Rect::new(PROGRAM_W, 0, 0, 0);
+    }
     Rect::new(
         CLIENT_W - SCROLLBAR_W,
         PAGE_Y,
@@ -249,8 +293,8 @@ fn new_tab_rect(n: usize) -> Rect {
 }
 
 /// The page's viewport: the content area.
-fn viewport() -> (i32, i32) {
-    (content_rect().w, content_rect().h)
+fn viewport(bare: bool) -> (i32, i32) {
+    (content_rect(bare).w, content_rect(bare).h)
 }
 
 /// A web colour (0xAARRGGBB) as a desktop colour and its opacity (0 to 256).
@@ -271,7 +315,8 @@ fn hash_text(s: &str, extra: u64) -> u64 {
 impl Browser {
     pub fn new() -> Self {
         Browser {
-            tabs: alloc::vec![Tab::new(1, None)],
+            bare: false,
+            tabs: alloc::vec![Tab::new(1, None, false)],
             active: 0,
             strip_pressed: None,
             strip_hover: None,
@@ -285,9 +330,57 @@ impl Browser {
         }
     }
 
+    /// A window for running one program, without the browser's tabs,
+    /// toolbar and status bar.
+    pub fn program() -> Self {
+        let mut b = Browser::new();
+        b.bare = true;
+        b.tabs = alloc::vec![Tab::new(1, None, true)];
+        b
+    }
+
+    /// Show a page or run a program from the disk.
+    pub fn open_file(&mut self, path: &str) {
+        if self.bare {
+            // a new program starts clean: no way back to the last one
+            let mut tab = Tab::new(self.next_id, None, true);
+            self.next_id += 1;
+            self.tabs[0].stop(&mut self.draining);
+            self.tabs[0].reset_images(&mut self.draining);
+            tab.navigate(Nav::Special(alloc::format!("file:{}", path)));
+            tab.current = None;
+            self.tabs[0] = tab;
+            self.drawn.set(None);
+            return;
+        }
+        self.tab().navigate(Nav::Special(alloc::format!("file:{}", path)));
+    }
+
+    /// The program's name, for the title bar: the page's title, or the
+    /// file name while it loads.
+    pub fn program_title(&self) -> String {
+        let tab = &self.tabs[0];
+        let t = tab.page.title();
+        let t = t.trim();
+        if !tab.loading() && !t.is_empty() {
+            return t.to_string();
+        }
+        let name = crate::fs::file_name(tab.address.trim_start_matches("file:"));
+        String::from(name.strip_suffix(web::PROGRAM_EXT).unwrap_or(name))
+    }
+
+    /// Stop the program when its window closes.
+    pub fn close_program(&mut self) {
+        self.tabs[0].stop(&mut self.draining);
+        self.tabs[0].reset_images(&mut self.draining);
+        self.tabs[0] = Tab::new(self.next_id, None, true);
+        self.next_id += 1;
+        self.drawn.set(None);
+    }
+
     /// Start the network card when the browser first opens.
     pub fn start(&mut self) {
-        if !self.net_started {
+        if !self.net_started && !self.bare {
             self.net_started = true;
             let status =
                 match net::init() {
@@ -329,7 +422,7 @@ impl Browser {
         let id = self.next_id;
         self.next_id += 1;
         let focus_address = nav.is_none();
-        let mut tab = Tab::new(id, nav);
+        let mut tab = Tab::new(id, nav, self.bare);
         if focus_address {
             tab.focus_address();
         }
@@ -349,7 +442,7 @@ impl Browser {
             // the last tab closed: start over with the home page
             let id = self.next_id;
             self.next_id += 1;
-            self.tabs.push(Tab::new(id, None));
+            self.tabs.push(Tab::new(id, None, self.bare));
         }
         if self.active > i || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
@@ -367,8 +460,12 @@ impl Browser {
     pub fn tick(&mut self) -> bool {
         net::poll();
         let mut redraw = false;
-        if let Some(address) = REQUESTED.lock().take() {
-            if let Some(u) = web::address_to_url(&address) {
+        let requested = if self.bare { None } else { REQUESTED.lock().take() };
+        if let Some(address) = requested {
+            if web::is_special(&address) {
+                self.tab().navigate(Nav::Special(String::from(address.trim())));
+                redraw = true;
+            } else if let Some(u) = web::address_to_url(&address) {
                 self.tab().navigate(Nav::Get(u));
                 redraw = true;
             }
@@ -383,6 +480,12 @@ impl Browser {
             let changed = self.tabs[i].tick(deadline, &mut self.draining);
             redraw |= changed && i == self.active;
             if let Some(nav) = self.tabs[i].open_in_new_tab.take() {
+                if self.bare {
+                    // a program has one page: links go there
+                    self.tabs[i].navigate(nav);
+                    redraw = true;
+                    continue;
+                }
                 self.active = i;
                 self.new_tab(Some(nav));
                 redraw = true;
@@ -404,6 +507,13 @@ impl Browser {
     }
 
     pub fn on_key(&mut self, key: Key) -> bool {
+        if self.bare {
+            let r = self.tab().on_key(key);
+            if let Some(nav) = self.tab().open_in_new_tab.take() {
+                self.tab().navigate(nav);
+            }
+            return r;
+        }
         match key {
             Key::Ctrl('t') => {
                 self.new_tab(None);
@@ -442,6 +552,10 @@ impl Browser {
 
     fn take_new_tab(&mut self) {
         if let Some(nav) = self.tab().open_in_new_tab.take() {
+            if self.bare {
+                self.tab().navigate(nav);
+                return;
+            }
             self.new_tab(Some(nav));
         }
     }
@@ -451,7 +565,7 @@ impl Browser {
     }
 
     fn strip_at(&self, x: i32, y: i32) -> Option<StripPart> {
-        if y >= TABS_H {
+        if y >= TABS_H || self.bare {
             return None;
         }
         let rects = tab_rects(self.tabs.len());
@@ -472,7 +586,7 @@ impl Browser {
 
     pub fn on_mouse(&mut self, ev: MouseEvent) -> bool {
         match ev.kind {
-            MouseKind::Down { right: false } if ev.y < TABS_H => {
+            MouseKind::Down { right: false } if ev.y < TABS_H && !self.bare => {
                 let part = self.strip_at(ev.x, ev.y);
                 if let Some(StripPart::Tab(i)) = part {
                     self.switch_to(i);
@@ -511,6 +625,10 @@ impl Browser {
 
     pub fn draw(&self, c: &mut Canvas) {
         let tab = &self.tabs[self.active];
+        if self.bare {
+            self.draw_page_area(c, tab);
+            return;
+        }
         self.draw_tabs(c);
         tab.draw_toolbar(c, self.spin);
         self.draw_page_area(c, tab);
@@ -521,7 +639,7 @@ impl Browser {
     /// Draw the page, or only what scrolling uncovered, or nothing when
     /// it looks the same as last time.
     fn draw_page_area(&self, c: &mut Canvas, tab: &Tab) {
-        let area = content_rect();
+        let area = content_rect(self.bare);
         let now = Drawn {
             buffer: c.buffer_id(),
             tab: tab.id,
@@ -656,10 +774,11 @@ fn draw_spinner(c: &mut Canvas, cx: f32, cy: f32, frame: u32, color: Color) {
 
 impl Tab {
     /// A tab going to `nav`, or showing the home page.
-    fn new(id: u32, nav: Option<Nav>) -> Tab {
+    fn new(id: u32, nav: Option<Nav>, bare: bool) -> Tab {
         let mut tab = Tab {
             id,
-            page: web::home(viewport()),
+            bare,
+            page: web::home(viewport(bare)),
             scroll: 0,
             history: Vec::new(),
             current: Some(Nav::Home),
@@ -673,7 +792,7 @@ impl Tab {
             address: String::new(),
             cursor: 0,
             select_all: false,
-            focus: Focus::Address,
+            focus: if bare { Focus::Page } else { Focus::Address },
             field_text: String::new(),
             pressed: Pressed::None,
             status: String::new(),
@@ -765,12 +884,13 @@ impl Tab {
         self.stop(draining);
         let out: Rc<RefCell<Option<Page>>> = Rc::new(RefCell::new(None));
         let (o, n) = (out.clone(), nav.clone());
-        let vp = viewport();
+        let vp = viewport(self.bare);
         let fiber = Fiber::new(move || {
             let page = match &n {
                 Nav::Home => web::home(vp),
                 Nav::Get(u) => web::load(u, None, vp, true),
                 Nav::Post(u, body) => web::load(u, Some(body), vp, true),
+                Nav::Special(a) => web::special(a, vp),
             };
             *o.borrow_mut() = Some(page);
         });
@@ -813,11 +933,15 @@ impl Tab {
         // a redirect or a POST leaves us at a plain address
         self.current = Some(match (&nav, &page.url) {
             (Nav::Home, _) => Nav::Home,
+            (Nav::Special(a), _) => Nav::Special(a.clone()),
             (_, Some(u)) => Nav::Get(u.clone()),
             _ => nav.clone(),
         });
         self.reset_images(draining);
         self.set_page(page);
+        if let Nav::Special(a) = &nav {
+            self.address = a.clone();
+        }
         let secs = (interrupts::ticks() - started) as f32 / interrupts::TIMER_HZ as f32;
         self.status = alloc::format!("Done in {}.{} s", secs as u32, (secs * 10.0) as u32 % 10);
         let mut line = crate::StackString::<64>::new();
@@ -896,15 +1020,49 @@ impl Tab {
     }
 
     fn navigate(&mut self, nav: Nav) {
+        if let Nav::Special(a) = &nav {
+            if let Some(req) = a.strip_prefix("ryzikos:") {
+                self.desktop_request(req);
+                return;
+            }
+        }
         self.status = match &nav {
             Nav::Home => String::from("Opening the home page..."),
             Nav::Get(u) | Nav::Post(u, _) => alloc::format!("Loading {} ...", u),
+            Nav::Special(a) => alloc::format!("Opening {} ...", a),
         };
+        if let Nav::Special(a) = &nav {
+            self.address = a.clone();
+        }
         if let Nav::Get(u) | Nav::Post(u, _) = &nav {
             self.address = u.to_string();
         }
         self.pending = Some(nav);
         self.focus = Focus::Page;
+    }
+
+    /// A `ryzikos:` link: open a file or folder on the desktop, or install
+    /// a program from the disc.
+    fn desktop_request(&mut self, req: &str) {
+        if let Some(from) = req.strip_prefix("install:") {
+            let dir = web::programs_folder();
+            let _ = crate::fs::create_dir(&dir);
+            let to = crate::fs::join(&dir, crate::fs::file_name(from));
+            self.status = match crate::fs::read(from).and_then(|d| crate::fs::write(&to, &d)) {
+                Ok(()) => {
+                    let name = crate::fs::file_name(from);
+                    web::add_shortcut(name.trim_end_matches(web::PROGRAM_EXT), &to);
+                    alloc::format!("Installed {}", name)
+                }
+                Err(e) => String::from(e.message()),
+            };
+            self.pending = Some(Nav::Special(String::from("about:programs")));
+            return;
+        }
+        let known = req.starts_with("open:") || req.starts_with("folder:");
+        if known {
+            DESKTOP_REQUESTS.lock().push(String::from(req));
+        }
     }
 
     fn set_page(&mut self, page: Page) {
@@ -937,7 +1095,7 @@ impl Tab {
     }
 
     fn max_scroll(&self) -> i32 {
-        (self.page.layout.height - content_rect().h).max(0)
+        (self.page.layout.height - content_rect(self.bare).h).max(0)
     }
 
     fn scroll_by(&mut self, dy: i32) -> bool {
@@ -1011,6 +1169,8 @@ impl Tab {
                         let text = self.address.trim().to_string();
                         if text.is_empty() || text.eq_ignore_ascii_case(web::HOME) {
                             self.navigate(Nav::Home);
+                        } else if web::is_special(&text) {
+                            self.navigate(Nav::Special(text));
                         } else if let Some(u) = web::address_to_url(&text) {
                             self.navigate(Nav::Get(u));
                         }
@@ -1055,6 +1215,7 @@ impl Tab {
         if self.focus != Focus::Page {
             return self.edit_key(key);
         }
+        let mut letter = [0u8; 4];
         let name = match key {
             Key::Up => "ArrowUp",
             Key::Down => "ArrowDown",
@@ -1062,13 +1223,18 @@ impl Tab {
             Key::Right => "ArrowRight",
             Key::Enter => "Enter",
             Key::Escape => "Escape",
+            // letters, digits and space reach the page's scripts too
+            Key::Char(c) if c.is_alphanumeric() || c == ' ' => c.encode_utf8(&mut letter),
             _ => "",
         };
-        if !name.is_empty() && !self.page.key_event(None, name) {
+        if !name.is_empty() {
+            let prevented = !self.page.key_event(None, name);
             self.after_script();
-            return true;
+            if prevented {
+                return true;
+            }
         }
-        let page = content_rect().h - 40;
+        let page = content_rect(self.bare).h - 40;
         match key {
             Key::Up => self.scroll_by(-40),
             Key::Down => self.scroll_by(40),
@@ -1076,11 +1242,11 @@ impl Tab {
             Key::PageDown | Key::Char(' ') => self.scroll_by(page),
             Key::Home => self.scroll_by(-self.scroll),
             Key::End => self.scroll_by(self.max_scroll()),
-            Key::Backspace => {
+            Key::Backspace if !self.bare => {
                 self.back();
                 true
             }
-            Key::Ctrl('l') => {
+            Key::Ctrl('l') if !self.bare => {
                 self.focus_address();
                 true
             }
@@ -1116,7 +1282,7 @@ impl Tab {
             MouseKind::Down { right: true } => false,
             MouseKind::Move => {
                 if let Pressed::Thumb(grab) = self.pressed {
-                    let track = scrollbar_rect();
+                    let track = scrollbar_rect(self.bare);
                     let (_, thumb_h) = self.thumb();
                     let room = (track.h - thumb_h).max(1);
                     let top = ev.y - grab - track.y;
@@ -1153,7 +1319,7 @@ impl Tab {
 
     /// The mouse moved over the window without a button held.
     fn on_hover(&mut self, x: i32, y: i32) -> bool {
-        let area = content_rect();
+        let area = content_rect(self.bare);
         let mut hover = None;
         if area.contains(x, y) {
             let (px, py) = (x - area.x, y - area.y + self.scroll);
@@ -1174,9 +1340,9 @@ impl Tab {
 
     /// Top and height of the scroll bar thumb.
     fn thumb(&self) -> (i32, i32) {
-        let track = scrollbar_rect();
+        let track = scrollbar_rect(self.bare);
         let total = self.page.layout.height;
-        let view = content_rect().h;
+        let view = content_rect(self.bare).h;
         if total <= view {
             return (track.y, track.h);
         }
@@ -1186,24 +1352,26 @@ impl Tab {
     }
 
     fn press(&mut self, x: i32, y: i32) -> bool {
+        let bare = self.bare;
         let hit = |r: Rect| r.contains(x, y);
-        if hit(back_rect()) {
+        let tool = |r: Rect| !bare && r.contains(x, y);
+        if tool(back_rect()) {
             self.pressed = Pressed::Back;
             return true;
         }
-        if hit(reload_rect()) {
+        if tool(reload_rect()) {
             self.pressed = Pressed::Reload;
             return true;
         }
-        if hit(home_rect()) {
+        if tool(home_rect()) {
             self.pressed = Pressed::Home;
             return true;
         }
-        if hit(go_rect()) {
+        if tool(go_rect()) {
             self.pressed = Pressed::Go;
             return true;
         }
-        if hit(address_rect()) {
+        if tool(address_rect()) {
             if self.focus == Focus::Address && !self.select_all {
                 // place the cursor where clicked
                 self.cursor = click_cursor(self.address_text_rect(), &self.address, self.cursor, x);
@@ -1212,18 +1380,18 @@ impl Tab {
             }
             return true;
         }
-        if hit(scrollbar_rect()) {
+        if hit(scrollbar_rect(self.bare)) {
             let (top, h) = self.thumb();
             if y >= top && y < top + h {
                 self.pressed = Pressed::Thumb(y - top);
             } else {
-                let page = content_rect().h - 40;
+                let page = content_rect(self.bare).h - 40;
                 self.scroll_by(if y < top { -page } else { page });
             }
             return true;
         }
-        if hit(content_rect()) {
-            let area = content_rect();
+        if hit(content_rect(self.bare)) {
+            let area = content_rect(self.bare);
             let (px, py) = (x - area.x, y - area.y + self.scroll);
             self.focus = Focus::Page;
             let Some(node) = self.page.element_at(px, py) else {
@@ -1398,7 +1566,7 @@ impl Tab {
 
     /// Draw the part `band` of the page area (in its own coordinates).
     fn draw_page(&self, c: &mut Canvas, band: Rect) {
-        let area = content_rect();
+        let area = content_rect(self.bare);
         let mut page = c.sub(area);
         page.clip_to(band);
         let (bg, _) = web_color(self.page.layout.canvas);
@@ -1617,7 +1785,7 @@ impl Tab {
     }
 
     fn draw_scrollbar(&self, c: &mut Canvas) {
-        let track = scrollbar_rect();
+        let track = scrollbar_rect(self.bare);
         c.fill(track, rgb(0xf6, 0xf6, 0xf6));
         c.fill_rect(track.x, track.y, 1, track.h, rgb(0xe6, 0xe6, 0xe6));
         if self.max_scroll() > 0 {

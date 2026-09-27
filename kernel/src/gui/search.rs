@@ -220,7 +220,7 @@ impl Search {
         }
         let mut found: Vec<(u32, Hit)> = Vec::new();
         if matches!(self.tab, Tab::All | Tab::Apps) {
-            for app in APPS {
+            for app in APPS.into_iter().filter(|a| a.listed()) {
                 let title = app.title().to_lowercase();
                 // other words count less than the name itself
                 let best = core::iter::once(score(&title, &q))

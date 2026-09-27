@@ -1,0 +1,62 @@
+<!doctype html>
+<title>Stopwatch</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #f2f5fb; color: #1d2230; text-align: center; }
+.card { width: 520px; margin: 36px auto; background: white; border-radius: 18px; border: 1px solid #dfe4ee; padding: 24px; }
+h1 { font-size: 22px; margin: 0 0 10px; color: #5a6478; }
+.time { font-size: 72px; font-weight: bold; margin: 8px 0 18px; }
+button { border: 0; border-radius: 22px; padding: 11px 26px; font-size: 16px; font-weight: bold; margin: 0 4px; background: #e6ebf5; color: #1d3f8f; }
+button.go { background: #2f6fed; color: white; }
+#laps div { border-top: 1px solid #edf0f5; padding: 8px 0; display: flex; justify-content: space-between; }
+input { width: 60px; font-size: 18px; padding: 6px; text-align: center; }
+</style>
+<div class="card">
+  <h1>Stopwatch</h1>
+  <div class="time" id="sw">0:00.0</div>
+  <button class="go" id="start">Start</button><button id="lap">Lap</button><button id="reset">Reset</button>
+  <div id="laps"></div>
+</div>
+<div class="card">
+  <h1>Timer</h1>
+  <div class="time" id="tm">5:00</div>
+  <p><input id="min" type="text" value="5"> minutes</p>
+  <button class="go" id="tstart">Start</button><button id="tstop">Stop</button>
+</div>
+<script>
+const two = n => String(n).padStart(2, '0');
+const fmt = ms => Math.floor(ms / 60000) + ':' + two(Math.floor(ms / 1000) % 60) + '.' + Math.floor(ms / 100) % 10;
+let running = false, since = 0, kept = 0, laps = [];
+const sw = document.getElementById('sw');
+const elapsed = () => kept + (running ? Date.now() - since : 0);
+document.getElementById('start').addEventListener('click', e => {
+  if (running) { kept = elapsed(); running = false; e.target.textContent = 'Start'; }
+  else { since = Date.now(); running = true; e.target.textContent = 'Pause'; }
+  sw.textContent = fmt(elapsed());
+});
+document.getElementById('lap').addEventListener('click', () => {
+  if (!running) return;
+  laps.unshift(elapsed());
+  document.getElementById('laps').innerHTML = laps.map((t, i) => '<div><span>Lap ' + (laps.length - i) + '</span><b>' + fmt(t) + '</b></div>').join('');
+});
+document.getElementById('reset').addEventListener('click', () => {
+  running = false; kept = 0; laps = [];
+  document.getElementById('start').textContent = 'Start';
+  document.getElementById('laps').innerHTML = '';
+  sw.textContent = fmt(0);
+});
+let end = 0;
+const tm = document.getElementById('tm');
+document.getElementById('tstart').addEventListener('click', () => {
+  const m = parseFloat(document.getElementById('min').value) || 1;
+  end = Date.now() + m * 60000;
+});
+document.getElementById('tstop').addEventListener('click', () => { end = 0; tm.textContent = '0:00'; tm.style.color = ''; });
+setInterval(() => {
+  if (running) sw.textContent = fmt(elapsed());
+  if (end) {
+    const left = Math.max(0, end - Date.now());
+    tm.textContent = Math.floor(left / 60000) + ':' + two(Math.floor(left / 1000) % 60);
+    if (left === 0) { tm.textContent = 'Time is up!'; tm.style.color = '#d8344c'; end = 0; }
+  }
+}, 100);
+</script>

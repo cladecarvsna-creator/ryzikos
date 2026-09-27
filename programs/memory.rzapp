@@ -1,0 +1,58 @@
+<!doctype html>
+<title>Memory</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #25324a; color: white; text-align: center; }
+h1 { font-size: 38px; margin: 24px 0 4px; }
+p { color: #b9c4da; margin: 0 0 16px; }
+#board { display: grid; grid-template-columns: repeat(4, 100px); gap: 12px; width: 436px; margin: 0 auto; }
+.c { width: 100px; height: 100px; line-height: 100px; border-radius: 12px; background: #4c7dff; font-size: 44px; font-weight: bold; color: #4c7dff; }
+.open { background: #f6f8ff; color: #25324a; }
+.done { background: #3ec07a; color: white; }
+#info { font-size: 20px; margin: 18px 0 12px; }
+button { background: #ffb45c; color: #25324a; border: 0; border-radius: 18px; padding: 10px 22px; font-size: 16px; font-weight: bold; }
+</style>
+<h1>Memory</h1>
+<p>Click two cards. Matching pairs stay open.</p>
+<div id="board"></div>
+<div id="info">Moves: 0</div>
+<button id="again">New game</button>
+<script>
+const symbols = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+let deck, open, moves, found, busy;
+const board = document.getElementById('board');
+const cells = [];
+for (let i = 0; i < 16; i++) {
+  const d = document.createElement('div');
+  d.className = 'c';
+  d.addEventListener('click', () => flip(i));
+  board.appendChild(d);
+  cells.push(d);
+}
+function draw() {
+  cells.forEach((c, i) => {
+    const shown = open.includes(i) || found.includes(i);
+    c.textContent = shown ? deck[i] : '?';
+    c.className = 'c' + (found.includes(i) ? ' done' : shown ? ' open' : '');
+  });
+  document.getElementById('info').textContent = found.length === 16 ? 'All pairs found in ' + moves + ' moves!' : 'Moves: ' + moves;
+}
+function flip(i) {
+  if (busy || open.includes(i) || found.includes(i)) return;
+  open.push(i);
+  if (open.length === 2) {
+    moves++;
+    const [a, b] = open;
+    if (deck[a] === deck[b]) { found.push(a, b); open = []; }
+    else { busy = true; setTimeout(() => { open = []; busy = false; draw(); }, 900); }
+  }
+  draw();
+}
+function start() {
+  deck = symbols.concat(symbols);
+  for (let i = deck.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [deck[i], deck[j]] = [deck[j], deck[i]]; }
+  open = []; found = []; moves = 0; busy = false;
+  draw();
+}
+document.getElementById('again').addEventListener('click', start);
+start();
+</script>

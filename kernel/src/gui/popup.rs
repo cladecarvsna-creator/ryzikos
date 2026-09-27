@@ -31,6 +31,8 @@ pub enum Cmd {
     DeleteIcons,
     EmptyBin,
     Refresh,
+    /// Put the desktop icons back in columns from the top left.
+    ArrangeIcons,
     NewFolder,
     NewFile,
     /// Settings on the Personalization or the System page.

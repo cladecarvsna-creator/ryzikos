@@ -1,0 +1,85 @@
+<!doctype html>
+<title>2048</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #faf8ef; color: #776e65; text-align: center; }
+h1 { font-size: 56px; margin: 24px 0 4px; color: #776e65; }
+p { margin: 4px 0 16px; }
+.bar { display: flex; justify-content: center; gap: 12px; margin-bottom: 16px; }
+.score { background: #bbada0; color: white; border-radius: 6px; padding: 8px 18px; font-weight: bold; }
+button { background: #8f7a66; color: white; border: 0; border-radius: 6px; padding: 10px 18px; font-size: 15px; font-weight: bold; }
+#board { display: grid; grid-template-columns: repeat(4, 96px); gap: 12px; background: #bbada0; padding: 12px; border-radius: 8px; width: 420px; margin: 0 auto; }
+.t { width: 96px; height: 96px; line-height: 96px; border-radius: 5px; font-size: 36px; font-weight: bold; background: #cdc1b4; color: #776e65; }
+#msg { font-size: 22px; font-weight: bold; height: 30px; margin-top: 14px; }
+</style>
+<h1>2048</h1>
+<p>Arrow keys (or W A S D) slide the tiles. Equal tiles join.</p>
+<div class="bar"><div class="score">Score <span id="score">0</span></div><div class="score">Best <span id="best">0</span></div><button id="new">New game</button></div>
+<div id="board"></div>
+<div id="msg"></div>
+<script>
+const colors = { 2: ['#eee4da', '#776e65'], 4: ['#ede0c8', '#776e65'], 8: ['#f2b179', '#fff'], 16: ['#f59563', '#fff'], 32: ['#f67c5f', '#fff'], 64: ['#f65e3b', '#fff'], 128: ['#edcf72', '#fff'], 256: ['#edcc61', '#fff'], 512: ['#edc850', '#fff'], 1024: ['#edc53f', '#fff'], 2048: ['#edc22e', '#fff'] };
+let grid, score, best = 0, won;
+const board = document.getElementById('board');
+const cells = [];
+for (let i = 0; i < 16; i++) { const d = document.createElement('div'); d.className = 't'; board.appendChild(d); cells.push(d); }
+function add() {
+  const free = [];
+  for (let i = 0; i < 16; i++) if (!grid[i]) free.push(i);
+  if (free.length) grid[free[Math.floor(Math.random() * free.length)]] = Math.random() < 0.9 ? 2 : 4;
+}
+function draw() {
+  for (let i = 0; i < 16; i++) {
+    const v = grid[i], c = cells[i];
+    c.textContent = v ? String(v) : '';
+    const col = colors[v] || (v ? ['#3c3a32', '#fff'] : ['#cdc1b4', '#776e65']);
+    c.style.background = col[0];
+    c.style.color = col[1];
+    c.style.fontSize = v >= 1024 ? '26px' : v >= 128 ? '30px' : '36px';
+  }
+  document.getElementById('score').textContent = score;
+  if (score > best) best = score;
+  document.getElementById('best').textContent = best;
+}
+function line(idx) {
+  const vals = idx.map(i => grid[i]).filter(v => v);
+  for (let k = 0; k < vals.length - 1; k++) {
+    if (vals[k] === vals[k + 1]) { vals[k] *= 2; score += vals[k]; if (vals[k] === 2048) won = true; vals.splice(k + 1, 1); }
+  }
+  let moved = false;
+  idx.forEach((i, k) => { const v = vals[k] || 0; if (grid[i] !== v) moved = true; grid[i] = v; });
+  return moved;
+}
+function move(dir) {
+  let moved = false;
+  for (let r = 0; r < 4; r++) {
+    const idx = [];
+    for (let k = 0; k < 4; k++) {
+      if (dir === 'left') idx.push(r * 4 + k);
+      if (dir === 'right') idx.push(r * 4 + 3 - k);
+      if (dir === 'up') idx.push(k * 4 + r);
+      if (dir === 'down') idx.push((3 - k) * 4 + r);
+    }
+    if (line(idx)) moved = true;
+  }
+  if (moved) { add(); draw(); }
+  const msg = document.getElementById('msg');
+  if (won) msg.textContent = 'You made 2048!';
+  else if (!canMove()) msg.textContent = 'No more moves. Press New game.';
+  else msg.textContent = '';
+}
+function canMove() {
+  for (let i = 0; i < 16; i++) {
+    if (!grid[i]) return true;
+    if (i % 4 < 3 && grid[i] === grid[i + 1]) return true;
+    if (i < 12 && grid[i] === grid[i + 4]) return true;
+  }
+  return false;
+}
+function start() { grid = new Array(16).fill(0); score = 0; won = false; add(); add(); draw(); document.getElementById('msg').textContent = ''; }
+document.addEventListener('keydown', e => {
+  const k = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', a: 'left', d: 'right', w: 'up', s: 'down' }[e.key];
+  if (k) { e.preventDefault(); move(k); }
+});
+document.getElementById('new').addEventListener('click', start);
+start();
+</script>

@@ -1,0 +1,100 @@
+<!doctype html>
+<title>Minesweeper</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #e9edf4; color: #1f2633; text-align: center; }
+h1 { font-size: 36px; margin: 22px 0 4px; }
+p { color: #5b6578; margin: 0 0 14px; }
+#board { display: grid; grid-template-columns: repeat(9, 40px); gap: 3px; width: 393px; margin: 0 auto; background: #b8c2d4; padding: 6px; border-radius: 10px; }
+.c { width: 40px; height: 40px; line-height: 40px; border-radius: 6px; background: #8fa0bd; font-weight: bold; font-size: 20px; color: #1f2633; }
+.o { background: #f4f6fa; }
+.m { background: #ff5c5c; color: white; }
+.fl { background: #ffd35c; }
+.n1 { color: #2f6fed; } .n2 { color: #2e9d52; } .n3 { color: #e0403a; } .n4 { color: #6a3fc9; } .n5 { color: #b35a00; }
+.bar { margin: 14px 0; font-size: 19px; }
+button { background: #2f6fed; color: white; border: 0; border-radius: 18px; padding: 10px 22px; font-size: 16px; font-weight: bold; margin: 0 4px; }
+button.flag { background: #6b7688; } button.flag.on { background: #e3a400; }
+</style>
+<h1>Minesweeper</h1>
+<p>Open every square without a mine. Numbers say how many mines touch a square.</p>
+<div id="board"></div>
+<div class="bar"><span id="msg">10 mines</span></div>
+<button id="mode" class="flag">Flag mode: off</button><button id="go">New game</button>
+<script>
+const W = 9, MINES = 10;
+const board = document.getElementById('board');
+const cells = [];
+let mine, open, flag, over, first, flagMode = false;
+for (let i = 0; i < W * W; i++) {
+  const d = document.createElement('div');
+  d.className = 'c';
+  d.addEventListener('click', () => flagMode ? toggle(i) : reveal(i));
+  d.addEventListener('contextmenu', e => { e.preventDefault(); toggle(i); });
+  board.appendChild(d); cells.push(d);
+}
+const around = i => {
+  const x = i % W, y = Math.floor(i / W), out = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const nx = x + dx, ny = y + dy;
+    if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < W) out.push(ny * W + nx);
+  }
+  return out;
+};
+const count = i => around(i).filter(j => mine[j]).length;
+function lay(safe) {
+  let n = 0;
+  while (n < MINES) {
+    const i = Math.floor(Math.random() * W * W);
+    if (!mine[i] && i !== safe && !around(safe).includes(i)) { mine[i] = true; n++; }
+  }
+}
+function draw() {
+  cells.forEach((c, i) => {
+    let cls = 'c', text = '';
+    if (open[i]) {
+      if (mine[i]) { cls += ' m'; text = '*'; }
+      else { cls += ' o'; const n = count(i); if (n) { text = n; cls += ' n' + n; } }
+    } else if (flag[i]) { cls += ' fl'; text = 'F'; }
+    c.className = cls; c.textContent = text;
+  });
+}
+function reveal(i) {
+  if (over || flag[i] || open[i]) return;
+  if (first) { lay(i); first = false; }
+  if (mine[i]) {
+    over = true;
+    mine.forEach((m, j) => { if (m) open[j] = true; });
+    document.getElementById('msg').textContent = 'Boom! Try again.';
+    draw(); return;
+  }
+  const todo = [i];
+  while (todo.length) {
+    const j = todo.pop();
+    if (open[j] || flag[j]) continue;
+    open[j] = true;
+    if (count(j) === 0) around(j).forEach(k => { if (!open[k]) todo.push(k); });
+  }
+  const left = open.filter((o, j) => !o && !mine[j]).length;
+  if (left === 0) { over = true; document.getElementById('msg').textContent = 'You found every mine!'; }
+  draw();
+}
+function toggle(i) {
+  if (over || open[i]) return;
+  flag[i] = !flag[i];
+  document.getElementById('msg').textContent = (MINES - flag.filter(f => f).length) + ' mines left';
+  draw();
+}
+function start() {
+  mine = new Array(W * W).fill(false); open = new Array(W * W).fill(false); flag = new Array(W * W).fill(false);
+  over = false; first = true;
+  document.getElementById('msg').textContent = MINES + ' mines';
+  draw();
+}
+document.getElementById('mode').addEventListener('click', () => {
+  flagMode = !flagMode;
+  const b = document.getElementById('mode');
+  b.textContent = 'Flag mode: ' + (flagMode ? 'on' : 'off');
+  b.className = flagMode ? 'flag on' : 'flag';
+});
+document.getElementById('go').addEventListener('click', start);
+start();
+</script>

@@ -64,7 +64,7 @@ pub const DEFAULT_PINS: [App; 5] = [
 ];
 
 /// The icons behind ^: the disk, Settings and About.
-const HIDDEN: [&str; 3] = ["Local Disk (C:)", "Settings", "About RyzikOS"];
+const HIDDEN: [&str; 3] = ["System Disk", "Settings", "About RyzikOS"];
 
 impl Desktop<'_> {
     // ---- buttons -----------------------------------------------------------
@@ -209,8 +209,10 @@ impl Desktop<'_> {
                 let mut b = Builder::default().item(app.title(), Cmd::Open(app)).sep();
                 b = if self.pins.contains(&app) {
                     b.item("Remove from Dock", Cmd::Unpin(app))
-                } else {
+                } else if app.listed() {
                     b.item("Keep in Dock", Cmd::Pin(app))
+                } else {
+                    b
                 };
                 if self.windows[app.index()].open {
                     b = b.item("Close window", Cmd::Close(app));
@@ -221,7 +223,7 @@ impl Desktop<'_> {
             Some(TaskItem::Start) => self.start_menu_popup(x, top),
             _ => Builder::default()
                 .item("Search", Cmd::Search)
-                .item("Task View", Cmd::TaskView)
+                .item("Overview", Cmd::TaskView)
                 .item("Show desktop", Cmd::ShowDesktop)
                 .sep()
                 .item("Dock settings", Cmd::Open(App::Settings))
@@ -236,11 +238,11 @@ impl Desktop<'_> {
             .item("About RyzikOS", Cmd::Open(App::About))
             .item("Settings", Cmd::Open(App::Settings))
             .sep()
-            .keyed("Search", "Win+S", Cmd::Search)
-            .keyed("Task View", "Win+Tab", Cmd::TaskView)
-            .keyed("Show desktop", "Win+D", Cmd::ShowDesktop)
+            .keyed("Search", "Super+S", Cmd::Search)
+            .keyed("Overview", "Super+Tab", Cmd::TaskView)
+            .keyed("Show desktop", "Super+D", Cmd::ShowDesktop)
             .sep()
-            .keyed("Lock", "Win+L", Cmd::Lock)
+            .keyed("Lock", "Super+L", Cmd::Lock)
             .item("Sign out", Cmd::SignOut)
             .item("Restart", Cmd::Restart)
             .item("Shut down", Cmd::ShutDown)
@@ -251,17 +253,17 @@ impl Desktop<'_> {
     pub(super) fn start_menu_popup(&self, x: i32, y: i32) -> super::popup::Popup {
         Builder::default()
             .item("Terminal", Cmd::Open(App::Terminal))
-            .item("File Explorer", Cmd::Open(App::Explorer))
+            .item("Files", Cmd::Open(App::Explorer))
             .item("Settings", Cmd::Open(App::Settings))
-            .keyed("Search", "Win+S", Cmd::Search)
-            .keyed("Task View", "Win+Tab", Cmd::TaskView)
+            .keyed("Search", "Super+S", Cmd::Search)
+            .keyed("Overview", "Super+Tab", Cmd::TaskView)
             .sep()
-            .keyed("Lock", "Win+L", Cmd::Lock)
+            .keyed("Lock", "Super+L", Cmd::Lock)
             .item("Sign out", Cmd::SignOut)
             .item("Restart", Cmd::Restart)
             .item("Shut down", Cmd::ShutDown)
             .sep()
-            .keyed("Desktop", "Win+D", Cmd::ShowDesktop)
+            .keyed("Desktop", "Super+D", Cmd::ShowDesktop)
             .at(x, y, true, self.screen())
     }
 
@@ -317,7 +319,7 @@ impl Desktop<'_> {
     pub(super) fn top_apps(&self) -> Vec<App> {
         let mut out: Vec<App> = self.start.recent().collect();
         for app in self.pins.iter().copied().chain(APPS) {
-            if !out.contains(&app) {
+            if app.listed() && !out.contains(&app) {
                 out.push(app);
             }
         }
@@ -464,7 +466,7 @@ impl Desktop<'_> {
                 let text = match item {
                     TaskItem::Start => String::from("Launcher"),
                     TaskItem::Search => String::from("Search"),
-                    TaskItem::TaskView => String::from("Task View"),
+                    TaskItem::TaskView => String::from("Overview"),
                     TaskItem::App(a) if self.windows[a.index()].open => self.window_title(a),
                     TaskItem::App(a) => String::from(a.title()),
                 };
@@ -633,7 +635,12 @@ impl Desktop<'_> {
         let logo = self.tray_rect(4);
         self.icons
             .draw_logo(c, 20, logo.x + 16, logo.y + (logo.h - 20) / 2);
+        let program;
         let name = match self.focused {
+            Some(App::Program) if self.windows[App::Program.index()].visible() => {
+                program = self.window_title(App::Program);
+                program.as_str()
+            }
             Some(app) if self.windows[app.index()].visible() => app.title(),
             _ => "RyzikOS",
         };

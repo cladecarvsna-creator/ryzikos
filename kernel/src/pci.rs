@@ -81,3 +81,35 @@ pub fn find(ids: &[(u16, u16)]) -> Option<Device> {
     }
     None
 }
+
+/// Every device of a class and subclass (like 0x01, 0x06 for SATA).
+pub fn find_class(class: u8, subclass: u8) -> alloc::vec::Vec<Device> {
+    let mut out = alloc::vec::Vec::new();
+    for bus in 0..=255u8 {
+        for slot in 0..32u8 {
+            for function in 0..8u8 {
+                let dev = Device {
+                    bus,
+                    slot,
+                    function,
+                };
+                let id = dev.read(0);
+                if id & 0xffff == 0xffff {
+                    if function == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                let class_reg = dev.read(0x08);
+                if (class_reg >> 24) as u8 == class && (class_reg >> 16) as u8 == subclass {
+                    out.push(dev);
+                }
+                // single-function devices answer on every function number
+                if function == 0 && dev.read(0x0c) & 0x0080_0000 == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}

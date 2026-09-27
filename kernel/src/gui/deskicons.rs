@@ -1,10 +1,12 @@
 //! The icons on the desktop, like Windows 11: This PC, the Recycle Bin,
-//! app shortcuts (with the little arrow), then the files and folders in
+//! app shortcuts, then the files and folders in
 //! the user's Desktop folder, in columns from the top left.
 //!
 //! Click selects, Ctrl+click adds, and dragging on the empty desktop
 //! draws a see-through blue rectangle that selects what it touches.
-//! Selected icons can be dragged onto the Recycle Bin or into a folder.
+//! Selected icons can be dragged onto the Recycle Bin or into a folder,
+//! or anywhere on the desktop: they snap to the grid, and where each icon
+//! stands is kept for the user.
 //! Delete moves files to the Recycle Bin, F2 renames, Enter opens, and
 //! right-click shows what can be done.
 
@@ -27,13 +29,14 @@ const CELL_H: i32 = 102;
 const LEFT: i32 = 6;
 const TOP: i32 = super::MENUBAR_H + 6;
 /// The apps with a shortcut on the desktop.
-const SHORTCUTS: [App; 7] = [
+const SHORTCUTS: [App; 8] = [
     App::Browser,
+    App::Photos,
+    App::Video,
     App::Terminal,
     App::Notepad,
     App::Paint,
     App::Calculator,
-    App::Demo,
     App::Settings,
 ];
 
@@ -48,12 +51,56 @@ pub enum DeskItem {
 impl DeskItem {
     fn label(&self) -> &str {
         match self {
-            DeskItem::ThisPc => "This PC",
-            DeskItem::Bin => "Recycle Bin",
+            DeskItem::ThisPc => "Computer",
+            DeskItem::Bin => "Trash",
             DeskItem::App(a) => a.title(),
-            DeskItem::Entry { name, .. } => name,
+            DeskItem::Entry { name, .. } => {
+                // a shortcut shows just the program's name
+                let lower = name.to_ascii_lowercase();
+                if lower.ends_with(crate::web::LINK_EXT) {
+                    &name[..name.len() - crate::web::LINK_EXT.len()]
+                } else {
+                    name
+                }
+            }
         }
     }
+
+    /// A name for remembering where the icon stands.
+    fn key(&self) -> String {
+        match self {
+            DeskItem::ThisPc => String::from("computer"),
+            DeskItem::Bin => String::from("trash"),
+            DeskItem::App(a) => alloc::format!("app:{}", a.key()),
+            DeskItem::Entry { name, .. } => alloc::format!("file:{}", name),
+        }
+    }
+
+    fn is_shortcut(&self) -> bool {
+        matches!(self, DeskItem::Entry { name, dir: false }
+            if name.to_ascii_lowercase().ends_with(crate::web::LINK_EXT))
+    }
+}
+
+/// Where the user put the icons: a line per icon, "column row name".
+fn layout_file() -> Option<String> {
+    let name = users::current_name()?;
+    Some(fs::join(&fs::app_data(name.as_str()), "desktop-icons.txt"))
+}
+
+fn load_layout() -> Vec<(String, (i32, i32))> {
+    let Some(data) = layout_file().and_then(|p| fs::read(&p).ok()) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&data);
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let col = parts.next()?.parse().ok()?;
+            let row = parts.next()?.parse().ok()?;
+            Some((String::from(parts.next()?), (col, row)))
+        })
+        .collect()
 }
 
 /// The blue rectangle being dragged out, and what was selected before.
@@ -71,6 +118,8 @@ struct Drag {
 
 pub struct DeskIcons {
     pub items: Vec<DeskItem>,
+    /// The grid cell (column, row) each item stands in.
+    cells: Vec<(i32, i32)>,
     pub selected: Vec<bool>,
     pub hover: Option<usize>,
     /// `fs::changes()` when the Desktop folder was read.
@@ -88,6 +137,7 @@ impl DeskIcons {
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
+            cells: Vec::new(),
             selected: Vec::new(),
             hover: None,
             seen: None,
@@ -126,10 +176,19 @@ impl Desktop<'_> {
         ((self.height - TASKBAR_H - TOP) / CELL_H).max(1)
     }
 
-    /// Icon `i`'s cell, in columns from the top left.
+    fn icon_cols(&self) -> i32 {
+        ((self.width - LEFT) / CELL_W).max(1)
+    }
+
+    /// Icon `i`'s place on the desktop.
     pub(super) fn icon_rect(&self, i: usize) -> Rect {
         let rows = self.icon_rows();
-        let (col, row) = (i as i32 / rows, i as i32 % rows);
+        let (col, row) = self
+            .desk_icons
+            .cells
+            .get(i)
+            .copied()
+            .unwrap_or((i as i32 / rows, i as i32 % rows));
         Rect::new(
             LEFT + col * CELL_W,
             TOP + row * CELL_H,
@@ -145,8 +204,105 @@ impl Desktop<'_> {
     /// Everything the icons cover.
     fn icons_area(&self) -> Rect {
         let n = self.desk_icons.items.len().max(1);
-        let cols = (n as i32 - 1) / self.icon_rows() + 1;
+        let placed = self.desk_icons.cells.iter().map(|c| c.0 + 1).max().unwrap_or(0);
+        let cols = ((n as i32 - 1) / self.icon_rows() + 1).max(placed);
         Rect::new(0, 0, LEFT + cols * CELL_W + 8, self.height - TASKBAR_H)
+    }
+
+    /// Give every icon a cell: where the user left it if that cell is
+    /// free, otherwise the first free cell, in columns from the top left.
+    fn place_icons(&mut self) {
+        let (cols, rows) = (self.icon_cols(), self.icon_rows());
+        let saved = load_layout();
+        let items = &self.desk_icons.items;
+        let mut cells: Vec<Option<(i32, i32)>> = alloc::vec![None; items.len()];
+        let mut taken: Vec<(i32, i32)> = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let key = item.key();
+            if let Some((_, cell)) = saved.iter().find(|(k, _)| *k == key) {
+                let inside = cell.0 >= 0 && cell.0 < cols && cell.1 >= 0 && cell.1 < rows;
+                if inside && !taken.contains(cell) {
+                    cells[i] = Some(*cell);
+                    taken.push(*cell);
+                }
+            }
+        }
+        let mut next = 0;
+        for cell in cells.iter_mut().filter(|c| c.is_none()) {
+            while taken.contains(&(next / rows, next % rows)) {
+                next += 1;
+            }
+            let c = (next / rows, next % rows);
+            taken.push(c);
+            *cell = Some(c);
+        }
+        self.desk_icons.cells = cells.into_iter().map(|c| c.unwrap_or((0, 0))).collect();
+    }
+
+    /// Forget where the user put the icons and line them up again.
+    pub(super) fn arrange_icons(&mut self) {
+        if let Some(path) = layout_file() {
+            let _ = fs::remove(&path);
+        }
+        let old = self.icons_area();
+        self.desk_icons.forget();
+        self.refresh_icons();
+        self.damage(old);
+    }
+
+    /// Remember where every icon stands.
+    fn save_layout(&self) {
+        let Some(path) = layout_file() else {
+            return;
+        };
+        // keep what was saved for icons that are not here now
+        let mut lines: Vec<(String, (i32, i32))> = load_layout();
+        for (item, cell) in self.desk_icons.items.iter().zip(&self.desk_icons.cells) {
+            let key = item.key();
+            lines.retain(|(k, _)| *k != key);
+            lines.push((key, *cell));
+        }
+        let mut text = String::new();
+        for (key, (col, row)) in lines.iter().rev().take(200).rev() {
+            text.push_str(&alloc::format!("{} {} {}\n", col, row, key));
+        }
+        let _ = fs::write(&path, text.as_bytes());
+    }
+
+    /// Move the selected icons by (dx, dy) pixels, onto free cells.
+    fn move_icons(&mut self, dx: i32, dy: i32) {
+        let (cols, rows) = (self.icon_cols(), self.icon_rows());
+        let moving = self.selected_icons();
+        let mut taken: Vec<(i32, i32)> = (0..self.desk_icons.items.len())
+            .filter(|i| !moving.contains(i))
+            .map(|i| self.desk_icons.cells[i])
+            .collect();
+        for &i in &moving {
+            let r = self.icon_rect(i);
+            let x = r.x + r.w / 2 + dx - LEFT;
+            let y = r.y + r.h / 2 + dy - TOP;
+            let want = (
+                x.div_euclid(CELL_W).clamp(0, cols - 1),
+                y.div_euclid(CELL_H).clamp(0, rows - 1),
+            );
+            // the nearest free cell, looking further out step by step
+            let mut best = self.desk_icons.cells[i];
+            'search: for d in 0..cols.max(rows) {
+                for c in want.0 - d..=want.0 + d {
+                    for r in want.1 - d..=want.1 + d {
+                        let edge = (c - want.0).abs() == d || (r - want.1).abs() == d;
+                        if edge && c >= 0 && c < cols && r >= 0 && r < rows && !taken.contains(&(c, r)) {
+                            best = (c, r);
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            taken.push(best);
+            self.desk_icons.cells[i] = best;
+        }
+        self.save_layout();
+        self.damage(self.screen());
     }
 
     pub(super) fn damage_icons(&mut self) {
@@ -188,6 +344,7 @@ impl Desktop<'_> {
         icons.hover = None;
         icons.renaming = None;
         icons.bin_full = !recycle::is_empty(&user());
+        self.place_icons();
         self.damage(old_area);
         self.damage_icons();
     }
@@ -284,16 +441,14 @@ impl Desktop<'_> {
             if (x - px).abs() + (y - py).abs() < 5 && self.desk_icons.drag.is_none() {
                 return;
             }
-            // only files and folders move; the rest just stays selected
-            let movable = self
+            // files and folders can also go into a folder or the Trash
+            let files = self
                 .selected_icons()
                 .iter()
                 .any(|&k| self.icon_path(k).is_some());
-            if !movable {
-                return;
-            }
             let target = self.icon_at(x, y).filter(|&t| {
-                !self.desk_icons.selected[t]
+                files
+                    && !self.desk_icons.selected[t]
                     && match &self.desk_icons.items[t] {
                         DeskItem::Bin => true,
                         DeskItem::Entry { dir, .. } => *dir,
@@ -320,6 +475,8 @@ impl Desktop<'_> {
         };
         self.damage(self.screen());
         let Some(t) = drag.target else {
+            // dropped on the desktop: the icons stand where they were let go
+            self.move_icons(drag.offset.0, drag.offset.1);
             return;
         };
         let paths: Vec<String> = self
@@ -362,7 +519,7 @@ impl Desktop<'_> {
 
     pub(super) fn open_icon(&mut self, i: usize) {
         match self.desk_icons.items[i].clone() {
-            DeskItem::ThisPc => self.show_folder("/"),
+            DeskItem::ThisPc => self.show_folder(super::explorer::COMPUTER),
             DeskItem::Bin => {
                 let bin = super::explorer::bin_folder();
                 let _ = fs::create_dir(recycle::ROOT);
@@ -518,11 +675,12 @@ impl Desktop<'_> {
         let Some(i) = hit else {
             return Builder::default()
                 .keyed("Refresh", "F5", Cmd::Refresh)
+                .item("Arrange icons", Cmd::ArrangeIcons)
                 .sep()
                 .item("New folder", Cmd::NewFolder)
                 .item("New text document", Cmd::NewFile)
                 .sep()
-                .item("Task View", Cmd::TaskView)
+                .item("Overview", Cmd::TaskView)
                 .item("New desktop", Cmd::NewDesktop)
                 .sep()
                 .item("Next desktop background", Cmd::NextBackground)
@@ -536,7 +694,7 @@ impl Desktop<'_> {
             DeskItem::ThisPc => b.sep().item("Properties", Cmd::Open(App::About)),
             DeskItem::Bin => {
                 b.sep()
-                    .maybe("Empty Recycle Bin", Cmd::EmptyBin, self.desk_icons.bin_full)
+                    .maybe("Empty Trash", Cmd::EmptyBin, self.desk_icons.bin_full)
             }
             DeskItem::App(a) => {
                 let b = b.sep();
@@ -624,7 +782,7 @@ impl Desktop<'_> {
         }
         if let Some(t) = drag.target {
             let verb = match &self.desk_icons.items[t] {
-                DeskItem::Bin => String::from("Move to Recycle Bin"),
+                DeskItem::Bin => String::from("Move to Trash"),
                 it => {
                     let mut s = String::from("Move to ");
                     s.push_str(it.label());
@@ -650,27 +808,19 @@ impl Desktop<'_> {
                 };
                 self.icons.draw_pic(c, pic, LARGE, x, y);
             }
-            DeskItem::App(a) => {
-                self.icons.draw_large(c, *a, x, y);
-                shortcut_arrow(c, x, y + 34);
-            }
+            DeskItem::App(a) => self.icons.draw_large(c, *a, x, y),
             DeskItem::Entry { dir: true, .. } => widgets::folder_icon(c, x, y + 4, 48),
+            it if it.is_shortcut() => {
+                self.icons.draw_large(c, App::Program, x, y);
+                // the little arrow that marks a shortcut
+                let r = Rect::new(x + 2, y + 32, 16, 16);
+                c.fill_round(r, 3, 0xffffff);
+                c.outline_round(r, 3, rgb(0x60, 0x68, 0x78));
+                super::browser::shortcut_arrow(c, r);
+            }
             DeskItem::Entry { .. } => widgets::file_icon(c, x, y + 2, 48),
         }
     }
-}
-
-/// The little arrow on shortcut icons.
-fn shortcut_arrow(c: &mut Canvas, x: i32, y: i32) {
-    let r = Rect::new(x, y, 14, 14);
-    c.fill_round(r, 2, 0xffffff);
-    c.outline_round(r, 2, rgb(0xa0, 0xa4, 0xb0));
-    let ink = rgb(0x10, 0x5c, 0xc8);
-    for k in 0..2 {
-        c.line(x + 3 + k, y + 11, x + 10, y + 4 + k, ink);
-    }
-    c.fill_rect(x + 6, y + 3, 5, 2, ink);
-    c.fill_rect(x + 9, y + 3, 2, 5, ink);
 }
 
 /// Split a label into at most two centred lines, breaking at spaces, and
