@@ -336,6 +336,8 @@ fn type_name(item: &Info) -> String {
                 String::from("Video")
             } else if lower == "rzapp" {
                 String::from("RyzikOS Program")
+            } else if lower == "rzlink" {
+                String::from("Shortcut")
             } else {
                 let mut s: String = ext.chars().flat_map(char::to_uppercase).collect();
                 s.push_str(" File");

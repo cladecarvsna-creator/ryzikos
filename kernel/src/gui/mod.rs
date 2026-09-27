@@ -1073,6 +1073,20 @@ impl<'a> Desktop<'a> {
             self.app_changed(App::Video);
             return;
         }
+        if path.to_ascii_lowercase().ends_with(crate::web::LINK_EXT) {
+            // a desktop shortcut: open what it points at
+            match crate::web::link_target(path) {
+                Some(target) if !target.to_ascii_lowercase().ends_with(crate::web::LINK_EXT) => {
+                    if fs::exists(&target) {
+                        self.open_file(&target);
+                    } else {
+                        serial::write_str("desktop: the shortcut's program is gone\n");
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if path.to_ascii_lowercase().ends_with(crate::web::PROGRAM_EXT) {
             self.open(App::Program);
             self.program.open_file(path);
@@ -1235,6 +1249,7 @@ impl<'a> Desktop<'a> {
                 self.desk_icons.forget();
                 self.refresh_icons();
             }
+            Cmd::ArrangeIcons => self.arrange_icons(),
             Cmd::Personalize => self.open_settings(settings::Page::Personalization),
             Cmd::DisplaySettings => self.open_settings(settings::Page::System),
             Cmd::NextBackground => next_wallpaper(),

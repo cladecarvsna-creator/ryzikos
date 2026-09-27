@@ -212,6 +212,15 @@ fn stroke(c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color:
     }
 }
 
+/// The arrow in the corner of a desktop shortcut's icon.
+pub fn shortcut_arrow(c: &mut Canvas, r: Rect) {
+    let (x, y) = (r.x as f32, r.y as f32);
+    let blue = 0x1a73e8;
+    stroke(c, x + 4.5, y + 11.5, x + 11.0, y + 5.0, 2.0, blue);
+    stroke(c, x + 6.5, y + 4.5, x + 11.5, y + 4.5, 2.0, blue);
+    stroke(c, x + 11.5, y + 4.5, x + 11.5, y + 9.5, 2.0, blue);
+}
+
 fn sqrt(v: f32) -> f32 {
     if v <= 0.0 {
         return 0.0;
@@ -1040,7 +1049,11 @@ impl Tab {
             let _ = crate::fs::create_dir(&dir);
             let to = crate::fs::join(&dir, crate::fs::file_name(from));
             self.status = match crate::fs::read(from).and_then(|d| crate::fs::write(&to, &d)) {
-                Ok(()) => alloc::format!("Installed {}", crate::fs::file_name(from)),
+                Ok(()) => {
+                    let name = crate::fs::file_name(from);
+                    web::add_shortcut(name.trim_end_matches(web::PROGRAM_EXT), &to);
+                    alloc::format!("Installed {}", name)
+                }
                 Err(e) => String::from(e.message()),
             };
             self.pending = Some(Nav::Special(String::from("about:programs")));

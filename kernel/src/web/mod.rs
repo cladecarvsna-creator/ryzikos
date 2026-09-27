@@ -232,6 +232,9 @@ fn save_download(resp: http::Response, viewport: (i32, i32)) -> Page {
     } else {
         format!("{} KB", size.div_ceil(1024))
     };
+    if program {
+        add_shortcut(name.trim_end_matches(PROGRAM_EXT), &path);
+    }
     let (title, text, action) = if program {
         (
             format!("{} is installed", escape(name.trim_end_matches(PROGRAM_EXT))),
@@ -313,6 +316,64 @@ fn programs_in(dir: &str) -> alloc::vec::Vec<String> {
 pub fn programs_folder() -> String {
     let user = crate::users::current_name().unwrap_or_default();
     crate::fs::join(&crate::fs::home(user.as_str()), "Programs")
+}
+
+/// A shortcut on the desktop: a small text file holding the path of the
+/// program it starts.
+pub const LINK_EXT: &str = ".rzlink";
+
+fn desktop_folder() -> String {
+    let user = crate::users::current_name().unwrap_or_default();
+    crate::fs::join(&crate::fs::home(user.as_str()), "Desktop")
+}
+
+/// What a shortcut file points at.
+pub fn link_target(path: &str) -> Option<String> {
+    let data = crate::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&data);
+    let target = text.lines().next()?.trim();
+    (!target.is_empty()).then(|| String::from(target))
+}
+
+/// Put a shortcut to an installed program on the desktop, unless one is
+/// already there.
+pub fn add_shortcut(title: &str, target: &str) {
+    use crate::fs;
+    let dir = desktop_folder();
+    let _ = fs::create_dir(&dir);
+    for info in fs::list(&dir).unwrap_or_default() {
+        if info.name.to_ascii_lowercase().ends_with(LINK_EXT)
+            && link_target(&fs::join(&dir, &info.name)).is_some_and(|t| t.eq_ignore_ascii_case(target))
+        {
+            return;
+        }
+    }
+    let clean: String = title
+        .chars()
+        .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let name = fs::unique_name(&dir, clean.trim(), LINK_EXT);
+    let mut text = String::from(target);
+    text.push('\n');
+    if fs::write(&fs::join(&dir, &name), text.as_bytes()).is_ok() {
+        crate::serial::write_str("desktop: added a shortcut to ");
+        crate::serial::write_str(title);
+        crate::serial::write_str("\n");
+    }
+}
+
+/// Take the desktop shortcuts to a program away, when it is removed.
+pub fn remove_shortcuts(target: &str) {
+    use crate::fs;
+    let dir = desktop_folder();
+    for info in fs::list(&dir).unwrap_or_default() {
+        let path = fs::join(&dir, &info.name);
+        if info.name.to_ascii_lowercase().ends_with(LINK_EXT)
+            && link_target(&path).is_some_and(|t| t.eq_ignore_ascii_case(target))
+        {
+            let _ = fs::remove(&path);
+        }
+    }
 }
 
 /// Programs the user has installed, as paths.

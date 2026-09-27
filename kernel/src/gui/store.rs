@@ -315,10 +315,11 @@ impl Store {
         };
         self.status = match data.map(|d| fs::write(&to, &d).map_err(|e| String::from(e.message()))) {
             Ok(Ok(())) => {
+                web::add_shortcut(&name, &to);
                 crate::serial::write_str("\nstore: installed ");
                 crate::serial::write_str(file);
                 crate::serial::write_str("\n");
-                format!("{} is installed. It is in the launcher under Programs.", name)
+                format!("{} is installed. Its shortcut is on the desktop and in the launcher.", name)
             }
             Ok(Err(e)) | Err(e) => format!("Could not install {}: {}", name, e),
         };
@@ -345,6 +346,7 @@ impl Store {
 
     fn remove(&mut self, file: &str) {
         let path = fs::join(&web::programs_folder(), file);
+        web::remove_shortcuts(&path);
         self.status = match fs::remove(&path) {
             Ok(()) => format!("{} was removed.", self.name_of(file)),
             Err(e) => String::from(e.message()),
