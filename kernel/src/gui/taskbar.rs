@@ -561,27 +561,8 @@ impl Desktop<'_> {
             let (x, y) = (r.x + (SLOT - LARGE as i32) / 2, r.y + 1 - lift);
             match item {
                 TaskItem::Start => self.icons.draw_logo(c, LARGE, x, y),
-                TaskItem::Search | TaskItem::TaskView => {
-                    let tile = Rect::new(x + 2, y + 2, LARGE as i32 - 4, LARGE as i32 - 4);
-                    let face = if active {
-                        theme::accent()
-                    } else {
-                        theme::control_lit()
-                    };
-                    c.fill_round(tile, 12, face);
-                    c.outline_round(tile, 12, theme::stroke());
-                    let ink = if active {
-                        theme::on_accent()
-                    } else {
-                        theme::text()
-                    };
-                    let (cx, cy) = (tile.x + tile.w / 2, tile.y + tile.h / 2);
-                    if item == TaskItem::Search {
-                        search::magnifier(c, cx - 3, cy - 3, 2, ink);
-                    } else {
-                        task_view_icon(c, cx - 11, cy - 10, ink, face);
-                    }
-                }
+                TaskItem::Search => self.icons.draw_pic(c, Pic::Search, LARGE, x, y),
+                TaskItem::TaskView => self.icons.draw_pic(c, Pic::Desktops, LARGE, x, y),
                 TaskItem::App(a) => self.icons.draw(c, a, LARGE, x, y),
             }
             let open = match item {
@@ -701,13 +682,6 @@ impl Desktop<'_> {
 }
 
 /// Two overlapping windows, for the Task View button.
-fn task_view_icon(c: &mut Canvas, x: i32, y: i32, ink: u32, bg: u32) {
-    c.outline_round(Rect::new(x, y, 14, 14), 2, ink);
-    c.fill_round(Rect::new(x + 7, y + 6, 15, 14), 2, bg);
-    c.fill_round(Rect::new(x + 8, y + 7, 14, 13), 2, ink);
-    c.fill_round(Rect::new(x + 10, y + 9, 10, 9), 1, bg);
-}
-
 fn itoa(n: i32) -> crate::StackString<12> {
     use core::fmt::Write;
     let mut s = crate::StackString::new();

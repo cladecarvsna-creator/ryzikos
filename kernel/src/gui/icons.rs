@@ -22,6 +22,9 @@ pub enum Pic {
     Drives,
     BinEmpty,
     BinFull,
+    /// The dock's Search and Overview (the second desktop) buttons.
+    Search,
+    Desktops,
 }
 
 /// Icon sizes, in pixels.
@@ -35,7 +38,7 @@ struct Set([Vec<u32>; 3]);
 
 pub struct Icons {
     apps: Vec<Set>,
-    pics: [Set; 4],
+    pics: [Set; 6],
     /// The RyzikOS logo at each of LOGO_SIZES.
     logo: Vec<(usize, Vec<u32>)>,
 }
@@ -68,7 +71,10 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::About => include_bytes!("../../assets/icons/about.bmp"),
         App::Calculator => include_bytes!("../../assets/icons/calculator.png"),
         App::Browser => include_bytes!("../../assets/icons/browser.png"),
-        App::Photos | App::Video | App::Store | App::Program | App::TaskManager => return None,
+        App::Photos => include_bytes!("../../assets/icons/photos.bmp"),
+        App::Video => include_bytes!("../../assets/icons/video.bmp"),
+        App::TaskManager => include_bytes!("../../assets/icons/taskmgr.bmp"),
+        App::Store | App::Program => return None,
     })
 }
 
@@ -102,6 +108,8 @@ impl Icons {
             pic(include_bytes!("../../assets/icons/drives.bmp")),
             pic(include_bytes!("../../assets/icons/recycle-bin.png")),
             recycle_full(include_bytes!("../../assets/icons/recycle-bin.png")),
+            pic(include_bytes!("../../assets/icons/search.bmp")),
+            pic(include_bytes!("../../assets/icons/desktops.bmp")),
         ];
         // not counted: the boot test knows how many app pictures there are
         let logo = match Picture::from_file(include_bytes!("../../assets/ryzikos-logo.png")) {

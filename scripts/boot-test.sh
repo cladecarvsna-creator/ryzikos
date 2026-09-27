@@ -88,7 +88,7 @@ sign_in
 
 wait_for "desktop: opened Terminal" || fail "the desktop did not start"
 echo "desktop started"
-wait_for "icons: loaded 11 pictures" || fail "the app icons did not load"
+wait_for "icons: loaded 16 pictures" || fail "the app icons did not load"
 echo "app icons loaded"
 
 type_keys e c h o spc k e y b o a r d minus o k ret
