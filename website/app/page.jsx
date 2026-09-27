@@ -32,7 +32,7 @@ const SHOTS = [
   { file: "app-store", title: "App Store", icon: "store" },
   { file: "task-manager", title: "Task Manager", icon: "taskmgr" },
   { file: "files-computer", title: "Files", icon: "explorer" },
-  { file: "program-window", title: "2048", icon: "program" },
+  { file: "program-window", title: "Snake", icon: "program" },
   { file: "photos-gallery", title: "Photos", icon: "photos" },
   { file: "launcher", title: "Launcher", icon: "search" },
 ];
