@@ -119,6 +119,46 @@ pub fn random_array<const N: usize>() -> [u8; N] {
     b
 }
 
+/// AES-256 in counter mode, which the obfuscated transport runs over the
+/// whole TCP stream in each direction.
+pub struct Ctr {
+    aes: Aes256,
+    counter: [u8; 16],
+    block: [u8; 16],
+    used: usize,
+}
+
+impl Ctr {
+    pub fn new(key: &[u8], iv: &[u8]) -> Ctr {
+        Ctr {
+            aes: Aes256::new(key.into()),
+            counter: iv.try_into().unwrap_or([0; 16]),
+            block: [0; 16],
+            used: 16,
+        }
+    }
+
+    pub fn apply(&mut self, data: &mut [u8]) {
+        for b in data {
+            if self.used == 16 {
+                let mut block = self.counter.into();
+                self.aes.encrypt_block(&mut block);
+                self.block = block.into();
+                // the counter is one big-endian number
+                for c in self.counter.iter_mut().rev() {
+                    *c = c.wrapping_add(1);
+                    if *c != 0 {
+                        break;
+                    }
+                }
+                self.used = 0;
+            }
+            *b ^= self.block[self.used];
+            self.used += 1;
+        }
+    }
+}
+
 pub fn random_i64() -> i64 {
     i64::from_le_bytes(random_array())
 }

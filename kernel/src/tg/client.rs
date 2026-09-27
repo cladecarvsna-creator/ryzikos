@@ -10,6 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt::Write;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use smoltcp::wire::Ipv4Address;
 
@@ -240,20 +241,26 @@ fn dc_address(cfg: &Config, dc: i32) -> (Ipv4Address, u16) {
     } else {
         PROD_DCS[(dc as usize).clamp(1, PROD_DCS.len()) - 1]
     };
-    (Ipv4Address::new(ip[0], ip[1], ip[2], ip[3]), 443)
+    // Telegram also listens on 80 and 5222: after a failure try the next
+    let port = PORTS[PORT_TRY.load(Ordering::Relaxed) % PORTS.len()];
+    (Ipv4Address::new(ip[0], ip[1], ip[2], ip[3]), port)
 }
+
+const PORTS: [u16; 3] = [443, 80, 5222];
+/// Which of [`PORTS`] to use; moves on after a network error.
+static PORT_TRY: AtomicUsize = AtomicUsize::new(0);
 
 impl Conn {
     /// Connect to a data centre, with our key for it or a new one.
     fn open(cfg: &Config, dc: i32, key: Option<[u8; 256]>) -> Result<(Conn, [u8; 256])> {
         let (ip, port) = dc_address(cfg, dc);
         log(&format!("connecting to DC {} at {}:{}", dc, ip, port));
-        let mut t = Transport::connect(ip, port)?;
+        let dc_number = if cfg.test { 10000 + dc } else { dc };
+        let mut t = Transport::connect(ip, port, dc_number)?;
         let (key, salt, offset) = match key {
             Some(k) => (k, 0, 0),
             None => {
                 log("creating an authorization key");
-                let dc_number = if cfg.test { 10000 + dc } else { dc };
                 let k = mtproto::create_key(&mut t, dc_number, &cfg.keys)?;
                 log("authorization key ready");
                 (k.key, k.salt, k.time_offset)
@@ -565,10 +572,17 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
                 log(&format!("error: {}", e.text()));
                 c.conn = None;
                 failures += 1;
+                if matches!(e, Error::Net(_)) {
+                    PORT_TRY.fetch_add(1, Ordering::Relaxed);
+                }
                 c.update(|s| {
                     s.online = false;
                     s.busy = false;
-                    s.error = Some(format!("{} (trying again)", e.text()));
+                    s.error = Some(format!(
+                        "Can't reach Telegram: {}. Trying again (attempt {})...",
+                        e.text(),
+                        failures + 1
+                    ));
                 });
                 // wait a little longer after each failure, up to a minute
                 let wait = (2_000i64 << failures.min(5)).min(60_000);

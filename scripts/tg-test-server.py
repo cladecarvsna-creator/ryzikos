@@ -28,7 +28,7 @@ import struct
 import threading
 import time
 
-from telethon.crypto import AES
+from telethon.crypto import AES, AESModeCTR
 from telethon.extensions import BinaryReader
 from telethon.tl import functions, types
 from telethon.tl.tlobject import TLObject
@@ -210,6 +210,9 @@ class Handler(socketserver.BaseRequestHandler):
         self.signed_in = False
         self.lock = threading.Lock()
         self.alive = True
+        # AES-CTR of the obfuscated transport, when the client uses it
+        self.dec = None
+        self.enc = None
 
     # transport
     def read_exact(self, n):
@@ -217,6 +220,8 @@ class Handler(socketserver.BaseRequestHandler):
             d = self.request.recv(65536)
             if not d:
                 raise EOFError
+            if self.dec:
+                d = self.dec.decrypt(d)
             self.buf += d
         out, self.buf = self.buf[:n], self.buf[n:]
         return out
@@ -226,8 +231,11 @@ class Handler(socketserver.BaseRequestHandler):
         return self.read_exact(n)
 
     def send_packet(self, data):
+        data = struct.pack("<I", len(data)) + data
         with self.lock:
-            self.request.sendall(struct.pack("<I", len(data)) + data)
+            if self.enc:
+                data = self.enc.encrypt(data)
+            self.request.sendall(data)
 
     def msg_id(self):
         t = time.time()
@@ -238,9 +246,20 @@ class Handler(socketserver.BaseRequestHandler):
         return i
 
     def handle(self):
-        if self.read_exact(4) != b"\xee\xee\xee\xee":
-            log("not the intermediate transport")
-            return
+        head = self.read_exact(4)
+        if head != b"\xee\xee\xee\xee":
+            # obfuscated: 64 bytes with the keys, then all encrypted
+            init = head + self.read_exact(60)
+            rev = init[8:56][::-1]
+            self.dec = AESModeCTR(init[8:40], init[40:56])
+            self.enc = AESModeCTR(rev[:32], rev[32:48])
+            plain = self.dec.decrypt(init)
+            if plain[56:60] != b"\xee\xee\xee\xee":
+                log("not the intermediate transport")
+                return
+            if self.buf:
+                self.buf = self.dec.decrypt(self.buf)
+            log("obfuscated transport, DC", struct.unpack("<h", plain[60:62])[0])
         log("connection from", self.client_address)
         threading.Thread(target=self.pusher, daemon=True).start()
         try:
