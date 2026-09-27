@@ -1,0 +1,56 @@
+# Build the RyzikOS ISO on every push to main and publish it as the latest
+# GitHub release. The website's download button always points at it.
+name: Release ISO
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  iso:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm clang grub-pc-bin grub-common xorriso mtools
+
+      - name: Install Rust
+        # rustup reads rust-toolchain.toml and adds the x86_64-unknown-none target
+        run: rustup show
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            kernel/target
+          key: cargo-${{ hashFiles('kernel/Cargo.lock') }}
+
+      - name: Build
+        run: make
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="1.0.${{ github.run_number }}"
+          cp build/everos.iso "ryzikos-${version}.iso"
+          sha256sum "ryzikos-${version}.iso" > "ryzikos-${version}.iso.sha256"
+          gh release create "v${version}" "ryzikos-${version}.iso" "ryzikos-${version}.iso.sha256" \
+            --title "RyzikOS ${version}" \
+            --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \
+            --latest
