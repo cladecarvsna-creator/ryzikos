@@ -207,7 +207,11 @@ impl StartMenu {
             return (out, n);
         }
         let left = p.x + (p.w - PER_ROW as i32 * CELL_W) / 2;
-        for (i, app) in APPS.into_iter().filter(|a| a.listed()).enumerate() {
+        // two rows of six; Welcome and the installer are found by search
+        let grid = APPS
+            .into_iter()
+            .filter(|a| a.listed() && !matches!(a, App::Welcome | App::Installer));
+        for (i, app) in grid.take(2 * PER_ROW).enumerate() {
             let (col, row) = ((i % PER_ROW) as i32, (i / PER_ROW) as i32);
             push(
                 Target::App(app),
@@ -383,7 +387,12 @@ impl StartMenu {
                     let x = r.x + (r.w - LARGE as i32) / 2;
                     icons.draw_large(c, app, x, r.y + 10 - lift);
                     let label = Rect::new(r.x, r.y + 64, r.w, 20);
-                    c.text_centered(label, app.title(), theme::text());
+                    // a short name, so neighbours don't run together
+                    let title = match app {
+                        App::About => "About",
+                        _ => app.title(),
+                    };
+                    c.text_centered(label, title, theme::text());
                 }
                 Target::Program(i) => {
                     let face = mix(theme::control(), theme::control_lit(), self.lit(t));
