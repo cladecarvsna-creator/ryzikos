@@ -363,7 +363,7 @@ impl Desktop<'_> {
 
     pub(super) fn open_icon(&mut self, i: usize) {
         match self.desk_icons.items[i].clone() {
-            DeskItem::ThisPc => self.show_folder("/"),
+            DeskItem::ThisPc => self.show_folder(super::explorer::COMPUTER),
             DeskItem::Bin => {
                 let bin = super::explorer::bin_folder();
                 let _ = fs::create_dir(recycle::ROOT);

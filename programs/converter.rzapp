@@ -1,0 +1,64 @@
+<!doctype html>
+<title>Unit Converter</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #eef4f8; color: #17313f; }
+.card { width: 600px; margin: 32px auto; background: white; border-radius: 16px; border: 1px solid #d6e3ec; padding: 24px 28px; }
+h1 { font-size: 30px; margin: 0 0 14px; }
+.tabs button { background: #e3edf4; color: #17313f; border: 0; border-radius: 16px; padding: 8px 16px; font-size: 15px; margin: 0 4px 8px 0; }
+.tabs button.on { background: #0f8bb3; color: white; }
+.row { display: flex; gap: 10px; align-items: center; margin-top: 16px; }
+input { width: 180px; font-size: 22px; padding: 8px 12px; border: 1px solid #c4d5e1; border-radius: 10px; }
+select { font-size: 17px; padding: 8px; border-radius: 10px; }
+.eq { font-size: 26px; color: #0f8bb3; }
+.out { font-size: 30px; font-weight: bold; margin-top: 22px; }
+</style>
+<div class="card">
+  <h1>Unit Converter</h1>
+  <div class="tabs" id="tabs"></div>
+  <div class="row"><input id="v" type="text" value="1"><select id="from"></select><span class="eq">=</span><select id="to"></select></div>
+  <div class="out" id="out"></div>
+</div>
+<script>
+const KINDS = {
+  Length: { m: 1, km: 1000, cm: 0.01, mm: 0.001, mile: 1609.344, yard: 0.9144, foot: 0.3048, inch: 0.0254 },
+  Weight: { kg: 1, g: 0.001, t: 1000, lb: 0.45359237, oz: 0.028349523 },
+  Speed: { 'km/h': 1, 'm/s': 3.6, mph: 1.609344, knot: 1.852 },
+  Data: { byte: 1, KB: 1024, MB: 1048576, GB: 1073741824, TB: 1099511627776 },
+  Temperature: { '°C': 'c', '°F': 'f', K: 'k' },
+};
+let kind = 'Length';
+const $ = id => document.getElementById(id);
+function fill() {
+  const units = Object.keys(KINDS[kind]);
+  for (const id of ['from', 'to']) {
+    const s = $(id);
+    s.innerHTML = '';
+    units.forEach(u => { const o = document.createElement('option'); o.value = u; o.textContent = u; s.appendChild(o); });
+  }
+  $('to').value = units[1];
+  document.querySelectorAll('.tabs button').forEach(b => { b.className = b.textContent === kind ? 'on' : ''; });
+  calc();
+}
+function temp(v, from, to) {
+  const c = from === '°C' ? v : from === '°F' ? (v - 32) * 5 / 9 : v - 273.15;
+  return to === '°C' ? c : to === '°F' ? c * 9 / 5 + 32 : c + 273.15;
+}
+function calc() {
+  const v = parseFloat($('v').value.replace(',', '.'));
+  const from = $('from').value, to = $('to').value;
+  if (isNaN(v)) { $('out').textContent = 'Type a number'; return; }
+  const r = kind === 'Temperature' ? temp(v, from, to) : v * KINDS[kind][from] / KINDS[kind][to];
+  const shown = Math.abs(r) >= 1e6 || (Math.abs(r) < 1e-3 && r !== 0) ? r.toExponential(4) : String(Math.round(r * 10000) / 10000);
+  $('out').textContent = v + ' ' + from + ' = ' + shown + ' ' + to;
+}
+Object.keys(KINDS).forEach(k => {
+  const b = document.createElement('button');
+  b.textContent = k;
+  b.addEventListener('click', () => { kind = k; fill(); });
+  $('tabs').appendChild(b);
+});
+$('v').addEventListener('input', calc);
+$('from').addEventListener('change', calc);
+$('to').addEventListener('change', calc);
+fill();
+</script>

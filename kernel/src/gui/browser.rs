@@ -306,11 +306,6 @@ impl Browser {
         }
     }
 
-    /// Go to one of RyzikOS's own pages, like `about:programs`.
-    pub fn open_address(&mut self, address: &str) {
-        self.tab().navigate(Nav::Special(String::from(address)));
-    }
-
     /// Show a page or run a program from the disk.
     pub fn open_file(&mut self, path: &str) {
         self.tab().navigate(Nav::Special(alloc::format!("file:{}", path)));

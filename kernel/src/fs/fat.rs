@@ -10,7 +10,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::ata::Ata;
+use super::drive::Disk;
 use super::Error;
 
 const SECTOR: usize = 512;
@@ -31,7 +31,7 @@ const ATTR_LFN: u8 = 0x0f;
 
 /// Where the sectors come from.
 pub enum Device {
-    Ata(Ata),
+    Disk(Disk),
     /// A disk in memory, for when the computer has no hard disk.
     Ram(Vec<u8>),
 }
@@ -39,14 +39,14 @@ pub enum Device {
 impl Device {
     pub fn sectors(&self) -> u64 {
         match self {
-            Device::Ata(a) => a.sectors(),
+            Device::Disk(a) => a.sectors(),
             Device::Ram(m) => (m.len() / SECTOR) as u64,
         }
     }
 
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), Error> {
         match self {
-            Device::Ata(a) => a.read(lba, buf).map_err(|_| Error::Io),
+            Device::Disk(a) => a.read(lba, buf).map_err(|_| Error::Io),
             Device::Ram(m) => {
                 let start = lba as usize * SECTOR;
                 let src = m.get(start..start + buf.len()).ok_or(Error::Io)?;
@@ -58,7 +58,7 @@ impl Device {
 
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), Error> {
         match self {
-            Device::Ata(a) => a.write(lba, buf).map_err(|_| Error::Io),
+            Device::Disk(a) => a.write(lba, buf).map_err(|_| Error::Io),
             Device::Ram(m) => {
                 let start = lba as usize * SECTOR;
                 let dst = m.get_mut(start..start + buf.len()).ok_or(Error::Io)?;
@@ -70,7 +70,7 @@ impl Device {
 
     fn flush(&mut self) -> Result<(), Error> {
         match self {
-            Device::Ata(a) => a.flush().map_err(|_| Error::Io),
+            Device::Disk(a) => a.flush().map_err(|_| Error::Io),
             Device::Ram(_) => Ok(()),
         }
     }
@@ -243,7 +243,7 @@ fn format(dev: &mut Device) -> Result<u64, Error> {
     boot[64] = 0x80;
     boot[66] = 0x29;
     put32(&mut boot, 67, random());
-    boot[71..82].copy_from_slice(b"EVEROS     ");
+    boot[71..82].copy_from_slice(b"RYZIKOS    ");
     boot[82..90].copy_from_slice(b"FAT32   ");
     // not bootable: ask the BIOS for the next disk
     boot[90..95].copy_from_slice(&[0xcd, 0x18, 0xf4, 0xeb, 0xfd]);
@@ -263,7 +263,7 @@ fn format(dev: &mut Device) -> Result<u64, Error> {
     put32(&mut fat, 8, END); // the root folder
 
     let mut root = vec![0u8; spc as usize * SECTOR];
-    root[..11].copy_from_slice(b"EVEROS     ");
+    root[..11].copy_from_slice(b"RYZIKOS    ");
     root[11] = ATTR_LABEL;
     let (date, time) = now();
     put16(&mut root, 22, time);
@@ -456,6 +456,11 @@ impl Volume {
             self.dev.write(lba, &buf)?;
         }
         Ok(())
+    }
+
+    /// Bytes not used by any file.
+    pub fn free_bytes(&self) -> u64 {
+        self.free_count as u64 * self.cluster_bytes as u64
     }
 
     /// Write the changed parts of the table to every copy, then make the

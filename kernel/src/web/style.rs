@@ -1190,13 +1190,13 @@ fn apply(s: &mut Style, parent: &Style, name: &str, v: &str, vp: (i32, i32)) {
 fn count_grid_columns(v: &str) -> usize {
     if let Some(rest) = v.strip_prefix("repeat(") {
         let n = rest.split(',').next().unwrap_or("").trim();
-        return n.parse().unwrap_or(3).min(12);
+        return n.parse().unwrap_or(3).min(32);
     }
     split_top(v, ' ')
         .iter()
         .filter(|p| !p.trim().is_empty())
         .count()
-        .min(12)
+        .min(32)
 }
 
 fn inherit_one(s: &mut Style, p: &Style, name: &str) {

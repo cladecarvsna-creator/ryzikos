@@ -632,7 +632,7 @@ Object.defineProperties(Document.prototype, {
   links: { get: () => document.querySelectorAll('a[href]') },
   styleSheets: { get: () => [] },
   fonts: { get: () => ({ ready: Promise.resolve(), add() {}, load: () => Promise.resolve([]), check: () => true, addEventListener() {} }) },
-  implementation: { get: () => ({ createHTMLDocument: () => document, hasFeature: () => true }) },
+  implementation: { get: () => ({ createHTMLDocument: t => detachedDocument('', t), createDocumentType: () => null, hasFeature: () => true }) },
   fullscreenElement: { get: () => null },
   scrollingElement: { get: () => document.documentElement },
   childNodes: { get: () => list(N('kids', 0)) },
@@ -1032,13 +1032,48 @@ class Worker extends EventTarget { constructor() { super(); } postMessage() {} t
 class Blob { constructor(parts, opts) { this._s = (parts || []).map(String).join(''); this.size = this._s.length; this.type = opts && opts.type || ''; } text() { return Promise.resolve(this._s); } slice() { return this; } }
 class File extends Blob { constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = Date.now(); } }
 class FileReader extends EventTarget { readAsText(b) { setTimeout(() => { this.result = b._s; this.readyState = 2; if (this.onload) this.onload({ target: this }); this.dispatchEvent(new Event('load')); }, 0); } readAsDataURL(b) { setTimeout(() => { this.result = 'data:' + b.type + ';base64,' + btoa(unescape(encodeURIComponent(b._s))); if (this.onload) this.onload({ target: this }); }, 0); } }
-class DOMParser {
-  parseFromString(s) {
-    const root = document.createElement('html');
-    root.innerHTML = String(s);
-    const body = root.querySelector('body') || root;
-    return { documentElement: root, body, head: root.querySelector('head'), querySelector: q => root.querySelector(q), querySelectorAll: q => root.querySelectorAll(q), getElementById: i => root.querySelector('#' + CSS.escape(i)), getElementsByTagName: t => root.querySelectorAll(t), title: '' };
+// A document of its own, apart from the page: what DOMParser and
+// document.implementation.createHTMLDocument give. jQuery writes into one
+// to test the browser, so handing back the page's document wipes the page.
+function detachedDocument(html, title) {
+  const root = document.createElement('html');
+  root.innerHTML = String(html || '');
+  let head = root.querySelector('head');
+  let body = root.querySelector('body');
+  if (!head) { head = document.createElement('head'); root.insertBefore(head, root.firstChild); }
+  if (!body) {
+    body = document.createElement('body');
+    for (const c of [...root.childNodes]) if (c !== head) body.appendChild(c);
+    root.appendChild(body);
   }
+  let docTitle = title === undefined ? '' : String(title);
+  const d = {
+    nodeType: DOC, nodeName: '#document', documentElement: root, head, body,
+    get title() { return docTitle; }, set title(v) { docTitle = String(v); },
+    get childNodes() { return [root]; }, get children() { return [root]; },
+    get firstChild() { return root; }, get firstElementChild() { return root; },
+    readyState: 'complete', defaultView: null, location: null, cookie: '', characterSet: 'UTF-8', compatMode: 'CSS1Compat',
+    querySelector: q => root.querySelector(q),
+    querySelectorAll: q => root.querySelectorAll(q),
+    getElementById: i => root.querySelector('#' + CSS.escape(String(i))),
+    getElementsByTagName: t => root.querySelectorAll(t),
+    getElementsByClassName: c => root.getElementsByClassName(c),
+    getElementsByName: n => root.querySelectorAll('[name="' + n + '"]'),
+    createElement: t => document.createElement(t),
+    createElementNS: (ns, t) => document.createElementNS(ns, t),
+    createTextNode: t => document.createTextNode(t),
+    createComment: t => document.createComment(t),
+    createDocumentFragment: () => document.createDocumentFragment(),
+    createEvent: t => document.createEvent(t),
+    importNode: (n, deep) => n.cloneNode(deep),
+    adoptNode: n => n,
+    addEventListener() {}, removeEventListener() {},
+    get implementation() { return document.implementation; },
+  };
+  return d;
+}
+class DOMParser {
+  parseFromString(s) { return detachedDocument(s); }
 }
 class XMLSerializer { serializeToString(n) { return n.outerHTML || ''; } }
 class Image extends HTMLElement { constructor(w, h) { super(); const e = document.createElement('img'); if (w) e.width = w; if (h) e.height = h; return e; } }

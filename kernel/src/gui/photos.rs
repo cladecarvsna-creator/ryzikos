@@ -84,11 +84,15 @@ fn view_rect() -> Rect {
 pub fn library(folders: &[&str], wanted: fn(&str) -> bool, max: usize) -> Vec<String> {
     let home = fs::home(crate::users::current_name().unwrap_or_default().as_str());
     let mut dirs: Vec<String> = folders.iter().map(|f| fs::join(&home, f)).collect();
-    if fs::disc_label().is_some() {
-        dirs.push(String::from(fs::DISC_PATH));
-        if let Ok(items) = fs::list(fs::DISC_PATH) {
+    // every disc and other disk, and the folders at their top
+    for d in fs::drives() {
+        if !d.ready || d.kind == fs::DriveKind::System {
+            continue;
+        }
+        dirs.push(d.path.clone());
+        if let Ok(items) = fs::list(&d.path) {
             for i in items.iter().filter(|i| i.dir) {
-                dirs.push(fs::join(fs::DISC_PATH, &i.name));
+                dirs.push(fs::join(&d.path, &i.name));
             }
         }
     }

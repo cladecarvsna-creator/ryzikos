@@ -111,6 +111,8 @@ impl Shell {
                 println!("  photos  open Photos (photos <picture> shows one)");
                 println!("  video   open Video Player (video <file.avi> plays one)");
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
+                println!("  drives  list the disks and CD/DVD drives");
+                println!("  store   open the App Store to install programs");
                 println!("  browser open the web browser (browser <address> goes there)");
                 println!("  fetch   download a web page and show its title and links");
                 println!("  exit    close the terminal window");
@@ -185,6 +187,18 @@ impl Shell {
                     gui::request_file(&self.path(args));
                 }
                 open(app);
+            }
+            "store" | "apps" => open(App::Store),
+            "drives" | "disks" => {
+                fs::refresh_disc();
+                for d in fs::drives() {
+                    let size = if d.bytes > 0 {
+                        alloc::format!("{} MB", d.bytes / (1024 * 1024))
+                    } else {
+                        alloc::string::String::new()
+                    };
+                    println!("{:<16} {:<10} {:<24} {} {}", d.name, if d.ready { d.path.as_str() } else { "-" }, d.status, size, d.detail);
+                }
             }
             "disc" | "cd-rom" => {
                 if fs::refresh_disc() {

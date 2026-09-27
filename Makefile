@@ -33,7 +33,7 @@ $(KERNEL): $(ASM_OBJ) $(RUST_LIB) linker.ld
 	ld -n --gc-sections -z noexecstack --no-warn-rwx-segments -T linker.ld -o $@ $(ASM_OBJ) $(RUST_LIB)
 	grub-file --is-x86-multiboot2 $@
 
-MEDIA      := iso/media/Pictures iso/media/Videos programs
+MEDIA      := iso/media/Pictures iso/media/Videos $(wildcard programs/*)
 
 # The disc also carries sample photos and a video (made by
 # scripts/gen-media.py) and the programs, which RyzikOS reads at /Disc.
@@ -44,7 +44,7 @@ $(ISO): $(KERNEL) iso/boot/grub/grub.cfg $(MEDIA)
 	rm -rf $(BUILD)/iso/Pictures $(BUILD)/iso/Videos $(BUILD)/iso/Programs
 	cp -r iso/media/. $(BUILD)/iso/
 	mkdir -p $(BUILD)/iso/Programs
-	cp programs/*.rzapp $(BUILD)/iso/Programs/
+	cp programs/*.rzapp programs/catalog.txt $(BUILD)/iso/Programs/
 	grub-mkrescue -o $@ $(BUILD)/iso -- -volid RYZIKOS_1_0 2> /dev/null
 
 # A blank disk; EverOS formats it as FAT32 on first boot. Read it with

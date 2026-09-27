@@ -22,6 +22,11 @@ use crate::keyboard::{self, Key};
 use crate::{interrupts, users};
 
 pub const CLIENT_W: i32 = 1120;
+/// Where every disk and drive is listed.
+pub const COMPUTER: &str = "computer:";
+/// A drive in the Computer view.
+const TILE_W: i32 = 400;
+const TILE_H: i32 = 92;
 pub const CLIENT_H: i32 = 680;
 
 const NAV_H: i32 = 48;
@@ -112,6 +117,7 @@ enum Focus {
 enum PlaceKind {
     Home,
     Library,
+    Computer,
     Drive,
     Disc,
     Bin,
@@ -119,7 +125,7 @@ enum PlaceKind {
 
 /// A place in the navigation pane.
 struct Place {
-    label: &'static str,
+    label: String,
     path: String,
     kind: PlaceKind,
 }
@@ -160,6 +166,8 @@ pub struct Explorer {
     seen: u32,
     /// A file to open in Notepad, for the desktop to pick up.
     pub open_request: Option<String>,
+    /// The disks and drives, when Computer is shown.
+    drives: Vec<fs::DriveInfo>,
 }
 
 fn content() -> Rect {
@@ -241,34 +249,41 @@ pub fn bin_folder() -> String {
     recycle::folder(&user())
 }
 
+/// Drives the navigation pane has room for.
+const SIDE_DRIVES: usize = 6;
+
 fn places() -> Vec<Place> {
     let home = home();
     let mut out = vec![Place {
-        label: "Home",
+        label: String::from("Home"),
         path: home.clone(),
         kind: PlaceKind::Home,
     }];
     for lib in fs::LIBRARIES {
         out.push(Place {
-            label: lib,
+            label: String::from(lib),
             path: fs::join(&home, lib),
             kind: PlaceKind::Library,
         });
     }
     out.push(Place {
-        label: "System Disk",
-        path: String::from("/"),
-        kind: PlaceKind::Drive,
+        label: String::from("Computer"),
+        path: String::from(COMPUTER),
+        kind: PlaceKind::Computer,
     });
-    if fs::disc_label().is_some() {
+    for d in fs::drives().into_iter().take(SIDE_DRIVES) {
         out.push(Place {
-            label: "Disc",
-            path: String::from(fs::DISC_PATH),
-            kind: PlaceKind::Disc,
+            label: d.name,
+            path: d.path,
+            kind: if d.kind == fs::DriveKind::Cd {
+                PlaceKind::Disc
+            } else {
+                PlaceKind::Drive
+            },
         });
     }
     out.push(Place {
-        label: "Trash",
+        label: String::from("Trash"),
         path: bin_folder(),
         kind: PlaceKind::Bin,
     });
@@ -276,10 +291,12 @@ fn places() -> Vec<Place> {
 }
 
 /// Where place `i` is in the navigation pane: a gap before the libraries
-/// and another before the devices (the disk, the disc) and the Trash.
-fn place_rect(i: usize, _n: usize) -> Rect {
+/// and another before the devices (Computer, the disks, the drives).
+fn place_rect(i: usize, n: usize) -> Rect {
     let gap = if i == 0 {
         0
+    } else if i + 1 == n {
+        68
     } else if i > fs::LIBRARIES.len() {
         56
     } else {
@@ -291,6 +308,16 @@ fn place_rect(i: usize, _n: usize) -> Rect {
         SIDE_W - 12,
         SIDE_ROW - 2,
     )
+}
+
+/// "1.5 GB", "300 MB" for disk sizes.
+fn big_size(bytes: u64) -> String {
+    let mb = bytes / (1024 * 1024);
+    if mb >= 1024 {
+        format!("{}.{} GB", mb / 1024, mb % 1024 * 10 / 1024)
+    } else {
+        format!("{} MB", mb)
+    }
 }
 
 fn type_name(item: &Info) -> String {
@@ -377,6 +404,7 @@ impl Explorer {
             started: false,
             seen: 0,
             open_request: None,
+            drives: Vec::new(),
         }
     }
 
@@ -425,16 +453,24 @@ impl Explorer {
         if self.at_bin() {
             return String::from("Trash - Files");
         }
-        let name = fs::file_name(&self.path);
-        let mut t = String::from(if name.is_empty() {
-            "System Disk"
-        } else if fs::same_name(&self.path, fs::DISC_PATH) {
-            "Disc"
-        } else {
-            name
-        });
+        let mut t = self.place_name();
         t.push_str(" - Files");
         t
+    }
+
+    /// What the shown folder is called: its name, or the drive's.
+    fn place_name(&self) -> String {
+        if self.at_computer() {
+            return String::from("Computer");
+        }
+        if let Some(d) = fs::drives().into_iter().find(|d| fs::same_name(&d.path, &self.path)) {
+            return d.name;
+        }
+        String::from(fs::file_name(&self.path))
+    }
+
+    fn at_computer(&self) -> bool {
+        self.path == COMPUTER
     }
 
     // ---- folders ---------------------------------------------------------------
@@ -450,8 +486,30 @@ impl Explorer {
     }
 
     fn load(&mut self, path: &str) -> bool {
+        if path == COMPUTER {
+            fs::refresh_disc();
+        }
         self.seen = fs::changes();
-        match fs::list(path) {
+        let listed = if path == COMPUTER {
+            self.drives = fs::drives();
+            Ok(self
+                .drives
+                .iter()
+                .map(|d| Info {
+                    name: d.name.clone(),
+                    dir: true,
+                    size: 0,
+                    modified: (0, 0, 0, 0, 0),
+                })
+                .collect())
+        } else {
+            if fs::is_on_disc(path) {
+                // a disc may have gone in since
+                fs::refresh_disc();
+            }
+            fs::list(path)
+        };
+        match listed {
             Ok(items) => {
                 if !fs::same_name(path, &self.path) {
                     self.search = TextField::default();
@@ -483,6 +541,13 @@ impl Explorer {
     }
 
     fn navigate(&mut self, path: &str) {
+        // typed as an address or given to the shell's explorer command
+        let bare = path.trim_matches('/');
+        let path = if bare.eq_ignore_ascii_case(COMPUTER) || bare.eq_ignore_ascii_case("computer") {
+            COMPUTER
+        } else {
+            path
+        };
         let old = self.path.clone();
         if self.load(path) && !fs::same_name(&old, path) {
             self.back.push(old);
@@ -509,9 +574,12 @@ impl Explorer {
     }
 
     fn go_up(&mut self) {
-        if self.at_bin() {
-            self.navigate("/");
-        } else if self.path != "/" {
+        let drive_root = fs::drives().iter().any(|d| fs::same_name(&d.path, &self.path));
+        if self.at_bin() || drive_root {
+            let from = self.place_name();
+            self.navigate(COMPUTER);
+            self.select_name(&from);
+        } else if !self.at_computer() {
             let up = fs::parent(&self.path);
             let from = String::from(fs::file_name(&self.path));
             self.navigate(&up);
@@ -602,6 +670,28 @@ impl Explorer {
     // ---- commands --------------------------------------------------------------
 
     fn open(&mut self, i: usize) {
+        if self.at_computer() {
+            let Some(d) = self.drives.iter().find(|d| d.name == self.items[i].name).cloned() else {
+                return;
+            };
+            if d.kind == fs::DriveKind::Cd && !d.ready {
+                // look again: a disc may have gone in
+                fs::refresh_disc();
+                if let Some(now) = fs::drives().into_iter().find(|n| n.path == d.path && n.ready) {
+                    self.navigate(&now.path);
+                } else {
+                    self.dialog = Some(Dialog::Message("There is no disc in the drive."));
+                    self.refresh();
+                }
+            } else if d.ready {
+                self.navigate(&d.path);
+            } else {
+                self.dialog = Some(Dialog::Message(
+                    "This disk has a format RyzikOS can't read. Only FAT32 disks can be opened.",
+                ));
+            }
+            return;
+        }
         let item = &self.items[i];
         let path = fs::join(&self.path, &item.name);
         if item.dir {
@@ -788,8 +878,16 @@ impl Explorer {
         ((content().w - 16) / CELL_W).max(1)
     }
 
+    fn tile_columns(&self) -> i32 {
+        ((content().w - 24) / TILE_W).max(1)
+    }
+
     fn content_height(&self) -> i32 {
         let n = self.items.len() as i32;
+        if self.at_computer() {
+            let cols = self.tile_columns();
+            return 44 + (n + cols - 1) / cols * (TILE_H + 12) + 16;
+        }
         match self.view {
             View::Details => HEADER_H + n * ROW + 8,
             View::Icons => (n + self.columns() - 1) / self.columns() * CELL_H + 16,
@@ -799,6 +897,16 @@ impl Explorer {
     /// Where item `i` is drawn, before scrolling is taken into account.
     fn item_rect(&self, i: usize) -> Rect {
         let c = content();
+        if self.at_computer() {
+            let cols = self.tile_columns();
+            let (col, row) = (i as i32 % cols, i as i32 / cols);
+            return Rect::new(
+                c.x + 16 + col * (TILE_W + 12),
+                c.y + 44 + row * (TILE_H + 12),
+                TILE_W,
+                TILE_H,
+            );
+        }
         match self.view {
             View::Details => Rect::new(c.x + 6, c.y + HEADER_H + i as i32 * ROW, c.w - 12, ROW),
             View::Icons => {
@@ -816,7 +924,8 @@ impl Explorer {
 
     fn item_at(&self, x: i32, y: i32) -> Option<usize> {
         let c = content();
-        if !c.contains(x, y) || (self.view == View::Details && y < c.y + HEADER_H) {
+        let header = self.view == View::Details && !self.at_computer();
+        if !c.contains(x, y) || (header && y < c.y + HEADER_H) {
             return None;
         }
         (0..self.items.len()).find(|&i| self.item_rect(i).offset(0, -self.scroll).contains(x, y))
@@ -833,7 +942,7 @@ impl Explorer {
         };
         let c = content();
         let r = self.item_rect(i);
-        let top = if self.view == View::Details {
+        let top = if self.view == View::Details && !self.at_computer() {
             c.y + HEADER_H
         } else {
             c.y
@@ -849,21 +958,27 @@ impl Explorer {
     /// The parts of the address: label, folder and where each is drawn.
     fn crumbs(&self) -> Vec<(String, String, Rect)> {
         let a = address_rect();
-        let mut parts = vec![(String::from("System Disk"), String::from("/"))];
-        let mut acc = String::new();
-        let bin = bin_folder();
-        for p in self.path.split('/').filter(|p| !p.is_empty()) {
-            acc.push('/');
-            acc.push_str(p);
-            if fs::same_name(&acc, &bin) {
-                // the Recycle Bin is a place of its own
-                parts.clear();
-                parts.push((String::from("Trash"), acc.clone()));
-            } else if fs::same_name(&acc, fs::DISC_PATH) {
-                parts.clear();
-                parts.push((String::from("Disc"), acc.clone()));
-            } else if !fs::same_name(&acc, recycle::ROOT) {
-                parts.push((String::from(p), acc.clone()));
+        let computer = (String::from("Computer"), String::from(COMPUTER));
+        let mut parts = vec![computer.clone()];
+        if !self.at_computer() {
+            let drives = fs::drives();
+            parts.push((String::from("System Disk"), String::from("/")));
+            let mut acc = String::new();
+            let bin = bin_folder();
+            for p in self.path.split('/').filter(|p| !p.is_empty()) {
+                acc.push('/');
+                acc.push_str(p);
+                if fs::same_name(&acc, &bin) {
+                    // the Trash is a place of its own
+                    parts.clear();
+                    parts.push((String::from("Trash"), acc.clone()));
+                } else if let Some(d) = drives.iter().find(|d| fs::same_name(&d.path, &acc)) {
+                    parts.clear();
+                    parts.push(computer.clone());
+                    parts.push((d.name.clone(), acc.clone()));
+                } else if !fs::same_name(&acc, recycle::ROOT) {
+                    parts.push((String::from(p), acc.clone()));
+                }
             }
         }
         // drop parts from the front until they fit
@@ -1115,6 +1230,13 @@ impl Explorer {
                     ("Large icons", "", Some(Cmd::Icons)),
                     ("Refresh", "F5", Some(Cmd::Refresh)),
                 ]
+            };
+        }
+        if self.at_computer() {
+            return if on_item {
+                vec![("Open", "Enter", Some(Cmd::Open))]
+            } else {
+                vec![("Refresh", "F5", Some(Cmd::Refresh))]
             };
         }
         if on_item {
@@ -1445,7 +1567,7 @@ impl Explorer {
         let enabled = [
             !self.back.is_empty(),
             !self.forward.is_empty(),
-            self.path != "/",
+            !self.at_computer(),
             true,
         ];
         for (i, on) in enabled.into_iter().enumerate() {
@@ -1487,7 +1609,9 @@ impl Explorer {
             let icon_y = a.y + 8;
             if self.at_bin() {
                 icons::get().draw_pic(c, Pic::BinEmpty, SMALL, a.x + 8, icon_y);
-            } else if crumbs.len() > 1 {
+            } else if self.at_computer() {
+                icons::get().draw_pic(c, Pic::Computer, SMALL, a.x + 8, icon_y);
+            } else if crumbs.len() > 2 {
                 widgets::folder_icon(c, a.x + 8, icon_y, 16);
             } else {
                 drive_icon(c, a.x + 8, icon_y);
@@ -1505,14 +1629,7 @@ impl Explorer {
         self.search.draw(c, s, self.focus == Focus::Search, caret);
         if self.search.text.is_empty() && self.focus != Focus::Search {
             let mut label = String::from("Search ");
-            let name = fs::file_name(&self.path);
-            label.push_str(if self.at_bin() {
-                "Trash"
-            } else if name.is_empty() {
-                "System Disk"
-            } else {
-                name
-            });
+            label.push_str(&self.place_name());
             let label = fit(&label, s.w - 40);
             c.draw_text(s.x + 10, s.y + 7, &label, theme::text_dim());
         }
@@ -1528,13 +1645,14 @@ impl Explorer {
         c.fill_rect(0, TOP - 1, CLIENT_W, 1, theme::stroke());
         let has_sel = !self.chosen().is_empty();
         let bin = self.at_bin();
-        // the disc can only be read
-        let disc = fs::is_on_disc(&self.path);
+        // discs can only be read, and Computer only lists drives
+        let disc = self.at_computer() || fs::is_read_only(&self.path);
         for (cmd, label, r) in commands(bin) {
             let enabled = match cmd {
                 Cmd::NewFolder | Cmd::NewFile => !disc,
                 Cmd::Rename => self.single().is_some() && !disc,
                 Cmd::Delete => has_sel && !disc,
+                Cmd::Details | Cmd::Icons => !self.at_computer(),
                 Cmd::Restore => has_sel && bin,
                 Cmd::Empty => !self.items.is_empty(),
                 _ => true,
@@ -1611,6 +1729,7 @@ impl Explorer {
                 c.fill_round(r, 4, theme::hover());
             }
             match p.kind {
+                PlaceKind::Computer => icons::get().draw_pic(c, Pic::Computer, SMALL, r.x + 12, r.y + 7),
                 PlaceKind::Drive => drive_icon(c, r.x + 12, r.y + 8),
                 PlaceKind::Disc => disc_icon(c, r.x + 12, r.y + 7),
                 PlaceKind::Home => home_icon(c, r.x + 12, r.y + 7),
@@ -1624,16 +1743,22 @@ impl Explorer {
                     icons::get().draw_pic(c, pic, SMALL, r.x + 12, r.y + 7);
                 }
             }
-            c.draw_text(r.x + 38, r.y + 7, p.label, theme::text());
+            let label = fit(&p.label, r.w - 44);
+            c.draw_text(r.x + 38, r.y + 7, &label, theme::text());
         }
-        // "Devices" above the disk
-        let disk = place_rect(fs::LIBRARIES.len() + 1, n);
-        c.fill_rect(12, disk.y - 42, SIDE_W - 24, 1, theme::stroke());
-        icons::get().draw_pic(c, Pic::Computer, SMALL, 12, disk.y - 30);
-        c.draw_text(38, disk.y - 30, "Devices", theme::text_dim());
+        // "Devices" above Computer and the drives
+        let first = place_rect(fs::LIBRARIES.len() + 1, n);
+        c.fill_rect(12, first.y - 42, SIDE_W - 24, 1, theme::stroke());
+        c.draw_text(14, first.y - 30, "Devices", theme::text_dim());
+        let bin = place_rect(n - 1, n);
+        c.fill_rect(12, bin.y - 8, SIDE_W - 24, 1, theme::stroke());
     }
 
     fn draw_files(&mut self, c: &mut Canvas, caret: bool) {
+        if self.at_computer() {
+            self.draw_drives(c);
+            return;
+        }
         let area = content();
         let mut f = c.sub(Rect::new(0, 0, c.width, c.height));
         f.clip_to(area);
@@ -1738,6 +1863,67 @@ impl Explorer {
         widgets::draw_scrollbar(c, track(), true, total, area.h, self.scroll);
     }
 
+    /// Computer: a tile for every disk and drive, with how full it is.
+    fn draw_drives(&self, c: &mut Canvas) {
+        let area = content();
+        let mut f = c.sub(Rect::new(0, 0, c.width, c.height));
+        f.clip_to(area);
+        let scroll = self.scroll;
+        f.draw_text(area.x + 18, area.y + 14 - scroll, "Disks and drives", theme::text_dim());
+        for (i, d) in self.drives.iter().enumerate() {
+            let r = self.item_rect(i).offset(0, -scroll);
+            if r.bottom() < area.y || r.y > area.bottom() {
+                continue;
+            }
+            if self.is_chosen(i) {
+                f.fill_round(r, 6, theme::selection());
+            } else if self.hover == Some(i) {
+                f.fill_round(r, 6, theme::row_hover());
+            }
+            f.outline_round(r, 6, theme::stroke());
+            // a big icon
+            let (ix, iy) = (r.x + 14, r.y + 20);
+            if d.kind == fs::DriveKind::Cd {
+                big_disc_icon(&mut f, ix, iy, d.ready);
+            } else {
+                big_disk_icon(&mut f, ix, iy, d.kind == fs::DriveKind::System);
+            }
+            let tx = r.x + 84;
+            let tw = r.w - 96;
+            f.draw_text(tx, r.y + 8, &fit(&d.name, tw), theme::text());
+            let dim = mix(theme::text_dim(), theme::text(), 60);
+            match d.free {
+                Some(free) if d.bytes > 0 => {
+                    let bar = Rect::new(tx, r.y + 34, tw, 10);
+                    f.fill_round(bar, 3, mix(theme::stroke(), theme::light(), 140));
+                    let used = d.bytes.saturating_sub(free);
+                    let w = (bar.w as u64 * used / d.bytes) as i32;
+                    let full = used * 10 > d.bytes * 9;
+                    let color = if full { theme::error() } else { theme::accent() };
+                    f.fill_round(Rect::new(bar.x, bar.y, w.max(3), bar.h), 3, color);
+                    let s = format!("{} free of {}", big_size(free), big_size(d.bytes));
+                    f.draw_text(tx, r.y + 48, &s, dim);
+                }
+                _ => {
+                    let mut s = d.status.clone();
+                    if d.bytes > 0 {
+                        let _ = write!(s, ", {}", big_size(d.bytes));
+                    }
+                    let color = if d.ready || d.kind == fs::DriveKind::Cd {
+                        dim
+                    } else {
+                        theme::warning()
+                    };
+                    f.draw_text(tx, r.y + 36, &fit(&s, tw), color);
+                }
+            }
+            let detail = fit(&d.detail, tw);
+            f.draw_text(tx, r.y + 68, &detail, theme::text_dim());
+        }
+        let total = self.content_height();
+        widgets::draw_scrollbar(c, track(), true, total, area.h, self.scroll);
+    }
+
     fn draw_status(&self, c: &mut Canvas) {
         let r = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);
         c.fill(r, theme::face());
@@ -1745,6 +1931,11 @@ impl Explorer {
         let ty = r.y + (STATUS_H - UI.line_height) / 2;
         let mut s = String::new();
         let n = self.items.len();
+        if self.at_computer() {
+            let _ = write!(s, "{} disk{} and drive{}", n, if n == 1 { "" } else { "s" }, if n == 1 { "" } else { "s" });
+            c.draw_text(12, ty, &s, theme::text());
+            return;
+        }
         let _ = write!(s, "{} item{}", n, if n == 1 { "" } else { "s" });
         let chosen = self.chosen();
         if chosen.len() > 1 {
@@ -1770,6 +1961,20 @@ impl Explorer {
         }
         c.draw_text(12, ty, &s, theme::text());
         s.clear();
+        // on another disk or a disc: say which
+        let other = fs::drives().into_iter().find(|d| {
+            d.kind != fs::DriveKind::System
+                && (fs::same_name(&d.path, &self.path)
+                    || self.path.len() > d.path.len()
+                        && fs::same_name(&self.path[..d.path.len()], &d.path)
+                        && self.path.as_bytes()[d.path.len()] == b'/')
+        });
+        if let Some(d) = other {
+            let _ = write!(s, "{}  {}  {}", d.name, d.status, big_size(d.bytes));
+            let w = UI.width(&s);
+            c.draw_text(r.right() - 14 - w, ty, &s, theme::text_dim());
+            return;
+        }
         match fs::storage() {
             fs::Storage::Disk => {
                 let _ = write!(
@@ -1797,6 +2002,33 @@ fn disc_icon(c: &mut Canvas, x: i32, y: i32) {
     c.fill_round(Rect::new(x + 3, y + 3, 7, 7), 3, rgb(0xe8, 0xf0, 0xff));
     c.outline_round(Rect::new(x, y, 16, 16), 8, rgb(0x70, 0x7c, 0x90));
     c.fill_round(Rect::new(x + 6, y + 6, 4, 4), 2, theme::raised());
+}
+
+/// A hard disk, 48 by 40 pixels: a case with a light. The system disk
+/// has the logo color.
+fn big_disk_icon(c: &mut Canvas, x: i32, y: i32, system: bool) {
+    let body = if system { theme::accent() } else { rgb(0x6b, 0x77, 0x8a) };
+    c.fill_round(Rect::new(x, y + 8, 52, 30), 6, body);
+    c.fill_round(Rect::new(x + 2, y + 10, 48, 16), 5, mix(body, rgb(0xff, 0xff, 0xff), 60));
+    c.fill_round(Rect::new(x + 40, y + 29, 6, 5), 2, rgb(0x5c, 0xe0, 0x8a));
+    for k in 0..4 {
+        c.fill_rect(x + 8 + k * 6, y + 30, 3, 4, mix(body, rgb(0, 0, 0), 60));
+    }
+}
+
+/// A CD, 48 pixels: silver when a disc is in, a gray outline when not.
+fn big_disc_icon(c: &mut Canvas, x: i32, y: i32, disc: bool) {
+    let r = Rect::new(x + 2, y, 46, 46);
+    if disc {
+        c.fill_round(r, 23, rgb(0xc4, 0xcf, 0xdd));
+        c.fill_round(Rect::new(x + 10, y + 8, 18, 18), 9, rgb(0xee, 0xf4, 0xff));
+        c.outline_round(r, 23, rgb(0x70, 0x7c, 0x90));
+    } else {
+        c.outline_round(r, 23, rgb(0x9a, 0xa4, 0xb4));
+        c.outline_round(Rect::new(x + 6, y + 4, 38, 38), 19, rgb(0xc8, 0xcf, 0xda));
+    }
+    c.fill_round(Rect::new(x + 19, y + 17, 12, 12), 6, theme::light());
+    c.outline_round(Rect::new(x + 19, y + 17, 12, 12), 6, rgb(0x90, 0x9a, 0xaa));
 }
 
 fn drive_icon(c: &mut Canvas, x: i32, y: i32) {

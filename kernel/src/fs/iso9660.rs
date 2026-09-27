@@ -8,7 +8,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::ata::{Atapi, CD_SECTOR};
+use super::ata::CD_SECTOR;
+use super::drive::CdDrive;
 use super::{Error, Info};
 
 /// Biggest file read into memory at once.
@@ -23,20 +24,22 @@ struct Record {
     modified: (u16, u8, u8, u8, u8),
 }
 
+/// A disc's file system. The drive it is in is passed to every call.
 pub struct Disc {
-    dev: Atapi,
     root: Record,
     joliet: bool,
     pub label: String,
+    size: u64,
 }
 
 impl Disc {
     /// Read the volume descriptors of the disc in `dev`.
-    pub fn mount(mut dev: Atapi) -> Option<Disc> {
+    pub fn mount(dev: &mut CdDrive) -> Option<Disc> {
         let mut sector = vec![0u8; CD_SECTOR];
         let mut primary = None;
         let mut joliet = None;
         let mut label = String::new();
+        let mut size = 0;
         for lba in 16..48 {
             dev.read(lba, &mut sector).ok()?;
             if &sector[1..6] != b"CD001" {
@@ -45,6 +48,9 @@ impl Disc {
             match sector[0] {
                 1 if primary.is_none() => {
                     primary = parse_record(&sector[156..190], false);
+                    let blocks = u32::from_le_bytes(sector[80..84].try_into().unwrap()) as u64;
+                    let block = u16::from_le_bytes([sector[128], sector[129]]) as u64;
+                    size = blocks * block;
                     label = String::from(
                         core::str::from_utf8(&sector[40..72])
                             .unwrap_or("")
@@ -70,18 +76,18 @@ impl Disc {
             label = String::from("Disc");
         }
         Some(Disc {
-            dev,
             root,
             joliet: is_joliet,
             label,
+            size,
         })
     }
 
-    fn read_dir(&mut self, dir: &Record) -> Result<Vec<Record>, Error> {
+    fn read_dir(&self, dev: &mut CdDrive, dir: &Record) -> Result<Vec<Record>, Error> {
         let len = (dir.size as usize).min(4 * 1024 * 1024);
         let sectors = len.div_ceil(CD_SECTOR);
         let mut data = vec![0u8; sectors * CD_SECTOR];
-        self.dev.read(dir.lba, &mut data).map_err(|_| Error::Io)?;
+        dev.read(dir.lba, &mut data).map_err(|_| Error::Io)?;
         let mut out = Vec::new();
         let mut at = 0;
         while at < len {
@@ -110,13 +116,13 @@ impl Disc {
         Ok(out)
     }
 
-    fn find(&mut self, path: &str) -> Result<Record, Error> {
+    fn find(&self, dev: &mut CdDrive, path: &str) -> Result<Record, Error> {
         let mut cur = self.root.clone();
         for part in path.split('/').filter(|p| !p.is_empty()) {
             if !cur.dir {
                 return Err(Error::NotADirectory);
             }
-            let items = self.read_dir(&cur)?;
+            let items = self.read_dir(dev, &cur)?;
             cur = items
                 .into_iter()
                 .find(|r| super::same_name(&r.name, part))
@@ -126,13 +132,13 @@ impl Disc {
     }
 
     /// What is in a folder of the disc; `path` is inside the disc.
-    pub fn list(&mut self, path: &str) -> Result<Vec<Info>, Error> {
-        let dir = self.find(path)?;
+    pub fn list(&self, dev: &mut CdDrive, path: &str) -> Result<Vec<Info>, Error> {
+        let dir = self.find(dev, path)?;
         if !dir.dir {
             return Err(Error::NotADirectory);
         }
         Ok(self
-            .read_dir(&dir)?
+            .read_dir(dev, &dir)?
             .into_iter()
             .map(|r| Info {
                 name: r.name,
@@ -143,8 +149,8 @@ impl Disc {
             .collect())
     }
 
-    pub fn read(&mut self, path: &str) -> Result<Vec<u8>, Error> {
-        let r = self.find(path)?;
+    pub fn read(&self, dev: &mut CdDrive, path: &str) -> Result<Vec<u8>, Error> {
+        let r = self.find(dev, path)?;
         if r.dir {
             return Err(Error::IsADirectory);
         }
@@ -153,24 +159,30 @@ impl Disc {
             return Err(Error::Full);
         }
         let mut data = vec![0u8; len.div_ceil(CD_SECTOR) * CD_SECTOR];
-        self.dev.read(r.lba, &mut data).map_err(|_| Error::Io)?;
+        dev.read(r.lba, &mut data).map_err(|_| Error::Io)?;
         data.truncate(len);
         Ok(data)
     }
 
-    pub fn is_dir(&mut self, path: &str) -> bool {
-        self.find(path).is_ok_and(|r| r.dir)
+    pub fn is_dir(&self, dev: &mut CdDrive, path: &str) -> bool {
+        self.find(dev, path).is_ok_and(|r| r.dir)
     }
 
-    pub fn exists(&mut self, path: &str) -> bool {
-        self.find(path).is_ok()
+    pub fn exists(&self, dev: &mut CdDrive, path: &str) -> bool {
+        self.find(dev, path).is_ok()
     }
 
-    /// Whether the disc can still be read (it may have been taken out).
-    pub fn present(&mut self) -> bool {
-        let mut sector = vec![0u8; CD_SECTOR];
-        self.dev.read(16, &mut sector).is_ok() && &sector[1..6] == b"CD001"
+    /// Bytes of files on the disc, from the volume space size.
+    pub fn bytes(&self) -> u64 {
+        self.size
     }
+}
+
+/// Whether a disc can still be read in the drive (it may have been
+/// taken out).
+pub fn present(dev: &mut CdDrive) -> bool {
+    let mut sector = vec![0u8; CD_SECTOR];
+    dev.read(16, &mut sector).is_ok() && &sector[1..6] == b"CD001"
 }
 
 fn parse_record(rec: &[u8], joliet: bool) -> Option<Record> {

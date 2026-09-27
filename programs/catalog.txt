@@ -1,0 +1,14 @@
+# The RyzikOS App Store catalog. The App Store downloads this file from
+# the repository, so a program added here shows up for everyone without a
+# new RyzikOS: put its .rzapp file next to this one and add a line.
+#
+# file | name | category (Games or Tools) | what it is
+2048.rzapp | 2048 | Games | Slide the tiles and join equal numbers until you make 2048.
+snake.rzapp | Snake | Games | Steer the snake to the apples and grow as long as you can.
+blocks.rzapp | Blocks | Games | Falling blocks: turn them and fill whole rows to clear them.
+minesweeper.rzapp | Minesweeper | Games | Open every square without stepping on one of the ten mines.
+memory.rzapp | Memory | Games | Turn the cards over two at a time and find all the pairs.
+tictactoe.rzapp | Tic-Tac-Toe | Games | Noughts and crosses against the computer.
+todo.rzapp | To-Do List | Tools | A list of things to do that is kept when you close it.
+converter.rzapp | Unit Converter | Tools | Length, weight, speed, data sizes and temperature.
+stopwatch.rzapp | Stopwatch | Tools | A stopwatch with laps and a countdown timer.

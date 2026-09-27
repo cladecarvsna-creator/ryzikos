@@ -72,16 +72,15 @@ fn layout(area: Rect) -> Layout {
 }
 
 /// The places on the left: a label and a folder.
-fn places() -> Vec<(&'static str, String)> {
+fn places() -> Vec<(String, String)> {
     let home = fs::home(users::current_name().unwrap_or_default().as_str());
     let mut out = Vec::new();
-    out.push(("Home", home.clone()));
+    out.push((String::from("Home"), home.clone()));
     for lib in ["Desktop", "Documents", "Downloads", "Pictures", "Videos"] {
-        out.push((lib, fs::join(&home, lib)));
+        out.push((String::from(lib), fs::join(&home, lib)));
     }
-    out.push(("System Disk", String::from("/")));
-    if fs::disc_label().is_some() {
-        out.push(("Disc", String::from(fs::DISC_PATH)));
+    for d in fs::drives().into_iter().filter(|d| d.ready).take(4) {
+        out.push((d.name, d.path));
     }
     out
 }

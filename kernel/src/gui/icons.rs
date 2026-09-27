@@ -68,7 +68,7 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::About => include_bytes!("../../assets/icons/about.bmp"),
         App::Calculator => include_bytes!("../../assets/icons/calculator.png"),
         App::Browser => include_bytes!("../../assets/icons/browser.png"),
-        App::Photos | App::Video => return None,
+        App::Photos | App::Video | App::Store => return None,
     })
 }
 
@@ -587,6 +587,16 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
             }
             c.fill_polygon(&[(x + 18, y + 14), (x + 18, y + 34), (x + 35, y + 24)], 0xffffff);
             c.outline_round(tile, 8, rgb(0x90, 0x10, 0x30));
+        }
+        App::Store => {
+            // a shopping bag on a violet to blue tile
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0x8a, 0x5c, 0xf0), rgb(0x1a, 0x73, 0xe8));
+            }
+            super::store::bag_icon(c, x - 4, y - 4);
+            c.outline_round(tile, 8, rgb(0x40, 0x24, 0x9c));
         }
         App::Browser => {
             // a globe on a blue tile

@@ -25,8 +25,8 @@ const MAX_TARGETS: usize = 24;
 const MAX_PROGRAMS: usize = 6;
 
 /// Apps in a row of the grid, and the size of each cell.
-const PER_ROW: usize = 5;
-const CELL_W: i32 = 114;
+const PER_ROW: usize = 6;
+const CELL_W: i32 = 96;
 const CELL_H: i32 = 96;
 /// Where the search box, the grid and the row of programs start, from
 /// the top.
@@ -84,8 +84,9 @@ pub struct StartMenu {
 }
 
 /// Apps in alphabetical order, for search results.
-const SORTED: [App; 10] = [
+const SORTED: [App; 11] = [
     App::About,
+    App::Store,
     App::Browser,
     App::Calculator,
     App::Paint,

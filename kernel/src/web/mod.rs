@@ -40,15 +40,52 @@ pub fn is_special(address: &str) -> bool {
 
 /// Programs downloaded from the catalog: web apps, one HTML file each.
 pub const PROGRAM_EXT: &str = ".rzapp";
-/// Where the catalog's programs are downloaded from.
-const CATALOG_BASE: &str = "https://raw.githubusercontent.com/cladecarvsna-creator/ryzikos/main/programs/";
-/// The programs in the catalog: file, name, what it is.
-pub const CATALOG: [(&str, &str, &str); 4] = [
-    ("memory.rzapp", "Memory", "Turn the cards over two at a time and find all the pairs."),
-    ("2048.rzapp", "2048", "Slide the tiles and join equal numbers until you make 2048."),
-    ("stopwatch.rzapp", "Stopwatch", "A stopwatch with laps and a countdown timer."),
-    ("tictactoe.rzapp", "Tic-Tac-Toe", "Noughts and crosses against the computer."),
-];
+/// Where the catalog and its programs are downloaded from: the
+/// `programs` folder of the RyzikOS repository.
+/// A build can point it elsewhere with RYZIKOS_CATALOG (tests use a
+/// local server).
+pub const CATALOG_BASE: &str = match option_env!("RYZIKOS_CATALOG") {
+    Some(url) => url,
+    None => "https://raw.githubusercontent.com/cladecarvsna-creator/ryzikos/main/programs/",
+};
+/// The catalog as it was when this RyzikOS was built, for when there is
+/// no internet. The App Store downloads the newest one.
+pub const CATALOG_TEXT: &str = include_str!("../../../programs/catalog.txt");
+
+/// A program in the catalog.
+#[derive(Clone)]
+pub struct CatalogEntry {
+    pub file: String,
+    pub name: String,
+    pub category: String,
+    pub about: String,
+}
+
+/// Read a catalog: one program a line, `file | name | category | about`,
+/// with `#` comments. Lines that don't name a program file are skipped.
+pub fn parse_catalog(text: &str) -> alloc::vec::Vec<CatalogEntry> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut parts = l.split('|').map(str::trim);
+            let file = parts.next()?;
+            let safe = file.ends_with(PROGRAM_EXT)
+                && !file.contains('/')
+                && !file.contains('\\')
+                && crate::fs::valid_name(file);
+            if !safe {
+                return None;
+            }
+            Some(CatalogEntry {
+                file: String::from(file),
+                name: String::from(parts.next().filter(|n| !n.is_empty()).unwrap_or(file.trim_end_matches(PROGRAM_EXT))),
+                category: String::from(parts.next().unwrap_or("Tools")),
+                about: String::from(parts.next().unwrap_or("")),
+            })
+        })
+        .collect()
+}
 
 /// Turn what was typed in the address bar into an address: a URL, or a
 /// search for anything that does not look like one.
@@ -305,7 +342,8 @@ fn programs_page() -> String {
         }
     }
     h.push_str("<h2>Get programs</h2>");
-    for (file, title, about) in CATALOG {
+    for entry in parse_catalog(CATALOG_TEXT) {
+        let (file, title, about) = (entry.file.as_str(), entry.name.as_str(), entry.about.as_str());
         let have = installed.iter().any(|n| n.eq_ignore_ascii_case(file));
         let _ = write!(
             h,

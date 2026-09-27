@@ -33,6 +33,7 @@ mod notepad;
 mod paint;
 mod personalize;
 mod photos;
+mod store;
 mod picture;
 mod popup;
 mod power;
@@ -124,12 +125,13 @@ pub enum App {
     Calculator,
     Photos,
     Video,
+    Store,
     Browser,
     Settings,
     About,
 }
 
-const APPS: [App; 10] = [
+const APPS: [App; 11] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -137,6 +139,7 @@ const APPS: [App; 10] = [
     App::Calculator,
     App::Photos,
     App::Video,
+    App::Store,
     App::Browser,
     App::Settings,
     App::About,
@@ -156,6 +159,7 @@ impl App {
             App::Calculator => "Calculator",
             App::Photos => "Photos",
             App::Video => "Video Player",
+            App::Store => "App Store",
             App::Browser => "Browser",
             App::Settings => "Settings",
             App::About => "About RyzikOS",
@@ -171,6 +175,7 @@ impl App {
             App::Calculator => (calc::CLIENT_W, calc::CLIENT_H),
             App::Photos => (photos::CLIENT_W, photos::CLIENT_H),
             App::Video => (video::CLIENT_W, video::CLIENT_H),
+            App::Store => (store::CLIENT_W, store::CLIENT_H),
             App::Browser => (browser::CLIENT_W, browser::CLIENT_H),
             App::Settings => (settings::CLIENT_W, settings::CLIENT_H),
             App::About => (about::CLIENT_W, about::CLIENT_H),
@@ -187,6 +192,7 @@ impl App {
             App::Calculator => "calculator",
             App::Photos => "photos",
             App::Video => "video",
+            App::Store => "store",
             App::Browser => "browser",
             App::Settings => "settings",
             App::About => "about",
@@ -207,6 +213,7 @@ impl App {
             App::Calculator => "calc калькулятор",
             App::Photos => "photo picture image viewer gallery фото фотографии просмотр картинки изображения галерея",
             App::Video => "video movie player avi видео фильм плеер кино",
+            App::Store => "app store programs install games download магазин программы приложения установить игры скачать",
             App::Browser => "web internet browser браузер интернет",
             App::Settings => "control panel options параметры настройки",
             App::About => "about system winver о системе",
@@ -222,6 +229,7 @@ impl App {
             App::Calculator => (1440, 90),
             App::Photos => (300, 60),
             App::Video => (360, 90),
+            App::Store => (400, 80),
             App::Browser => (200, 40),
             App::Settings => (420, 140),
             App::About => (680, 280),
@@ -499,6 +507,7 @@ pub struct Desktop<'a> {
     notepad: Box<notepad::Notepad>,
     explorer: Box<explorer::Explorer>,
     photos: Box<photos::Photos>,
+    store: Box<store::Store>,
     video: Box<video::Video>,
     settings: settings::Settings,
     about: about::About,
@@ -622,6 +631,7 @@ impl<'a> Desktop<'a> {
             notepad: Box::new(notepad::Notepad::new()),
             explorer: Box::new(explorer::Explorer::new()),
             photos: Box::new(photos::Photos::new()),
+            store: Box::new(store::Store::new()),
             video: Box::new(video::Video::new()),
             settings: settings::Settings::new(),
             about: about::About::new(),
@@ -993,6 +1003,9 @@ impl<'a> Desktop<'a> {
                 self.show_folder(path);
             }
         }
+        if let Some(path) = self.store.open_request.take() {
+            self.open_file(&path);
+        }
         if let Some(path) = self.photos.edit_request.take() {
             self.open(App::Paint);
             self.paint.open_file(&path);
@@ -1083,6 +1096,9 @@ impl<'a> Desktop<'a> {
         if app == App::Explorer {
             self.explorer.start();
             self.stale[app.index()] = true;
+        }
+        if app == App::Store {
+            self.store.start();
         }
         self.focus(app);
         self.damage_taskbar();
@@ -1383,6 +1399,7 @@ impl<'a> Desktop<'a> {
             App::Paint => self.paint.on_key(key),
             App::Photos => self.photos.on_key(key),
             App::Video => self.video.on_key(key),
+            App::Store => self.store.on_key(key),
             App::About => false,
         };
         if changed {
@@ -1463,6 +1480,7 @@ impl<'a> Desktop<'a> {
                 Some(App::Paint) => self.paint.on_wheel(ev.wheel),
                 Some(App::Photos) => self.photos.on_wheel(ev.wheel),
                 Some(App::Video) => self.video.on_wheel(ev.wheel),
+                Some(App::Store) => self.store.on_wheel(ev.wheel),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -1562,6 +1580,7 @@ impl<'a> Desktop<'a> {
             App::Notepad => self.notepad.on_hover(x, y),
             App::Explorer => self.explorer.on_hover(x, y),
             App::Video => self.video.on_hover(x, y),
+            App::Store => self.store.on_hover(x, y),
             _ => false,
         }
     }
@@ -1849,6 +1868,7 @@ impl<'a> Desktop<'a> {
             App::About => self.about.on_mouse(ev),
             App::Photos => self.photos.on_mouse(ev),
             App::Video => self.video.on_mouse(ev),
+            App::Store => self.store.on_mouse(ev),
             App::Terminal => false,
         };
         if core::mem::take(&mut self.settings.switch_layout) {
@@ -1984,9 +2004,7 @@ impl<'a> Desktop<'a> {
             }
             start::Action::GetPrograms => {
                 self.close_menu();
-                self.open(App::Browser);
-                self.browser.open_address("about:programs");
-                self.damage_client(App::Browser);
+                self.open(App::Store);
             }
             start::Action::Restart => {
                 self.close_menu();
@@ -2090,6 +2108,7 @@ impl<'a> Desktop<'a> {
                     App::Calculator => self.calc.draw(&mut c),
                     App::Photos => self.photos.draw(&mut c),
                     App::Video => self.video.draw(&mut c),
+                    App::Store => self.store.draw(&mut c),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
@@ -2687,6 +2706,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if desk.windows[App::Video.index()].open && desk.video.tick() {
             desk.app_changed(App::Video);
         }
+        if desk.store.busy() && desk.store.tick() {
+            desk.app_changed(App::Store);
+        }
         if CONSOLE.lock().take_changed() {
             desk.damage_client(App::Terminal);
         }
@@ -2742,7 +2764,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         // pages loading in the background keep the loop going
         let busy = desk.browser.busy()
             || (desk.windows[App::Photos.index()].open && desk.photos.busy())
-            || (desk.windows[App::Video.index()].open && desk.video.busy());
+            || (desk.windows[App::Video.index()].open && desk.video.busy())
+            || desk.store.busy();
         interrupts::wait_for_interrupt(|| {
             busy || !KEYBOARD_BYTES.is_empty() || !MOUSE_BYTES.is_empty() || !REQUESTS.is_empty()
         });
