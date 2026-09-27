@@ -33,6 +33,7 @@ mod notepad;
 mod paint;
 mod personalize;
 mod photos;
+mod taskmgr;
 mod store;
 mod picture;
 mod popup;
@@ -129,11 +130,12 @@ pub enum App {
     Browser,
     Settings,
     About,
+    TaskManager,
     /// A downloaded program (.rzapp) in its own window.
     Program,
 }
 
-const APPS: [App; 12] = [
+const APPS: [App; 13] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -145,6 +147,7 @@ const APPS: [App; 12] = [
     App::Browser,
     App::Settings,
     App::About,
+    App::TaskManager,
     App::Program,
 ];
 
@@ -166,6 +169,7 @@ impl App {
             App::Browser => "Browser",
             App::Settings => "Settings",
             App::About => "About RyzikOS",
+            App::TaskManager => "Task Manager",
             App::Program => "Program",
         }
     }
@@ -183,6 +187,7 @@ impl App {
             App::Browser => (browser::CLIENT_W, browser::CLIENT_H),
             App::Settings => (settings::CLIENT_W, settings::CLIENT_H),
             App::About => (about::CLIENT_W, about::CLIENT_H),
+            App::TaskManager => (taskmgr::CLIENT_W, taskmgr::CLIENT_H),
             App::Program => (browser::PROGRAM_W, browser::PROGRAM_H),
         }
     }
@@ -201,6 +206,7 @@ impl App {
             App::Browser => "browser",
             App::Settings => "settings",
             App::About => "about",
+            App::TaskManager => "taskmgr",
             App::Program => "program",
         }
     }
@@ -223,6 +229,7 @@ impl App {
             App::Browser => "web internet browser браузер интернет",
             App::Settings => "control panel options параметры настройки",
             App::About => "about system winver о системе",
+            App::TaskManager => "task manager processes performance cpu memory end task диспетчер задач процессы производительность память процессор снять задачу",
             App::Program => "",
         }
     }
@@ -240,6 +247,7 @@ impl App {
             App::Browser => (200, 40),
             App::Settings => (420, 140),
             App::About => (680, 280),
+            App::TaskManager => (560, 150),
             App::Program => (440, 110),
         }
     }
@@ -522,6 +530,7 @@ pub struct Desktop<'a> {
     explorer: Box<explorer::Explorer>,
     photos: Box<photos::Photos>,
     store: Box<store::Store>,
+    taskmgr: Box<taskmgr::TaskManager>,
     /// The window a program runs in.
     program: Box<browser::Browser>,
     /// Its title when last drawn, to notice when the title bar changes.
@@ -650,6 +659,7 @@ impl<'a> Desktop<'a> {
             explorer: Box::new(explorer::Explorer::new()),
             photos: Box::new(photos::Photos::new()),
             store: Box::new(store::Store::new()),
+            taskmgr: Box::new(taskmgr::TaskManager::new()),
             program: Box::new(browser::Browser::program()),
             program_title: String::new(),
             video: Box::new(video::Video::new()),
@@ -987,6 +997,29 @@ impl<'a> Desktop<'a> {
             }
             _ => self.damage_client(app),
         }
+    }
+
+    /// The open windows, for Task Manager.
+    fn task_rows(&self) -> Vec<taskmgr::Row> {
+        APPS.into_iter()
+            .filter(|&a| self.windows[a.index()].open)
+            .map(|a| {
+                let w = self.windows[a.index()];
+                let (cw, ch) = a.client_size();
+                taskmgr::Row {
+                    app: a,
+                    name: self.window_title(a),
+                    state: if w.minimized {
+                        "Minimized"
+                    } else if w.away {
+                        "On another desktop"
+                    } else {
+                        "Running"
+                    },
+                    memory: cw as u64 * ch as u64 * 4,
+                }
+            })
+            .collect()
     }
 
     /// The text in a window's title bar.
@@ -1392,6 +1425,10 @@ impl<'a> Desktop<'a> {
             }
             return;
         }
+        if matches!(key, Key::Escape) && keyboard::ctrl_held() && keyboard::shift_held() {
+            self.open(App::TaskManager);
+            return;
+        }
         if keyboard::super_held() {
             self.win_shortcut(key);
             return;
@@ -1448,7 +1485,7 @@ impl<'a> Desktop<'a> {
             App::Video => self.video.on_key(key),
             App::Store => self.store.on_key(key),
             App::Program => self.program.on_key(key),
-            App::About => false,
+            App::About | App::TaskManager => false,
         };
         if changed {
             self.cursor_on = true;
@@ -1919,6 +1956,7 @@ impl<'a> Desktop<'a> {
             App::Explorer => self.explorer.on_mouse(ev),
             App::Settings => self.settings.on_mouse(ev),
             App::About => self.about.on_mouse(ev),
+            App::TaskManager => self.taskmgr.on_mouse(ev),
             App::Photos => self.photos.on_mouse(ev),
             App::Video => self.video.on_mouse(ev),
             App::Store => self.store.on_mouse(ev),
@@ -2170,6 +2208,11 @@ impl<'a> Desktop<'a> {
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
                     App::Settings => self.settings.draw(&mut c, &self.system_info()),
                     App::About => self.about.draw(&mut c, &self.system_info()),
+                    App::TaskManager => {
+                        let rows = self.task_rows();
+                        self.taskmgr.set_rows(rows);
+                        self.taskmgr.draw(&mut c);
+                    }
                 }
             }
         }
@@ -2764,6 +2807,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         }
         if desk.store.busy() && desk.store.tick() {
             desk.app_changed(App::Store);
+        }
+        if desk.windows[App::TaskManager.index()].open && desk.taskmgr.tick() {
+            desk.damage_client(App::TaskManager);
         }
         if desk.windows[App::Program.index()].open && desk.program.tick() {
             let title = desk.program.program_title();
