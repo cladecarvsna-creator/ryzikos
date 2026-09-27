@@ -17,6 +17,8 @@
 //! icons with a selection rectangle and the Recycle Bin (deskicons.rs).
 
 mod about;
+mod installer;
+mod welcome;
 mod anim;
 mod browser;
 mod calc;
@@ -84,7 +86,7 @@ static BACK_BUFFER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 static WALLPAPER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// Window contents. Each app draws into its own part only when its content
 /// changes, so moving a window just copies pixels.
-static SURFACES: StaticBuffer<{ 8 * 1024 * 1024 }> = StaticBuffer::new();
+static SURFACES: StaticBuffer<{ 9 * 1024 * 1024 }> = StaticBuffer::new();
 /// The blurred wallpaper behind the sign-in panel.
 static BACKDROP: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// The screen being faded away when signing in or locking.
@@ -133,9 +135,12 @@ pub enum App {
     TaskManager,
     /// A downloaded program (.rzapp) in its own window.
     Program,
+    /// "Install RyzikOS", on the live CD.
+    Installer,
+    Welcome,
 }
 
-const APPS: [App; 13] = [
+const APPS: [App; 15] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -149,6 +154,8 @@ const APPS: [App; 13] = [
     App::About,
     App::TaskManager,
     App::Program,
+    App::Installer,
+    App::Welcome,
 ];
 
 impl App {
@@ -171,6 +178,8 @@ impl App {
             App::About => "About RyzikOS",
             App::TaskManager => "Task Manager",
             App::Program => "Program",
+            App::Installer => "Install RyzikOS",
+            App::Welcome => "Welcome",
         }
     }
 
@@ -189,6 +198,8 @@ impl App {
             App::About => (about::CLIENT_W, about::CLIENT_H),
             App::TaskManager => (taskmgr::CLIENT_W, taskmgr::CLIENT_H),
             App::Program => (browser::PROGRAM_W, browser::PROGRAM_H),
+            App::Installer => (installer::CLIENT_W, installer::CLIENT_H),
+            App::Welcome => (welcome::CLIENT_W, welcome::CLIENT_H),
         }
     }
 
@@ -208,6 +219,8 @@ impl App {
             App::About => "about",
             App::TaskManager => "taskmgr",
             App::Program => "program",
+            App::Installer => "installer",
+            App::Welcome => "welcome",
         }
     }
 
@@ -231,6 +244,8 @@ impl App {
             App::About => "about system winver о системе",
             App::TaskManager => "task manager processes performance cpu memory end task диспетчер задач процессы производительность память процессор снять задачу",
             App::Program => "",
+            App::Installer => "install setup disk live установить установка диск",
+            App::Welcome => "welcome start tips get started добро пожаловать приветствие",
         }
     }
 
@@ -249,13 +264,19 @@ impl App {
             App::About => (680, 280),
             App::TaskManager => (560, 150),
             App::Program => (440, 110),
+            App::Installer => (560, 120),
+            App::Welcome => (580, 130),
         }
     }
 
     /// Apps the launcher and search list: a program window only opens
     /// with a program in it.
     pub(super) fn listed(self) -> bool {
-        self != App::Program
+        match self {
+            App::Program => false,
+            App::Installer => crate::install::available(),
+            _ => true,
+        }
     }
 }
 
@@ -540,6 +561,8 @@ pub struct Desktop<'a> {
     video: Box<video::Video>,
     settings: settings::Settings,
     about: about::About,
+    installer: Box<installer::Installer>,
+    welcome: welcome::Welcome,
     /// The window the mouse was last over, for hover highlights.
     hover_app: Option<App>,
 
@@ -668,6 +691,8 @@ impl<'a> Desktop<'a> {
             video: Box::new(video::Video::new()),
             settings: settings::Settings::new(),
             about: about::About::new(),
+            installer: Box::new(installer::Installer::new()),
+            welcome: welcome::Welcome::new(),
             hover_app: None,
             pins: taskbar::DEFAULT_PINS.to_vec(),
             hover_now: None,
@@ -924,6 +949,11 @@ impl<'a> Desktop<'a> {
         if self.order_len == 0 {
             self.open(App::Terminal);
         }
+        // the first sign-in after installing: Welcome, on top
+        if fs::exists(crate::install::WELCOME) {
+            let _ = fs::remove(crate::install::WELCOME);
+            self.open(App::Welcome);
+        }
     }
 
     fn lock(&mut self, sign_out: bool) {
@@ -1143,6 +1173,9 @@ impl<'a> Desktop<'a> {
     // ---- window management ----------------------------------------------
 
     fn open(&mut self, app: App) {
+        if app == App::Installer && !self.windows[app.index()].open {
+            self.installer.reset();
+        }
         let w = self.windows[app.index()];
         if w.open && w.away {
             // it is on another desktop: go there
@@ -1488,6 +1521,8 @@ impl<'a> Desktop<'a> {
             App::Video => self.video.on_key(key),
             App::Store => self.store.on_key(key),
             App::Program => self.program.on_key(key),
+            App::Installer => self.installer.on_key(key),
+            App::Welcome => self.welcome.on_key(key),
             App::About | App::TaskManager => false,
         };
         if changed {
@@ -1973,10 +2008,15 @@ impl<'a> Desktop<'a> {
             App::Video => self.video.on_mouse(ev),
             App::Store => self.store.on_mouse(ev),
             App::Program => self.program.on_mouse(ev),
+            App::Installer => self.installer.on_mouse(ev),
+            App::Welcome => self.welcome.on_mouse(ev),
             App::Terminal => false,
         };
         if core::mem::take(&mut self.settings.switch_layout) {
             self.toggle_layout = true;
+        }
+        if let Some(page) = self.welcome.open_page.take() {
+            self.open_settings(page);
         }
         if changed {
             self.cursor_on = true;
@@ -2215,6 +2255,8 @@ impl<'a> Desktop<'a> {
                     App::Video => self.video.draw(&mut c),
                     App::Store => self.store.draw(&mut c),
                     App::Program => self.program.draw(&mut c),
+                    App::Installer => self.installer.draw(&mut c),
+                    App::Welcome => self.welcome.draw(&mut c),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
@@ -2830,6 +2872,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if desk.settings.busy() && desk.settings.tick() {
             desk.app_changed(App::Settings);
         }
+        if desk.installer.busy() && desk.installer.tick() {
+            desk.app_changed(App::Installer);
+        }
         if desk.windows[App::TaskManager.index()].open && desk.taskmgr.tick() {
             desk.damage_client(App::TaskManager);
         }
@@ -2902,7 +2947,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             || (desk.windows[App::Photos.index()].open && desk.photos.busy())
             || (desk.windows[App::Video.index()].open && desk.video.busy())
             || desk.store.busy()
-            || desk.settings.busy();
+            || desk.settings.busy()
+            || desk.installer.busy();
         interrupts::wait_for_interrupt(|| {
             busy || !KEYBOARD_BYTES.is_empty() || !MOUSE_BYTES.is_empty() || !REQUESTS.is_empty()
         });

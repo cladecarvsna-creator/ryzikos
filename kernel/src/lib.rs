@@ -12,6 +12,7 @@ mod framebuffer;
 mod fs;
 mod gui;
 mod heap;
+mod install;
 mod interrupts;
 mod js;
 mod keyboard;

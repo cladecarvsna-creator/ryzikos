@@ -250,7 +250,7 @@ impl Settings {
 
     /// The Update page's button, for the updater's state.
     fn update_label(&self) -> Option<&'static str> {
-        if update::BUILD == 0 {
+        if update::BUILD == 0 || crate::multiboot::live() {
             return None;
         }
         match self.updater.state() {
@@ -631,7 +631,12 @@ impl Settings {
             ),
             State::Failed(e) => (String::from("Couldn't update"), e.clone()),
         };
-        let (title, note) = if update::BUILD == 0 {
+        let (title, note) = if crate::multiboot::live() {
+            (
+                String::from("Install RyzikOS to get updates"),
+                String::from("The live CD can't be changed; an installed RyzikOS updates itself"),
+            )
+        } else if update::BUILD == 0 {
             (
                 String::from("Updates are off"),
                 String::from("This RyzikOS was built from source, not a GitHub release"),

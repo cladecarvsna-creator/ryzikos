@@ -74,7 +74,18 @@ impl Device {
             Device::Ram(_) => Ok(()),
         }
     }
+
+    pub fn into_disk(self) -> Option<Disk> {
+        match self {
+            Device::Disk(d) => Some(d),
+            Device::Ram(_) => None,
+        }
+    }
 }
+
+/// The biggest partition RyzikOS makes: 64 GiB. Its whole allocation
+/// table is kept in memory, so a bigger one could not be opened.
+const MAX_PART: u64 = 64 * 1024 * 1024 * 2;
 
 /// A file or folder as a listing shows it.
 #[derive(Clone)]
@@ -110,8 +121,51 @@ struct Dir {
     data: Vec<u8>,
 }
 
+/// What `open` learns about a FAT32 volume before it takes the device.
+struct Geometry {
+    start: u64,
+    cluster_bytes: usize,
+    spc: u32,
+    fat_start: u64,
+    fat_sectors: u32,
+    fats: u32,
+    data_start: u64,
+    root: u32,
+    clusters: u32,
+    fat: Vec<u32>,
+    dirty: Vec<bool>,
+    info_lba: Option<u64>,
+    free_count: u32,
+}
+
+impl Geometry {
+    fn volume(self, dev: Device) -> Volume {
+        Volume {
+            start: self.start,
+            cluster_bytes: self.cluster_bytes,
+            spc: self.spc,
+            fat_start: self.fat_start,
+            fat_sectors: self.fat_sectors,
+            fats: self.fats,
+            data_start: self.data_start,
+            root: self.root,
+            clusters: self.clusters,
+            fat: self.fat,
+            dirty: self.dirty,
+            next_free: 2,
+            info_lba: self.info_lba,
+            free_count: self.free_count,
+            info_dirty: true,
+            bytes: dev.sectors() * SECTOR as u64,
+            dev,
+        }
+    }
+}
+
 pub struct Volume {
     dev: Device,
+    /// Where the partition starts, in sectors.
+    start: u64,
     cluster_bytes: usize,
     spc: u32,
     fat_start: u64,
@@ -182,11 +236,12 @@ fn now() -> (u16, u16) {
 
 /// Write an empty FAT32 file system on the disk, in one partition that
 /// fills it, as Windows would. Returns where the partition starts.
-fn format(dev: &mut Device) -> Result<u64, Error> {
+pub fn format(dev: &mut Device) -> Result<u64, Error> {
     let total = dev.sectors();
     let start = if total >= 65536 { PART_START } else { 1 };
     let size = total
         .checked_sub(start)
+        .map(|s| s.min(MAX_PART))
         .filter(|&s| s >= 4096)
         .ok_or(Error::Full)? as u32;
     // cluster sizes Windows picks for these volume sizes
@@ -207,6 +262,7 @@ fn format(dev: &mut Device) -> Result<u64, Error> {
     put32(&mut mbr, 440, random());
     let part = &mut mbr[446..462];
     part[1..4].copy_from_slice(&[0xfe, 0xff, 0xff]);
+    part[0] = 0x80; // active, for BIOSes that look for it
     part[4] = 0x0c; // FAT32 with LBA
     part[5..8].copy_from_slice(&[0xfe, 0xff, 0xff]);
     put32(part, 8, start as u32);
@@ -283,18 +339,29 @@ fn format(dev: &mut Device) -> Result<u64, Error> {
 }
 
 impl Volume {
-    /// Open the FAT32 file system on a disk. A blank disk (only zeros in
-    /// its first sector) is formatted first; anything else unknown is left
-    /// alone. Returns the volume and whether it was just formatted.
-    pub fn open(mut dev: Device) -> Result<(Volume, bool), Error> {
+    /// Open the FAT32 file system on a disk. With `format_blank`, a blank
+    /// disk (only zeros in its first sector) is formatted first; anything
+    /// else unknown is left alone. Returns the volume and whether it was
+    /// just formatted, or why not and the device back.
+    pub fn open(mut dev: Device, format_blank: bool) -> Result<(Volume, bool), (Error, Device)> {
+        match Self::open_on(&mut dev, format_blank) {
+            Ok((geometry, formatted)) => Ok((geometry.volume(dev), formatted)),
+            Err(e) => Err((e, dev)),
+        }
+    }
+
+    fn open_on(dev: &mut Device, format_blank: bool) -> Result<(Geometry, bool), Error> {
         let mut s0 = [0u8; SECTOR];
         dev.read(0, &mut s0)?;
         let mut formatted = false;
         let start = if is_fat32(&s0) {
             0
         } else if s0.iter().all(|&b| b == 0) {
+            if !format_blank {
+                return Err(Error::Blank);
+            }
             formatted = true;
-            format(&mut dev)?
+            format(dev)?
         } else if s0[510..] == [0x55, 0xaa] {
             (0..4)
                 .map(|i| &s0[446 + i * 16..462 + i * 16])
@@ -335,7 +402,8 @@ impl Volume {
         let info = u16_at(&b, 48) as u32;
         let info_lba = (info > 0 && info < reserved).then_some(start + info as u64);
         let free_count = fat.iter().skip(2).filter(|&&v| v & MASK == FREE).count() as u32;
-        let volume = Volume {
+        let geometry = Geometry {
+            start,
             cluster_bytes: spc as usize * SECTOR,
             spc,
             fat_start,
@@ -346,14 +414,31 @@ impl Volume {
             clusters,
             fat,
             dirty: vec![false; used],
-            next_free: 2,
             info_lba,
             free_count,
-            info_dirty: true,
-            bytes: dev.sectors() * SECTOR as u64,
-            dev,
         };
-        Ok((volume, formatted))
+        Ok((geometry, formatted))
+    }
+
+    /// Give the device back, with everything written.
+    pub fn into_device(mut self) -> Device {
+        let _ = self.sync();
+        self.dev
+    }
+
+    /// Where the partition starts, in sectors.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// Read or write sectors outside the file system: the boot sectors.
+    pub fn read_sectors(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), Error> {
+        self.dev.read(lba, buf)
+    }
+
+    pub fn write_sectors(&mut self, lba: u64, buf: &[u8]) -> Result<(), Error> {
+        self.dev.write(lba, buf)?;
+        self.dev.flush()
     }
 
     // ---- clusters ---------------------------------------------------------

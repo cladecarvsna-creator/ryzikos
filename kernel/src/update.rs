@@ -209,7 +209,7 @@ impl Updater {
 
     /// Look for a newer release and download it.
     pub fn start(&mut self) {
-        if self.fiber.is_some() || BUILD == 0 {
+        if self.fiber.is_some() || BUILD == 0 || crate::multiboot::live() {
             return;
         }
         let state = self.state.clone();
