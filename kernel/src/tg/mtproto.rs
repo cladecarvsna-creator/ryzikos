@@ -85,23 +85,44 @@ pub fn now_ms() -> i64 {
 
 // ---- transport ---------------------------------------------------------------------
 
-/// TCP with the "intermediate" framing: a 4-byte length before every
-/// packet, after one 0xeeeeeeee to say which framing we use.
+/// TCP with the "intermediate" framing (a 4-byte length before every
+/// packet), obfuscated the way Telegram's own apps do it: the connection
+/// starts with 64 random-looking bytes that carry the AES-CTR keys for
+/// both directions, and everything after is encrypted. Without it some
+/// networks recognise MTProto and drop the connection.
 pub struct Transport {
     stream: TcpStream,
     buf: Vec<u8>,
+    send_ctr: crypto::Ctr,
+    recv_ctr: crypto::Ctr,
 }
 
 /// How long to wait for an answer.
 pub const TIMEOUT_MS: i64 = 30_000;
+const KEY_TIMEOUT_MS: i64 = 15_000;
+
+/// The protocol tag of the intermediate framing.
+const INTERMEDIATE: [u8; 4] = [0xee; 4];
 
 impl Transport {
-    pub fn connect(ip: Ipv4Address, port: u16) -> Result<Transport> {
+    /// Connect for data centre `dc` (as Telegram numbers it: 10000 and
+    /// more for the test servers).
+    pub fn connect(ip: Ipv4Address, port: u16, dc: i32) -> Result<Transport> {
         let mut stream = TcpStream::connect(ip, port).map_err(Error::Net)?;
-        stream.write_all(&[0xee; 4]).map_err(Error::Net)?;
+        let init = obfuscation_header(dc);
+        let rev: Vec<u8> = init[8..56].iter().rev().copied().collect();
+        let mut send_ctr = crypto::Ctr::new(&init[8..40], &init[40..56]);
+        let recv_ctr = crypto::Ctr::new(&rev[..32], &rev[32..48]);
+        let mut encrypted = init;
+        send_ctr.apply(&mut encrypted);
+        let mut first = init;
+        first[56..].copy_from_slice(&encrypted[56..]);
+        stream.write_all(&first).map_err(Error::Net)?;
         Ok(Transport {
             stream,
             buf: Vec::new(),
+            send_ctr,
+            recv_ctr,
         })
     }
 
@@ -109,6 +130,7 @@ impl Transport {
         let mut data = Vec::with_capacity(packet.len() + 4);
         data.extend_from_slice(&(packet.len() as u32).to_le_bytes());
         data.extend_from_slice(packet);
+        self.send_ctr.apply(&mut data);
         self.stream.write_all(&data).map_err(Error::Net)
     }
 
@@ -124,7 +146,10 @@ impl Transport {
                 Some(0) => {
                     return Err(Error::Net(String::from("the server closed the connection")))
                 }
-                Some(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Some(n) => {
+                    self.recv_ctr.apply(&mut chunk[..n]);
+                    self.buf.extend_from_slice(&chunk[..n]);
+                }
             }
         }
     }
@@ -183,7 +208,8 @@ fn plain_send(t: &mut Transport, body: &[u8], msg_id: i64) -> Result<()> {
 }
 
 fn plain_recv(t: &mut Transport) -> Result<Obj> {
-    let packet = t.recv(now_ms() + TIMEOUT_MS)?;
+    // a server that answers at all answers the key exchange at once
+    let packet = t.recv(now_ms() + KEY_TIMEOUT_MS)?;
     let mut r = Reader::new(&packet);
     if r.i64()? != 0 {
         return Err(Error::Other(String::from("expected an unencrypted answer")));
@@ -192,6 +218,26 @@ fn plain_recv(t: &mut Transport) -> Result<Obj> {
     let len = r.i32()? as usize;
     let body = r.take(len)?;
     Ok(Reader::new(body).obj()?)
+}
+
+/// The first 64 bytes: random, but not like the start of any other
+/// protocol, with the framing tag and the data centre inside.
+fn obfuscation_header(dc: i32) -> [u8; 64] {
+    loop {
+        let mut init: [u8; 64] = crypto::random_array();
+        let start = &init[..4];
+        if init[0] == 0xef
+            || [b"HEAD", b"POST", b"GET ", b"OPTI", &[0xdd; 4], &[0xee; 4], &[0x16, 3, 1, 2]]
+                .iter()
+                .any(|p| start == &p[..])
+            || init[4..8] == [0; 4]
+        {
+            continue;
+        }
+        init[56..60].copy_from_slice(&INTERMEDIATE);
+        init[60..62].copy_from_slice(&(dc as i16).to_le_bytes());
+        return init;
+    }
 }
 
 fn bad(what: &str) -> Error {
