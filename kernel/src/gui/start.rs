@@ -204,7 +204,7 @@ impl StartMenu {
             return (out, n);
         }
         let left = p.x + (p.w - PER_ROW as i32 * CELL_W) / 2;
-        for (i, app) in APPS.into_iter().enumerate() {
+        for (i, app) in APPS.into_iter().filter(|a| a.listed()).enumerate() {
             let (col, row) = ((i % PER_ROW) as i32, (i / PER_ROW) as i32);
             push(
                 Target::App(app),

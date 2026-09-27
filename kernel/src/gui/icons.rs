@@ -68,7 +68,7 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::About => include_bytes!("../../assets/icons/about.bmp"),
         App::Calculator => include_bytes!("../../assets/icons/calculator.png"),
         App::Browser => include_bytes!("../../assets/icons/browser.png"),
-        App::Photos | App::Video | App::Store => return None,
+        App::Photos | App::Video | App::Store | App::Program => return None,
     })
 }
 
@@ -587,6 +587,28 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
             }
             c.fill_polygon(&[(x + 18, y + 14), (x + 18, y + 34), (x + 35, y + 24)], 0xffffff);
             c.outline_round(tile, 8, rgb(0x90, 0x10, 0x30));
+        }
+        App::Program => {
+            // a small window holding four tiles, on a teal tile
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0x2c, 0xc4, 0xb0), rgb(0x0e, 0x84, 0x90));
+            }
+            let win = Rect::new(x + 9, y + 10, 30, 28);
+            c.fill_round(win, 4, rgb(0xf6, 0xfa, 0xfa));
+            c.fill_rect(win.x + 2, win.y + 6, win.w - 4, 1, rgb(0xb0, 0xd0, 0xd0));
+            let colors = [
+                rgb(0xff, 0x8a, 0x3c),
+                rgb(0x3c, 0x9c, 0xff),
+                rgb(0x6c, 0xc8, 0x40),
+                rgb(0xb0, 0x6c, 0xf0),
+            ];
+            for (i, color) in colors.into_iter().enumerate() {
+                let (cx, cy) = ((i % 2) as i32, (i / 2) as i32);
+                c.fill_round(Rect::new(win.x + 5 + cx * 11, win.y + 10 + cy * 8, 9, 6), 2, color);
+            }
+            c.outline_round(tile, 8, rgb(0x06, 0x5c, 0x66));
         }
         App::Store => {
             // a shopping bag on a violet to blue tile

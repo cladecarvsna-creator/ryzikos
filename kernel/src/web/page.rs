@@ -7,6 +7,7 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::css::{self, Stylesheet};
 use super::dom::{self, Dom, NodeData, NodeId, DOCUMENT};
@@ -121,6 +122,13 @@ fn hash(s: &str) -> u64 {
     h ^ s.len() as u64
 }
 
+/// Each page counts its changes from its own base, so two pages never
+/// share a generation and the window can tell them apart.
+fn next_generation_base() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1 << 32, Ordering::Relaxed)
+}
+
 impl Page {
     pub fn new(url: Option<Url>, dom: Dom, viewport: (i32, i32)) -> Page {
         Page {
@@ -142,7 +150,7 @@ impl Page {
             requested: BTreeSet::new(),
             size_missing: BTreeSet::new(),
             next_timer: None,
-            generation: 0,
+            generation: next_generation_base(),
             layout_ms: 0,
         }
     }

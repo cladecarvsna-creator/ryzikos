@@ -209,8 +209,10 @@ impl Desktop<'_> {
                 let mut b = Builder::default().item(app.title(), Cmd::Open(app)).sep();
                 b = if self.pins.contains(&app) {
                     b.item("Remove from Dock", Cmd::Unpin(app))
-                } else {
+                } else if app.listed() {
                     b.item("Keep in Dock", Cmd::Pin(app))
+                } else {
+                    b
                 };
                 if self.windows[app.index()].open {
                     b = b.item("Close window", Cmd::Close(app));
@@ -317,7 +319,7 @@ impl Desktop<'_> {
     pub(super) fn top_apps(&self) -> Vec<App> {
         let mut out: Vec<App> = self.start.recent().collect();
         for app in self.pins.iter().copied().chain(APPS) {
-            if !out.contains(&app) {
+            if app.listed() && !out.contains(&app) {
                 out.push(app);
             }
         }
@@ -633,7 +635,12 @@ impl Desktop<'_> {
         let logo = self.tray_rect(4);
         self.icons
             .draw_logo(c, 20, logo.x + 16, logo.y + (logo.h - 20) / 2);
+        let program;
         let name = match self.focused {
+            Some(App::Program) if self.windows[App::Program.index()].visible() => {
+                program = self.window_title(App::Program);
+                program.as_str()
+            }
             Some(app) if self.windows[app.index()].visible() => app.title(),
             _ => "RyzikOS",
         };

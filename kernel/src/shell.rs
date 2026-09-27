@@ -113,6 +113,7 @@ impl Shell {
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
                 println!("  store   open the App Store to install programs");
+                println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
                 println!("  browser open the web browser (browser <address> goes there)");
                 println!("  fetch   download a web page and show its title and links");
                 println!("  exit    close the terminal window");
@@ -189,6 +190,16 @@ impl Shell {
                 open(app);
             }
             "store" | "apps" => open(App::Store),
+            "open" | "run" => {
+                // the desktop picks the app: programs get their own window
+                if args.trim().is_empty() {
+                    error("Usage: open <file>");
+                } else if fs::exists(&self.path(args)) {
+                    gui::request_file(&self.path(args));
+                } else {
+                    error("File not found");
+                }
+            }
             "drives" | "disks" => {
                 fs::refresh_disc();
                 for d in fs::drives() {

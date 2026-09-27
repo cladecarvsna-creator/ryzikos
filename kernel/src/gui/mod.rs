@@ -129,9 +129,11 @@ pub enum App {
     Browser,
     Settings,
     About,
+    /// A downloaded program (.rzapp) in its own window.
+    Program,
 }
 
-const APPS: [App; 11] = [
+const APPS: [App; 12] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -143,6 +145,7 @@ const APPS: [App; 11] = [
     App::Browser,
     App::Settings,
     App::About,
+    App::Program,
 ];
 
 impl App {
@@ -163,6 +166,7 @@ impl App {
             App::Browser => "Browser",
             App::Settings => "Settings",
             App::About => "About RyzikOS",
+            App::Program => "Program",
         }
     }
 
@@ -179,6 +183,7 @@ impl App {
             App::Browser => (browser::CLIENT_W, browser::CLIENT_H),
             App::Settings => (settings::CLIENT_W, settings::CLIENT_H),
             App::About => (about::CLIENT_W, about::CLIENT_H),
+            App::Program => (browser::PROGRAM_W, browser::PROGRAM_H),
         }
     }
 
@@ -196,6 +201,7 @@ impl App {
             App::Browser => "browser",
             App::Settings => "settings",
             App::About => "about",
+            App::Program => "program",
         }
     }
 
@@ -217,6 +223,7 @@ impl App {
             App::Browser => "web internet browser браузер интернет",
             App::Settings => "control panel options параметры настройки",
             App::About => "about system winver о системе",
+            App::Program => "",
         }
     }
 
@@ -233,7 +240,14 @@ impl App {
             App::Browser => (200, 40),
             App::Settings => (420, 140),
             App::About => (680, 280),
+            App::Program => (440, 110),
         }
+    }
+
+    /// Apps the launcher and search list: a program window only opens
+    /// with a program in it.
+    pub(super) fn listed(self) -> bool {
+        self != App::Program
     }
 }
 
@@ -508,6 +522,10 @@ pub struct Desktop<'a> {
     explorer: Box<explorer::Explorer>,
     photos: Box<photos::Photos>,
     store: Box<store::Store>,
+    /// The window a program runs in.
+    program: Box<browser::Browser>,
+    /// Its title when last drawn, to notice when the title bar changes.
+    program_title: String,
     video: Box<video::Video>,
     settings: settings::Settings,
     about: about::About,
@@ -632,6 +650,8 @@ impl<'a> Desktop<'a> {
             explorer: Box::new(explorer::Explorer::new()),
             photos: Box::new(photos::Photos::new()),
             store: Box::new(store::Store::new()),
+            program: Box::new(browser::Browser::program()),
+            program_title: String::new(),
             video: Box::new(video::Video::new()),
             settings: settings::Settings::new(),
             about: about::About::new(),
@@ -961,7 +981,7 @@ impl<'a> Desktop<'a> {
     /// in the title bar, so their whole window is drawn again.
     fn app_changed(&mut self, app: App) {
         match app {
-            App::Notepad | App::Explorer | App::Photos | App::Video => {
+            App::Notepad | App::Explorer | App::Photos | App::Video | App::Program => {
                 self.stale[app.index()] = true;
                 self.damage_window(app);
             }
@@ -976,6 +996,7 @@ impl<'a> Desktop<'a> {
             App::Explorer => self.explorer.title(),
             App::Photos => self.photos.title(),
             App::Video => self.video.title(),
+            App::Program => self.program.program_title(),
             _ => String::from(app.title()),
         }
     }
@@ -1052,6 +1073,12 @@ impl<'a> Desktop<'a> {
             self.app_changed(App::Video);
             return;
         }
+        if path.to_ascii_lowercase().ends_with(crate::web::PROGRAM_EXT) {
+            self.open(App::Program);
+            self.program.open_file(path);
+            self.app_changed(App::Program);
+            return;
+        }
         if browser::is_page(path) {
             self.open(App::Browser);
             self.browser.open_file(path);
@@ -1084,7 +1111,9 @@ impl<'a> Desktop<'a> {
             serial::write_str("\ndesktop: opened ");
             serial::write_str(app.title());
             serial::write_str("\n");
-            self.start.note_opened(app);
+            if app.listed() {
+                self.start.note_opened(app);
+            }
             self.animate(app, Motion::Zoom, ONE);
         } else if w.minimized {
             w.minimized = false;
@@ -1116,6 +1145,9 @@ impl<'a> Desktop<'a> {
         }
         if app == App::Video {
             self.video.stop();
+        }
+        if app == App::Program {
+            self.program.close_program();
         }
         self.damage_window(app);
         // it stays in the stacking order until it has faded out
@@ -1400,6 +1432,7 @@ impl<'a> Desktop<'a> {
             App::Photos => self.photos.on_key(key),
             App::Video => self.video.on_key(key),
             App::Store => self.store.on_key(key),
+            App::Program => self.program.on_key(key),
             App::About => false,
         };
         if changed {
@@ -1481,6 +1514,7 @@ impl<'a> Desktop<'a> {
                 Some(App::Photos) => self.photos.on_wheel(ev.wheel),
                 Some(App::Video) => self.video.on_wheel(ev.wheel),
                 Some(App::Store) => self.store.on_wheel(ev.wheel),
+                Some(App::Program) => self.program.on_wheel(ev.wheel),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -1581,6 +1615,7 @@ impl<'a> Desktop<'a> {
             App::Explorer => self.explorer.on_hover(x, y),
             App::Video => self.video.on_hover(x, y),
             App::Store => self.store.on_hover(x, y),
+            App::Program => self.program.on_hover(x, y),
             _ => false,
         }
     }
@@ -1869,6 +1904,7 @@ impl<'a> Desktop<'a> {
             App::Photos => self.photos.on_mouse(ev),
             App::Video => self.video.on_mouse(ev),
             App::Store => self.store.on_mouse(ev),
+            App::Program => self.program.on_mouse(ev),
             App::Terminal => false,
         };
         if core::mem::take(&mut self.settings.switch_layout) {
@@ -2109,6 +2145,7 @@ impl<'a> Desktop<'a> {
                     App::Photos => self.photos.draw(&mut c),
                     App::Video => self.video.draw(&mut c),
                     App::Store => self.store.draw(&mut c),
+                    App::Program => self.program.draw(&mut c),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
@@ -2709,6 +2746,17 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if desk.store.busy() && desk.store.tick() {
             desk.app_changed(App::Store);
         }
+        if desk.windows[App::Program.index()].open && desk.program.tick() {
+            let title = desk.program.program_title();
+            if title != desk.program_title {
+                desk.program_title = title;
+                // the title bar and the menu bar show the program's name
+                desk.app_changed(App::Program);
+                desk.damage_taskbar();
+            } else {
+                desk.damage_client(App::Program);
+            }
+        }
         if CONSOLE.lock().take_changed() {
             desk.damage_client(App::Terminal);
         }
@@ -2763,6 +2811,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         desk.render();
         // pages loading in the background keep the loop going
         let busy = desk.browser.busy()
+            || desk.program.busy()
             || (desk.windows[App::Photos.index()].open && desk.photos.busy())
             || (desk.windows[App::Video.index()].open && desk.video.busy())
             || desk.store.busy();
