@@ -96,7 +96,7 @@ sign_in
 
 wait_for "desktop: opened Terminal" || fail "the desktop did not start"
 echo "desktop started"
-wait_for "icons: loaded 20 pictures" || fail "the app icons did not load"
+wait_for "icons: loaded 21 pictures" || fail "the app icons did not load"
 echo "app icons loaded"
 
 type_keys e c h o spc k e y b o a r d minus o k ret
@@ -132,6 +132,18 @@ echo "Video Player plays video from the disc"
 type_keys meta_l-s
 type_keys t e r m ret
 sleep 1
+
+# Telegram's cryptography, against known answers
+type_keys t e l e g r a m spc s e l f t e s t ret
+wait_for "telegram: self-test ok" || fail "the Telegram self-test failed"
+echo "Telegram's cryptography works"
+
+# PrintScreen, then Enter for the whole screen: saved and copied
+type_keys print
+wait_for "screenshot: pick an area" || fail "PrintScreen did not start a screenshot"
+type_keys ret
+wait_for "screenshot: saved /Users/root/Pictures/Screenshots/Screenshot.png" || fail "the screenshot was not saved"
+echo "PrintScreen saves a screenshot"
 
 quit_qemu() {
     python3 - "$monitor" << 'PY'
