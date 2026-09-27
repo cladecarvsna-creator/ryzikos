@@ -282,7 +282,7 @@ impl Notepad {
             t.push('*');
         }
         t.push_str(self.path.as_deref().map_or("Untitled", fs::file_name));
-        t.push_str(" - Notepad");
+        t.push_str(" - Text Editor");
         t
     }
 
@@ -446,7 +446,7 @@ impl Notepad {
     fn load(&mut self, path: &str) {
         match fs::read(path) {
             Ok(bytes) if bytes.len() > MAX_FILE => {
-                self.dialog = Some(Dialog::Message("This file is too big for Notepad."));
+                self.dialog = Some(Dialog::Message("This file is too big for the Text Editor."));
             }
             Ok(bytes) => {
                 self.clear();
@@ -986,7 +986,7 @@ impl Notepad {
                 let mut line = String::from("Do you want to save changes to ");
                 line.push_str(self.name());
                 line.push('?');
-                Some(("Notepad", vec![line], &["Save", "Don't save", "Cancel"]))
+                Some(("Text Editor", vec![line], &["Save", "Don't save", "Cancel"]))
             }
             Dialog::Replace(path) => {
                 let mut line = String::from(fs::file_name(path));
@@ -994,7 +994,7 @@ impl Notepad {
                 let lines = vec![line, String::from("Do you want to replace it?")];
                 Some(("Confirm Save As", lines, &["Yes", "No"]))
             }
-            Dialog::Message(m) => Some(("Notepad", vec![String::from(*m)], &["OK"])),
+            Dialog::Message(m) => Some(("Text Editor", vec![String::from(*m)], &["OK"])),
         }
     }
 

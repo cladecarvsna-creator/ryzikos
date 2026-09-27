@@ -12,7 +12,12 @@ use super::{icons, theme, App, MouseEvent, MouseKind};
 pub const CLIENT_W: i32 = 560;
 pub const CLIENT_H: i32 = 400;
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The version people see: major and minor of the kernel crate's.
+pub const VERSION: &str = "1.0";
+const _: () = assert!(
+    env!("CARGO_PKG_VERSION").as_bytes()[0] == VERSION.as_bytes()[0],
+    "keep VERSION in step with Cargo.toml"
+);
 
 pub struct About {
     pressed: bool,
@@ -49,13 +54,13 @@ impl About {
 
         // the logo and the name
         icons::get().draw_logo(c, 64, 28, 26);
-        c.draw_text_in(&HEADING, 104, 36, "RyzikOS", theme::text());
+        c.draw_text_in(&HEADING, 104, 36, &format!("RyzikOS {}", VERSION), theme::text());
         c.fill_rect(24, 110, CLIENT_W - 48, 1, theme::stroke());
 
         let mut y = 128;
         c.draw_text_in(&UI_BOLD, 32, y, "RyzikOS", theme::text());
         y += 22;
-        c.draw_text(32, y, &format!("Version {}", VERSION), theme::text());
+        c.draw_text(32, y, &format!("Version {} (build {})", VERSION, env!("CARGO_PKG_VERSION")), theme::text());
         y += 22;
         let about = "A hobby operating system for x86_64, written in assembly and Rust.";
         c.draw_text(32, y, about, theme::text());

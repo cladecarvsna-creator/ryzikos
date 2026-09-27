@@ -164,6 +164,27 @@ pub fn request_address(address: &str) {
     *REQUESTED.lock() = Some(address.to_string());
 }
 
+/// Files and folders pages asked the desktop to open (`ryzikos:` links).
+static DESKTOP_REQUESTS: IrqMutex<Vec<String>> = IrqMutex::new(Vec::new());
+
+/// What a page asked the desktop for: `open:<path>` or `folder:<path>`.
+pub fn take_desktop_request() -> Option<String> {
+    let mut q = DESKTOP_REQUESTS.lock();
+    if q.is_empty() {
+        None
+    } else {
+        Some(q.remove(0))
+    }
+}
+
+/// Whether a file is a web page or a downloaded program, for the browser.
+pub fn is_page(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".html", ".htm", web::PROGRAM_EXT]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 /// An anti-aliased line `width` pixels thick, for toolbar icons.
 fn stroke(c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: Color) {
     let (minx, maxx) = (x0.min(x1) - width, x0.max(x1) + width);
@@ -285,6 +306,16 @@ impl Browser {
         }
     }
 
+    /// Go to one of RyzikOS's own pages, like `about:programs`.
+    pub fn open_address(&mut self, address: &str) {
+        self.tab().navigate(Nav::Special(String::from(address)));
+    }
+
+    /// Show a page or run a program from the disk.
+    pub fn open_file(&mut self, path: &str) {
+        self.tab().navigate(Nav::Special(alloc::format!("file:{}", path)));
+    }
+
     /// Start the network card when the browser first opens.
     pub fn start(&mut self) {
         if !self.net_started {
@@ -368,7 +399,10 @@ impl Browser {
         net::poll();
         let mut redraw = false;
         if let Some(address) = REQUESTED.lock().take() {
-            if let Some(u) = web::address_to_url(&address) {
+            if web::is_special(&address) {
+                self.tab().navigate(Nav::Special(String::from(address.trim())));
+                redraw = true;
+            } else if let Some(u) = web::address_to_url(&address) {
                 self.tab().navigate(Nav::Get(u));
                 redraw = true;
             }
@@ -771,6 +805,7 @@ impl Tab {
                 Nav::Home => web::home(vp),
                 Nav::Get(u) => web::load(u, None, vp, true),
                 Nav::Post(u, body) => web::load(u, Some(body), vp, true),
+                Nav::Special(a) => web::special(a, vp),
             };
             *o.borrow_mut() = Some(page);
         });
@@ -813,11 +848,15 @@ impl Tab {
         // a redirect or a POST leaves us at a plain address
         self.current = Some(match (&nav, &page.url) {
             (Nav::Home, _) => Nav::Home,
+            (Nav::Special(a), _) => Nav::Special(a.clone()),
             (_, Some(u)) => Nav::Get(u.clone()),
             _ => nav.clone(),
         });
         self.reset_images(draining);
         self.set_page(page);
+        if let Nav::Special(a) = &nav {
+            self.address = a.clone();
+        }
         let secs = (interrupts::ticks() - started) as f32 / interrupts::TIMER_HZ as f32;
         self.status = alloc::format!("Done in {}.{} s", secs as u32, (secs * 10.0) as u32 % 10);
         let mut line = crate::StackString::<64>::new();
@@ -896,15 +935,45 @@ impl Tab {
     }
 
     fn navigate(&mut self, nav: Nav) {
+        if let Nav::Special(a) = &nav {
+            if let Some(req) = a.strip_prefix("ryzikos:") {
+                self.desktop_request(req);
+                return;
+            }
+        }
         self.status = match &nav {
             Nav::Home => String::from("Opening the home page..."),
             Nav::Get(u) | Nav::Post(u, _) => alloc::format!("Loading {} ...", u),
+            Nav::Special(a) => alloc::format!("Opening {} ...", a),
         };
+        if let Nav::Special(a) = &nav {
+            self.address = a.clone();
+        }
         if let Nav::Get(u) | Nav::Post(u, _) = &nav {
             self.address = u.to_string();
         }
         self.pending = Some(nav);
         self.focus = Focus::Page;
+    }
+
+    /// A `ryzikos:` link: open a file or folder on the desktop, or install
+    /// a program from the disc.
+    fn desktop_request(&mut self, req: &str) {
+        if let Some(from) = req.strip_prefix("install:") {
+            let dir = web::programs_folder();
+            let _ = crate::fs::create_dir(&dir);
+            let to = crate::fs::join(&dir, crate::fs::file_name(from));
+            self.status = match crate::fs::read(from).and_then(|d| crate::fs::write(&to, &d)) {
+                Ok(()) => alloc::format!("Installed {}", crate::fs::file_name(from)),
+                Err(e) => String::from(e.message()),
+            };
+            self.pending = Some(Nav::Special(String::from("about:programs")));
+            return;
+        }
+        let known = req.starts_with("open:") || req.starts_with("folder:");
+        if known {
+            DESKTOP_REQUESTS.lock().push(String::from(req));
+        }
     }
 
     fn set_page(&mut self, page: Page) {
@@ -1011,6 +1080,8 @@ impl Tab {
                         let text = self.address.trim().to_string();
                         if text.is_empty() || text.eq_ignore_ascii_case(web::HOME) {
                             self.navigate(Nav::Home);
+                        } else if web::is_special(&text) {
+                            self.navigate(Nav::Special(text));
                         } else if let Some(u) = web::address_to_url(&text) {
                             self.navigate(Nav::Get(u));
                         }
@@ -1055,6 +1126,7 @@ impl Tab {
         if self.focus != Focus::Page {
             return self.edit_key(key);
         }
+        let mut letter = [0u8; 4];
         let name = match key {
             Key::Up => "ArrowUp",
             Key::Down => "ArrowDown",
@@ -1062,11 +1134,16 @@ impl Tab {
             Key::Right => "ArrowRight",
             Key::Enter => "Enter",
             Key::Escape => "Escape",
+            // letters, digits and space reach the page's scripts too
+            Key::Char(c) if c.is_alphanumeric() || c == ' ' => c.encode_utf8(&mut letter),
             _ => "",
         };
-        if !name.is_empty() && !self.page.key_event(None, name) {
+        if !name.is_empty() {
+            let prevented = !self.page.key_event(None, name);
             self.after_script();
-            return true;
+            if prevented {
+                return true;
+            }
         }
         let page = content_rect().h - 40;
         match key {

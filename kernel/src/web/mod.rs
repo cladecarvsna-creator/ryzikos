@@ -26,7 +26,29 @@ pub enum Nav {
     Home,
     Get(Url),
     Post(Url, String),
+    /// A page made by RyzikOS itself (`about:programs`,
+    /// `about:downloads`), a file on the disk (`file:/Users/...`) or a
+    /// request to the desktop (`ryzikos:open:<path>`).
+    Special(String),
 }
+
+/// Whether an address is one of RyzikOS's own (see `Nav::Special`).
+pub fn is_special(address: &str) -> bool {
+    let a = address.trim().to_ascii_lowercase();
+    (a.starts_with("about:") && a != HOME) || a.starts_with("file:") || a.starts_with("ryzikos:")
+}
+
+/// Programs downloaded from the catalog: web apps, one HTML file each.
+pub const PROGRAM_EXT: &str = ".rzapp";
+/// Where the catalog's programs are downloaded from.
+const CATALOG_BASE: &str = "https://raw.githubusercontent.com/cladecarvsna-creator/ryzikos/main/programs/";
+/// The programs in the catalog: file, name, what it is.
+pub const CATALOG: [(&str, &str, &str); 4] = [
+    ("memory.rzapp", "Memory", "Turn the cards over two at a time and find all the pairs."),
+    ("2048.rzapp", "2048", "Slide the tiles and join equal numbers until you make 2048."),
+    ("stopwatch.rzapp", "Stopwatch", "A stopwatch with laps and a countdown timer."),
+    ("tictactoe.rzapp", "Tic-Tac-Toe", "Noughts and crosses against the computer."),
+];
 
 /// Turn what was typed in the address bar into an address: a URL, or a
 /// search for anything that does not look like one.
@@ -51,6 +73,9 @@ pub fn load(url: &Url, form: Option<&String>, viewport: (i32, i32), scripts: boo
     match http::get(url, form.map(|f| f.as_str())) {
         Ok(resp) => {
             let ct = resp.content_type.clone();
+            if wants_download(&resp) {
+                return save_download(resp, viewport);
+            }
             if ct.starts_with("image/") {
                 let mut page = from_html(
                     Some(resp.url.clone()),
@@ -64,12 +89,7 @@ pub fn load(url: &Url, form: Option<&String>, viewport: (i32, i32), scripts: boo
             }
             let is_text = ct.is_empty() || ct.starts_with("text/") || ct.contains("html") || ct.contains("xml") || ct.contains("json") || ct.contains("javascript");
             if !is_text {
-                return message_page(
-                    Some(resp.url),
-                    "Этот файл не показать",
-                    &format!("Сервер прислал файл типа {} ({} байт). EverBrowser показывает веб-страницы, текст и картинки PNG и JPEG.", ct, resp.body.len()),
-                    viewport,
-                );
+                return save_download(resp, viewport);
             }
             let source = text::decode(&resp.body, &ct);
             let html = ct.is_empty() || ct.contains("html") || ct.contains("xml") && source.trim_start().starts_with('<');
@@ -96,6 +116,248 @@ pub fn load(url: &Url, form: Option<&String>, viewport: (i32, i32), scripts: boo
             viewport,
         ),
     }
+}
+
+/// Whether a reply is a file to keep rather than a page to show: the
+/// server says so, or the name says it is a program, a video or an
+/// archive.
+fn wants_download(resp: &http::Response) -> bool {
+    if resp.disposition.to_ascii_lowercase().starts_with("attachment") {
+        return true;
+    }
+    let name = url::decode_percent(resp.url.path.split('?').next().unwrap_or("")).to_ascii_lowercase();
+    [
+        PROGRAM_EXT, ".avi", ".mjpg", ".mjpeg", ".zip", ".iso", ".img", ".exe", ".bin", ".mp4",
+        ".mp3", ".wav", ".pdf", ".7z", ".gz", ".tar",
+    ]
+    .iter()
+    .any(|ext| name.ends_with(ext))
+}
+
+/// The file name for a download: from Content-Disposition, else from the
+/// end of the address.
+fn download_name(resp: &http::Response) -> String {
+    let from_header = resp
+        .disposition
+        .split(';')
+        .filter_map(|p| p.trim().strip_prefix("filename="))
+        .next()
+        .map(|n| n.trim_matches('"').to_string());
+    let from_path = || {
+        let path = resp.url.path.split('?').next().unwrap_or("");
+        url::decode_percent(path.rsplit('/').next().unwrap_or(""))
+    };
+    let raw = from_header.unwrap_or_else(from_path);
+    let clean: String = raw
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '_' } else { c })
+        .collect();
+    let clean = clean.trim().trim_matches('.').to_string();
+    if clean.is_empty() {
+        String::from("download")
+    } else {
+        clean
+    }
+}
+
+/// Keep a downloaded file: programs go to Programs, everything else to
+/// Downloads. Returns the page that says where it went.
+fn save_download(resp: http::Response, viewport: (i32, i32)) -> Page {
+    use crate::fs;
+    let user = crate::users::current_name().unwrap_or_default();
+    let name = download_name(&resp);
+    let program = name.to_ascii_lowercase().ends_with(PROGRAM_EXT);
+    let dir = fs::join(&fs::home(user.as_str()), if program { "Programs" } else { "Downloads" });
+    let _ = fs::create_dir(&dir);
+    // a program is replaced by its new version; other files get a new name
+    let name = if program || !fs::exists(&fs::join(&dir, &name)) {
+        name
+    } else {
+        let (base, ext) = match name.rfind('.') {
+            Some(i) if i > 0 => (&name[..i], &name[i..]),
+            _ => (name.as_str(), ""),
+        };
+        fs::unique_name(&dir, base, ext)
+    };
+    let path = fs::join(&dir, &name);
+    let size = resp.body.len();
+    crate::serial::write_str(&format!("\nbrowser: downloaded {} ({} bytes)\n", name, size));
+    if let Err(e) = fs::write(&path, &resp.body) {
+        return message_page(
+            Some(resp.url),
+            "Download failed",
+            &format!("{} could not be saved: {}", name, e.message()),
+            viewport,
+        );
+    }
+    let size_text = if size >= 1024 * 1024 {
+        format!("{}.{} MB", size / (1024 * 1024), size % (1024 * 1024) * 10 / (1024 * 1024))
+    } else {
+        format!("{} KB", size.div_ceil(1024))
+    };
+    let (title, text, action) = if program {
+        (
+            format!("{} is installed", escape(name.trim_end_matches(PROGRAM_EXT))),
+            format!("The program is in {}. It is also in the launcher's Programs list and on the Programs page.", escape(&fs::display(&dir))),
+            "Run it",
+        )
+    } else {
+        (
+            format!("Downloaded {}", escape(&name)),
+            format!("{}, saved in {}.", size_text, escape(&fs::display(&dir))),
+            "Open",
+        )
+    };
+    let source = format!(
+        "<title>{title}</title>{STYLE}<div class=box><div class=ok>&#10003;</div><h1>{title}</h1><p>{text}</p>\
+         <p><a class=btn href=\"ryzikos:open:{path}\">{action}</a> <a class=btn2 href=\"ryzikos:folder:{dir}\">Show in Files</a> <a class=btn2 href=\"about:downloads\">All downloads</a></p></div>",
+        title = title,
+        text = text,
+        path = escape(&path),
+        dir = escape(&dir),
+        action = action,
+        STYLE = SPECIAL_STYLE,
+    );
+    from_html(Some(resp.url), &source, viewport)
+}
+
+const SPECIAL_STYLE: &str = "<style>body{font-family:sans-serif;margin:0;background:#f4f6fb;color:#1d2230}\
+.box{max-width:760px;margin:48px auto;background:white;border:1px solid #e1e5ee;border-radius:16px;padding:28px 36px}\
+h1{font-size:26px;margin:6px 0 10px}h2{font-size:19px;margin:26px 0 12px}p{line-height:1.5;color:#4a5263}\
+.ok{width:48px;height:48px;border-radius:24px;background:#1f9d55;color:white;font-size:30px;text-align:center;line-height:48px}\
+a.btn{background:#2f6fed;color:white;padding:9px 20px;border-radius:18px;text-decoration:none;font-weight:bold}\
+a.btn2{background:#e8edf8;color:#1d3f8f;padding:9px 16px;border-radius:18px;text-decoration:none;margin-left:6px}\
+.row{display:flex;align-items:center;gap:14px;border-top:1px solid #edf0f5;padding:12px 0}\
+.row div.t{flex:1}.row b{font-size:16px}.row span{color:#6a7385;font-size:14px}\
+.tile{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,#2f6fed,#8a4df0);color:white;font-weight:bold;font-size:20px;text-align:center;line-height:44px}\
+</style>";
+
+/// One of RyzikOS's own pages. `ryzikos:` requests are handled by the
+/// browser before they get here.
+pub fn special(address: &str, viewport: (i32, i32)) -> Page {
+    let a = address.trim();
+    let lower = a.to_ascii_lowercase();
+    if let Some(path) = a.strip_prefix("file:").or_else(|| a.strip_prefix("FILE:")) {
+        let path = path.trim_start_matches("//");
+        return match crate::fs::read(path) {
+            Ok(data) => {
+                let source = text::decode(&data, "text/html");
+                let mut page = Page::new(None, dom::parse(&source), viewport);
+                page.run_scripts();
+                page.update();
+                crate::serial::write_str("\nbrowser: opened a file from the disk\n");
+                page
+            }
+            Err(e) => message_page(None, "Can't open this file", &format!("{}: {}", path, e.message()), viewport),
+        };
+    }
+    if lower == "about:programs" {
+        return from_html(None, &programs_page(), viewport);
+    }
+    if lower == "about:downloads" {
+        return from_html(None, &downloads_page(), viewport);
+    }
+    message_page(None, "Unknown page", &format!("RyzikOS has no page called {}.", a), viewport)
+}
+
+fn programs_in(dir: &str) -> alloc::vec::Vec<String> {
+    crate::fs::list(dir)
+        .map(|items| {
+            items
+                .into_iter()
+                .filter(|i| !i.dir && i.name.to_ascii_lowercase().ends_with(PROGRAM_EXT))
+                .map(|i| i.name)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The folder a user's programs are installed in.
+pub fn programs_folder() -> String {
+    let user = crate::users::current_name().unwrap_or_default();
+    crate::fs::join(&crate::fs::home(user.as_str()), "Programs")
+}
+
+/// Programs the user has installed, as paths.
+pub fn installed_programs() -> alloc::vec::Vec<String> {
+    let dir = programs_folder();
+    programs_in(&dir).into_iter().map(|n| crate::fs::join(&dir, &n)).collect()
+}
+
+fn programs_page() -> String {
+    use core::fmt::Write;
+    let dir = programs_folder();
+    let installed = programs_in(&dir);
+    let mut h = String::new();
+    let _ = write!(h, "<title>Programs</title>{}<div class=box><h1>Programs for RyzikOS</h1>\
+        <p>Download a program and it is installed in your Programs folder. Programs are small web apps that run in the browser, without the internet once they are downloaded.</p>", SPECIAL_STYLE);
+    if !installed.is_empty() {
+        h.push_str("<h2>Installed</h2>");
+        for name in &installed {
+            let title = name.trim_end_matches(PROGRAM_EXT);
+            let _ = write!(
+                h,
+                "<div class=row><div class=tile>{}</div><div class=t><b>{}</b></div><a class=btn href=\"ryzikos:open:{}\">Run</a></div>",
+                escape(&title.chars().next().unwrap_or('?').to_string()),
+                escape(title),
+                escape(&crate::fs::join(&dir, name))
+            );
+        }
+    }
+    h.push_str("<h2>Get programs</h2>");
+    for (file, title, about) in CATALOG {
+        let have = installed.iter().any(|n| n.eq_ignore_ascii_case(file));
+        let _ = write!(
+            h,
+            "<div class=row><div class=tile>{}</div><div class=t><b>{}</b><br><span>{}</span></div><a class=btn href=\"{}{}\">{}</a></div>",
+            escape(&title.chars().next().unwrap_or('?').to_string()),
+            escape(title),
+            escape(about),
+            CATALOG_BASE,
+            file,
+            if have { "Update" } else { "Download" }
+        );
+    }
+    let disc = format!("{}/Programs", crate::fs::DISC_PATH);
+    let on_disc = programs_in(&disc);
+    if !on_disc.is_empty() {
+        h.push_str("<h2>On the RyzikOS disc</h2><p>No internet? Install them from the disc in the drive.</p>");
+        for name in &on_disc {
+            let _ = write!(
+                h,
+                "<div class=row><div class=tile>{}</div><div class=t><b>{}</b></div><a class=btn2 href=\"ryzikos:install:{}\">Install from disc</a></div>",
+                escape(&name.chars().next().unwrap_or('?').to_string()),
+                escape(name.trim_end_matches(PROGRAM_EXT)),
+                escape(&crate::fs::join(&disc, name))
+            );
+        }
+    }
+    h.push_str("<p><a class=btn2 href=\"about:downloads\">Downloads</a> <a class=btn2 href=\"about:home\">Home page</a></p></div>");
+    h
+}
+
+fn downloads_page() -> String {
+    use core::fmt::Write;
+    let user = crate::users::current_name().unwrap_or_default();
+    let dir = crate::fs::join(&crate::fs::home(user.as_str()), "Downloads");
+    let items = crate::fs::list(&dir).unwrap_or_default();
+    let mut h = String::new();
+    let _ = write!(h, "<title>Downloads</title>{}<div class=box><h1>Downloads</h1><p>Files the browser downloaded are kept in {}. Programs go to the Programs page.</p>", SPECIAL_STYLE, escape(&crate::fs::display(&dir)));
+    let files: alloc::vec::Vec<_> = items.into_iter().filter(|i| !i.dir).collect();
+    if files.is_empty() {
+        h.push_str("<p><i>Nothing downloaded yet.</i></p>");
+    }
+    for f in files {
+        let _ = write!(
+            h,
+            "<div class=row><div class=t><b>{}</b><br><span>{} KB</span></div><a class=btn href=\"ryzikos:open:{}\">Open</a></div>",
+            escape(&f.name),
+            (f.size as usize).div_ceil(1024),
+            escape(&crate::fs::join(&dir, &f.name))
+        );
+    }
+    let _ = write!(h, "<p><a class=btn2 href=\"ryzikos:folder:{}\">Show in Files</a> <a class=btn2 href=\"about:programs\">Programs</a></p></div>", escape(&dir));
+    h
 }
 
 fn from_html(url: Option<Url>, source: &str, viewport: (i32, i32)) -> Page {
@@ -128,7 +390,7 @@ pub fn home(viewport: (i32, i32)) -> Page {
     page
 }
 
-const HOME_HTML: &str = r#"<!doctype html><title>EverBrowser</title>
+const HOME_HTML: &str = r#"<!doctype html><title>RyzikOS Browser</title>
 <style>
 body { margin: 0; font-family: sans-serif; color: #202124; background: #f6f8fc; }
 .hero { background: linear-gradient(135deg, #1a73e8, #6c3fd1); color: white; padding: 56px 24px 64px; text-align: center; }
@@ -147,11 +409,12 @@ h2 { font-size: 20px; margin: 8px 0 16px; }
 #clock { font-weight: bold; color: #1a73e8; }
 </style>
 <div class="hero">
-  <h1>EverBrowser</h1>
+  <h1>RyzikOS Browser</h1>
   <p>Браузер RyzikOS: свой HTML, CSS и JavaScript (QuickJS), написанный с нуля на Rust.</p>
   <form action="https://html.duckduckgo.com/html/"><input type="text" name="q" placeholder="Поиск в DuckDuckGo"><input type="submit" value="Найти"></form>
 </div>
 <main>
+  <div class="card" style="margin-bottom:24px;border-color:#b9ccf7"><a href="about:programs">Программы для RyzikOS</a><p>Скачайте игры и утилиты: они установятся в папку Programs и появятся в лаунчере. Все скачанные файлы: <a href="about:downloads" style="font-size:14px">about:downloads</a></p></div>
   <h2>Попробуйте эти сайты</h2>
   <div class="grid">
     <div class="card"><a href="http://example.com/">example.com</a><p>Классическая страница-пример</p></div>

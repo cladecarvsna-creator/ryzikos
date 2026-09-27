@@ -1,5 +1,5 @@
 //! The icons on the desktop, like Windows 11: This PC, the Recycle Bin,
-//! app shortcuts (with the little arrow), then the files and folders in
+//! app shortcuts, then the files and folders in
 //! the user's Desktop folder, in columns from the top left.
 //!
 //! Click selects, Ctrl+click adds, and dragging on the empty desktop
@@ -27,13 +27,14 @@ const CELL_H: i32 = 102;
 const LEFT: i32 = 6;
 const TOP: i32 = super::MENUBAR_H + 6;
 /// The apps with a shortcut on the desktop.
-const SHORTCUTS: [App; 7] = [
+const SHORTCUTS: [App; 8] = [
     App::Browser,
+    App::Photos,
+    App::Video,
     App::Terminal,
     App::Notepad,
     App::Paint,
     App::Calculator,
-    App::Demo,
     App::Settings,
 ];
 
@@ -48,8 +49,8 @@ pub enum DeskItem {
 impl DeskItem {
     fn label(&self) -> &str {
         match self {
-            DeskItem::ThisPc => "This PC",
-            DeskItem::Bin => "Recycle Bin",
+            DeskItem::ThisPc => "Computer",
+            DeskItem::Bin => "Trash",
             DeskItem::App(a) => a.title(),
             DeskItem::Entry { name, .. } => name,
         }
@@ -522,7 +523,7 @@ impl Desktop<'_> {
                 .item("New folder", Cmd::NewFolder)
                 .item("New text document", Cmd::NewFile)
                 .sep()
-                .item("Task View", Cmd::TaskView)
+                .item("Overview", Cmd::TaskView)
                 .item("New desktop", Cmd::NewDesktop)
                 .sep()
                 .item("Next desktop background", Cmd::NextBackground)
@@ -536,7 +537,7 @@ impl Desktop<'_> {
             DeskItem::ThisPc => b.sep().item("Properties", Cmd::Open(App::About)),
             DeskItem::Bin => {
                 b.sep()
-                    .maybe("Empty Recycle Bin", Cmd::EmptyBin, self.desk_icons.bin_full)
+                    .maybe("Empty Trash", Cmd::EmptyBin, self.desk_icons.bin_full)
             }
             DeskItem::App(a) => {
                 let b = b.sep();
@@ -624,7 +625,7 @@ impl Desktop<'_> {
         }
         if let Some(t) = drag.target {
             let verb = match &self.desk_icons.items[t] {
-                DeskItem::Bin => String::from("Move to Recycle Bin"),
+                DeskItem::Bin => String::from("Move to Trash"),
                 it => {
                     let mut s = String::from("Move to ");
                     s.push_str(it.label());
@@ -650,27 +651,11 @@ impl Desktop<'_> {
                 };
                 self.icons.draw_pic(c, pic, LARGE, x, y);
             }
-            DeskItem::App(a) => {
-                self.icons.draw_large(c, *a, x, y);
-                shortcut_arrow(c, x, y + 34);
-            }
+            DeskItem::App(a) => self.icons.draw_large(c, *a, x, y),
             DeskItem::Entry { dir: true, .. } => widgets::folder_icon(c, x, y + 4, 48),
             DeskItem::Entry { .. } => widgets::file_icon(c, x, y + 2, 48),
         }
     }
-}
-
-/// The little arrow on shortcut icons.
-fn shortcut_arrow(c: &mut Canvas, x: i32, y: i32) {
-    let r = Rect::new(x, y, 14, 14);
-    c.fill_round(r, 2, 0xffffff);
-    c.outline_round(r, 2, rgb(0xa0, 0xa4, 0xb0));
-    let ink = rgb(0x10, 0x5c, 0xc8);
-    for k in 0..2 {
-        c.line(x + 3 + k, y + 11, x + 10, y + 4 + k, ink);
-    }
-    c.fill_rect(x + 6, y + 3, 5, 2, ink);
-    c.fill_rect(x + 9, y + 3, 2, 5, ink);
 }
 
 /// Split a label into at most two centred lines, breaking at spaces, and

@@ -372,7 +372,7 @@ impl Settings {
             Page::System => {
                 let storage = match fs::storage() {
                     fs::Storage::Disk => format!(
-                        "Local Disk (C:), FAT32, {} MB",
+                        "System Disk, FAT32, {} MB",
                         fs::capacity() / (1024 * 1024)
                     ),
                     _ => String::from("No disk: files are kept in memory"),

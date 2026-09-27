@@ -1,0 +1,79 @@
+<!doctype html>
+<title>Tic-Tac-Toe</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #1d2433; color: #eef2fa; text-align: center; }
+h1 { font-size: 40px; margin: 28px 0 6px; }
+p { color: #a9b4c9; margin: 0 0 18px; }
+#board { display: grid; grid-template-columns: repeat(3, 110px); gap: 10px; width: 350px; margin: 0 auto; }
+.c { width: 110px; height: 110px; line-height: 110px; background: #2b3448; border-radius: 12px; font-size: 64px; font-weight: bold; }
+.x { color: #6cc4ff; } .o { color: #ffb45c; }
+#status { font-size: 22px; margin: 20px 0 12px; height: 28px; }
+button { background: #4c7dff; color: white; border: 0; border-radius: 18px; padding: 10px 22px; font-size: 16px; font-weight: bold; }
+.score { color: #a9b4c9; margin-top: 14px; }
+</style>
+<h1>Tic-Tac-Toe</h1>
+<p>You are X. Get three in a row before the computer does.</p>
+<div id="board"></div>
+<div id="status">Your move</div>
+<button id="again">New game</button>
+<div class="score">You <b id="sx">0</b> : <b id="so">0</b> Computer &nbsp; Draws <b id="sd">0</b></div>
+<script>
+const lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+let b, over;
+const wins = { X: 0, O: 0, D: 0 };
+const board = document.getElementById('board');
+const cells = [];
+for (let i = 0; i < 9; i++) {
+  const d = document.createElement('div');
+  d.className = 'c';
+  d.addEventListener('click', () => play(i));
+  board.appendChild(d);
+  cells.push(d);
+}
+function winner(s) {
+  for (const [a, c, d] of lines) if (s[a] && s[a] === s[c] && s[a] === s[d]) return s[a];
+  return s.every(v => v) ? 'D' : null;
+}
+function minimax(s, me) {
+  const w = winner(s);
+  if (w === 'O') return { v: 1 };
+  if (w === 'X') return { v: -1 };
+  if (w === 'D') return { v: 0 };
+  let best = { v: me === 'O' ? -2 : 2, i: -1 };
+  for (let i = 0; i < 9; i++) if (!s[i]) {
+    s[i] = me;
+    const r = minimax(s, me === 'O' ? 'X' : 'O');
+    s[i] = '';
+    if ((me === 'O' && r.v > best.v) || (me === 'X' && r.v < best.v)) best = { v: r.v, i };
+  }
+  return best;
+}
+function draw() {
+  cells.forEach((c, i) => { c.textContent = b[i]; c.className = 'c ' + (b[i] === 'X' ? 'x' : b[i] === 'O' ? 'o' : ''); });
+}
+function finish(w) {
+  over = true;
+  wins[w]++;
+  document.getElementById('status').textContent = w === 'X' ? 'You win!' : w === 'O' ? 'The computer wins.' : 'A draw.';
+  document.getElementById('sx').textContent = wins.X;
+  document.getElementById('so').textContent = wins.O;
+  document.getElementById('sd').textContent = wins.D;
+}
+function play(i) {
+  if (over || b[i]) return;
+  b[i] = 'X';
+  let w = winner(b);
+  if (!w) {
+    // a little randomness on the first move so games differ
+    const free = b.map((v, k) => v ? -1 : k).filter(k => k >= 0);
+    const pick = free.length === 8 && Math.random() < 0.5 ? free[Math.floor(Math.random() * free.length)] : minimax(b, 'O').i;
+    b[pick] = 'O';
+    w = winner(b);
+  }
+  draw();
+  if (w) finish(w);
+}
+function start() { b = ['', '', '', '', '', '', '', '', '']; over = false; draw(); document.getElementById('status').textContent = 'Your move'; }
+document.getElementById('again').addEventListener('click', start);
+start();
+</script>

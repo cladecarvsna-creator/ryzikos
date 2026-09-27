@@ -82,6 +82,11 @@ impl Desktop<'_> {
             "RyzikOS",
             mix(0, 0xffffff, fade * 230 / 256),
         );
+        c.text_centered(
+            Rect::new(0, ly + 186, self.width, 24),
+            &alloc::format!("Version {}", super::VERSION),
+            mix(0, 0xa0a0a8, fade * 230 / 256),
+        );
         if ms > 400 {
             let (x, y, r) = self.boot_spinner();
             draw_spinner(c, x, y, r, ms - 400, 0xffffff);
@@ -98,7 +103,7 @@ impl Desktop<'_> {
         if ms >= POWER_MS && what == Power::ShutDown {
             // the power did not go off: nothing more is running
             c.fill(self.screen(), 0x000000);
-            let msg = "It's now safe to turn off your computer";
+            let msg = "RyzikOS has shut down. You can switch the power off now.";
             c.text_centered_in(&HEADING, Rect::new(0, h / 2 - 20, w, 40), msg, 0xffffff);
             return;
         }

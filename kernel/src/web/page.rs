@@ -662,6 +662,9 @@ impl Page {
                     if href.eq_ignore_ascii_case(super::HOME) {
                         return Some(Nav::Home);
                     }
+                    if super::is_special(&href) {
+                        return Some(Nav::Special(href));
+                    }
                     return self.resolve(&href).map(Nav::Get);
                 }
                 "input" | "button" => {
@@ -1235,6 +1238,10 @@ impl Host for PageHost<'_> {
             }
             "navigate" => {
                 let target = arg(a, 0);
+                if super::is_special(target) {
+                    self.st.nav = Some(Nav::Special(String::from(target)));
+                    return Value::Undefined;
+                }
                 match self.resolve(target) {
                     Some(u) => self.st.nav = Some(Nav::Get(u)),
                     None => log(&format!("cannot navigate to {}", target)),

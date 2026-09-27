@@ -208,3 +208,162 @@ impl Ata {
         Ok(())
     }
 }
+
+// ---- CD and DVD drives (ATAPI) ----------------------------------------------
+
+const PACKET: u8 = 0xa0;
+const IDENTIFY_PACKET: u8 = 0xa1;
+/// Bytes in a CD sector.
+pub const CD_SECTOR: usize = 2048;
+
+/// A CD or DVD drive on the IDE controller, read with SCSI commands sent
+/// as packets. QEMU puts `-cdrom` on the second channel.
+pub struct Atapi {
+    base: u16,
+    control: u16,
+    slave: bool,
+}
+
+impl Atapi {
+    /// Find the first CD drive on the two IDE channels.
+    pub fn find() -> Option<Atapi> {
+        for (base, control) in [(0x170, 0x376), (0x1f0, 0x3f6)] {
+            for slave in [false, true] {
+                let drive = Atapi {
+                    base,
+                    control,
+                    slave,
+                };
+                if drive.identify() {
+                    return Some(drive);
+                }
+            }
+        }
+        None
+    }
+
+    fn disk(&self) -> Ata {
+        Ata {
+            base: self.base,
+            control: self.control,
+            slave: self.slave,
+            sectors: 0,
+        }
+    }
+
+    fn identify(&self) -> bool {
+        let d = self.disk();
+        unsafe {
+            outb(self.control, 0x02);
+            if inb(self.base + 7) == 0xff {
+                return false;
+            }
+            outb(self.base + 6, 0xa0 | (self.slave as u8) << 4);
+            d.delay();
+            for reg in 2..=5 {
+                outb(self.base + reg, 0);
+            }
+            outb(self.base + 7, IDENTIFY);
+            if inb(self.base + 7) == 0 {
+                return false;
+            }
+            // a CD drive refuses IDENTIFY and leaves its signature
+            for _ in 0..TIMEOUT {
+                let s = inb(self.base + 7);
+                if s & BSY == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            if inb(self.base + 4) != 0x14 || inb(self.base + 5) != 0xeb {
+                return false;
+            }
+            outb(self.base + 7, IDENTIFY_PACKET);
+            d.delay();
+            if d.wait_data().is_err() {
+                return false;
+            }
+            for _ in 0..256 {
+                inw(self.base);
+            }
+        }
+        true
+    }
+
+    /// Read `buf.len() / 2048` sectors from `lba`. A fresh disc answers
+    /// the first command with "medium changed", so it is tried again.
+    pub fn read(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), IoError> {
+        for (i, chunk) in buf.chunks_mut(16 * CD_SECTOR).enumerate() {
+            let at = lba + (i * 16) as u32;
+            let mut tries = 0;
+            while self.read_some(at, chunk).is_err() {
+                tries += 1;
+                if tries == 3 {
+                    return Err(IoError);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_some(&mut self, lba: u32, buf: &mut [u8]) -> Result<(), IoError> {
+        let d = self.disk();
+        let count = (buf.len() / CD_SECTOR) as u16;
+        if count == 0 {
+            return Ok(());
+        }
+        d.wait_not_busy()?;
+        let limit: u16 = 0xf800;
+        unsafe {
+            outb(self.base + 6, 0xa0 | (self.slave as u8) << 4);
+            d.delay();
+            outb(self.base + 1, 0); // PIO, not DMA
+            outb(self.base + 4, limit as u8);
+            outb(self.base + 5, (limit >> 8) as u8);
+            outb(self.base + 7, PACKET);
+        }
+        d.delay();
+        d.wait_data()?;
+        // READ (10)
+        let packet: [u8; 12] = [
+            0x28,
+            0,
+            (lba >> 24) as u8,
+            (lba >> 16) as u8,
+            (lba >> 8) as u8,
+            lba as u8,
+            0,
+            (count >> 8) as u8,
+            count as u8,
+            0,
+            0,
+            0,
+        ];
+        for pair in packet.chunks(2) {
+            unsafe { outw(self.base, pair[0] as u16 | (pair[1] as u16) << 8) };
+        }
+        let mut done = 0;
+        while done < buf.len() {
+            d.delay();
+            d.wait_data()?;
+            let n = unsafe { inb(self.base + 4) as usize | (inb(self.base + 5) as usize) << 8 };
+            if n == 0 || n % 2 != 0 {
+                return Err(IoError);
+            }
+            for _ in 0..n / 2 {
+                let w = unsafe { inw(self.base) };
+                if done + 1 < buf.len() {
+                    buf[done] = w as u8;
+                    buf[done + 1] = (w >> 8) as u8;
+                }
+                done += 2;
+            }
+        }
+        d.delay();
+        let s = d.wait_not_busy()?;
+        if s & (ERR | DF) != 0 {
+            return Err(IoError);
+        }
+        Ok(())
+    }
+}

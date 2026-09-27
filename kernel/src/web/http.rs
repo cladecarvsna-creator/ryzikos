@@ -22,7 +22,8 @@ use sha2::{Digest, Sha256};
 use super::url::Url;
 use crate::net::{self, TcpStream};
 
-const MAX_BODY: usize = 8 * 1024 * 1024;
+/// Pages and downloads bigger than this are refused, to leave memory.
+const MAX_BODY: usize = 40 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 8;
 
 pub struct Response {
@@ -30,6 +31,8 @@ pub struct Response {
     pub url: Url,
     pub status: u16,
     pub content_type: String,
+    /// The Content-Disposition header: "attachment" asks for a download.
+    pub disposition: String,
     pub body: Vec<u8>,
 }
 
@@ -83,6 +86,7 @@ pub fn request(
             url,
             status: head.status,
             content_type: head.content_type,
+            disposition: head.disposition,
             body: data,
         });
     }
@@ -350,7 +354,7 @@ fn read_response(
         }
         data.extend_from_slice(&buf[..n]);
         if data.len() > MAX_BODY {
-            return Err("page too large".to_string());
+            return Err("the file is larger than 40 MB".to_string());
         }
         if complete(&data) {
             break;
@@ -379,6 +383,7 @@ fn complete(data: &[u8]) -> bool {
 struct Head {
     status: u16,
     content_type: String,
+    disposition: String,
     location: Option<String>,
     content_length: Option<usize>,
     chunked: bool,
@@ -397,6 +402,7 @@ fn parse_head(data: &[u8]) -> Option<Head> {
     let mut head = Head {
         status,
         content_type: String::new(),
+        disposition: String::new(),
         location: None,
         content_length: None,
         chunked: false,
@@ -412,6 +418,7 @@ fn parse_head(data: &[u8]) -> Option<Head> {
         match name.trim().to_ascii_lowercase().as_str() {
             "content-type" => head.content_type = value.to_ascii_lowercase(),
             "location" => head.location = Some(value.to_string()),
+            "content-disposition" => head.disposition = value.to_string(),
             "content-length" => head.content_length = value.parse().ok(),
             "transfer-encoding" => head.chunked = value.to_ascii_lowercase().contains("chunked"),
             "set-cookie" => head.cookies.push(value.to_string()),

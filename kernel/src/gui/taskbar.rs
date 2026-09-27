@@ -64,7 +64,7 @@ pub const DEFAULT_PINS: [App; 5] = [
 ];
 
 /// The icons behind ^: the disk, Settings and About.
-const HIDDEN: [&str; 3] = ["Local Disk (C:)", "Settings", "About RyzikOS"];
+const HIDDEN: [&str; 3] = ["System Disk", "Settings", "About RyzikOS"];
 
 impl Desktop<'_> {
     // ---- buttons -----------------------------------------------------------
@@ -221,7 +221,7 @@ impl Desktop<'_> {
             Some(TaskItem::Start) => self.start_menu_popup(x, top),
             _ => Builder::default()
                 .item("Search", Cmd::Search)
-                .item("Task View", Cmd::TaskView)
+                .item("Overview", Cmd::TaskView)
                 .item("Show desktop", Cmd::ShowDesktop)
                 .sep()
                 .item("Dock settings", Cmd::Open(App::Settings))
@@ -236,11 +236,11 @@ impl Desktop<'_> {
             .item("About RyzikOS", Cmd::Open(App::About))
             .item("Settings", Cmd::Open(App::Settings))
             .sep()
-            .keyed("Search", "Win+S", Cmd::Search)
-            .keyed("Task View", "Win+Tab", Cmd::TaskView)
-            .keyed("Show desktop", "Win+D", Cmd::ShowDesktop)
+            .keyed("Search", "Super+S", Cmd::Search)
+            .keyed("Overview", "Super+Tab", Cmd::TaskView)
+            .keyed("Show desktop", "Super+D", Cmd::ShowDesktop)
             .sep()
-            .keyed("Lock", "Win+L", Cmd::Lock)
+            .keyed("Lock", "Super+L", Cmd::Lock)
             .item("Sign out", Cmd::SignOut)
             .item("Restart", Cmd::Restart)
             .item("Shut down", Cmd::ShutDown)
@@ -251,17 +251,17 @@ impl Desktop<'_> {
     pub(super) fn start_menu_popup(&self, x: i32, y: i32) -> super::popup::Popup {
         Builder::default()
             .item("Terminal", Cmd::Open(App::Terminal))
-            .item("File Explorer", Cmd::Open(App::Explorer))
+            .item("Files", Cmd::Open(App::Explorer))
             .item("Settings", Cmd::Open(App::Settings))
-            .keyed("Search", "Win+S", Cmd::Search)
-            .keyed("Task View", "Win+Tab", Cmd::TaskView)
+            .keyed("Search", "Super+S", Cmd::Search)
+            .keyed("Overview", "Super+Tab", Cmd::TaskView)
             .sep()
-            .keyed("Lock", "Win+L", Cmd::Lock)
+            .keyed("Lock", "Super+L", Cmd::Lock)
             .item("Sign out", Cmd::SignOut)
             .item("Restart", Cmd::Restart)
             .item("Shut down", Cmd::ShutDown)
             .sep()
-            .keyed("Desktop", "Win+D", Cmd::ShowDesktop)
+            .keyed("Desktop", "Super+D", Cmd::ShowDesktop)
             .at(x, y, true, self.screen())
     }
 
@@ -464,7 +464,7 @@ impl Desktop<'_> {
                 let text = match item {
                     TaskItem::Start => String::from("Launcher"),
                     TaskItem::Search => String::from("Search"),
-                    TaskItem::TaskView => String::from("Task View"),
+                    TaskItem::TaskView => String::from("Overview"),
                     TaskItem::App(a) if self.windows[a.index()].open => self.window_title(a),
                     TaskItem::App(a) => String::from(a.title()),
                 };

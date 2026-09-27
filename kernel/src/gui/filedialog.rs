@@ -76,10 +76,13 @@ fn places() -> Vec<(&'static str, String)> {
     let home = fs::home(users::current_name().unwrap_or_default().as_str());
     let mut out = Vec::new();
     out.push(("Home", home.clone()));
-    for lib in ["Desktop", "Documents", "Downloads", "Pictures"] {
+    for lib in ["Desktop", "Documents", "Downloads", "Pictures", "Videos"] {
         out.push((lib, fs::join(&home, lib)));
     }
-    out.push(("Local Disk (C:)", String::from("/")));
+    out.push(("System Disk", String::from("/")));
+    if fs::disc_label().is_some() {
+        out.push(("Disc", String::from(fs::DISC_PATH)));
+    }
     out
 }
 
