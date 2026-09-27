@@ -25,6 +25,7 @@ mod serial;
 mod shell;
 mod sound;
 mod sync;
+mod update;
 mod users;
 mod vga;
 mod vmmouse;
@@ -50,7 +51,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     }
     CONSOLE.lock().init(boot.framebuffer);
 
-    console::print_colored(Color::LightCyan, format_args!("RyzikOS {}", gui::VERSION));
+    console::print_colored(Color::LightCyan, format_args!("RyzikOS {}", update::version()));
     println!(" - a hobby operating system in ASM and Rust");
     println!();
 
@@ -58,6 +59,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     let mouse = ps2::init();
     interrupts::enable();
     fs::init();
+    update::clean_up();
     let sound = sound::init();
 
     match &boot.framebuffer {
@@ -95,7 +97,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
 
 /// The greeting at the top of the terminal.
 fn print_banner() {
-    console::print_colored(Color::LightCyan, format_args!("RyzikOS {}", gui::VERSION));
+    console::print_colored(Color::LightCyan, format_args!("RyzikOS {}", update::version()));
     println!(" - a hobby operating system in ASM and Rust");
     println!("Type 'help' for a list of commands, 'photos' or 'video' to open an app.");
     println!();

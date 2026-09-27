@@ -113,6 +113,7 @@ impl Shell {
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
                 println!("  devices list the PC's hardware and which parts have drivers");
+                println!("  update  show the version and a downloaded update (update undo removes it)");
                 println!("  beep    play the volume sound on the ES1370 sound card");
                 println!("  store   open the App Store to install programs");
                 println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
@@ -207,6 +208,20 @@ impl Shell {
                     gui::request_file(&self.path(args));
                 } else {
                     error("File not found");
+                }
+            }
+            "update" => {
+                println!("RyzikOS {}", crate::update::version());
+                match (crate::update::installed(), args.trim()) {
+                    (Some(b), "undo") => {
+                        crate::update::remove();
+                        println!("Removed update {}: the disc's own RyzikOS starts next time", b);
+                    }
+                    (Some(b), _) if b == crate::update::BUILD => {
+                        println!("Running update {} from the disk", b)
+                    }
+                    (Some(b), _) => println!("Update {} is on the disk; restart to use it", b),
+                    (None, _) => println!("No update downloaded. Settings > Update looks for one"),
                 }
             }
             "devices" | "lspci" => {

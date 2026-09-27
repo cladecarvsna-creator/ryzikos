@@ -2,7 +2,8 @@
 //! cards of settings on the right. Most rows show how the system is set
 //! up; the keyboard layout can be switched here, the About page opens
 //! "About RyzikOS", and Personalization changes the look: light or dark
-//! mode, the accent colour and the desktop background.
+//! mode, the accent colour and the desktop background. Update finds a
+//! newer RyzikOS on GitHub and gets it ready for the next start.
 
 use alloc::format;
 use alloc::string::String;
@@ -18,6 +19,7 @@ use super::tray::{self, Net};
 use super::{picture, theme, wallpaper, App, MouseEvent, MouseKind};
 use crate::fs;
 use crate::keyboard::{Key, Layout};
+use crate::update::{self, State, Updater};
 
 pub const CLIENT_W: i32 = 940;
 pub const CLIENT_H: i32 = 620;
@@ -48,15 +50,17 @@ pub enum Page {
     Network,
     Time,
     Accounts,
+    Update,
     About,
 }
 
-const PAGES: [(Page, &str); 6] = [
+const PAGES: [(Page, &str); 7] = [
     (Page::System, "System"),
     (Page::Personalization, "Personalization"),
     (Page::Network, "Network & internet"),
     (Page::Time, "Time & language"),
     (Page::Accounts, "Accounts"),
+    (Page::Update, "Update"),
     (Page::About, "About"),
 ];
 
@@ -64,6 +68,7 @@ const PAGES: [(Page, &str); 6] = [
 enum Button {
     SwitchLayout,
     OpenAbout,
+    Update,
 }
 
 pub struct Settings {
@@ -77,6 +82,7 @@ pub struct Settings {
     error: Option<&'static str>,
     /// Small pictures of the backgrounds, made when first shown.
     thumbs: RefCell<Thumbs>,
+    pub updater: Updater,
 }
 
 #[derive(Default)]
@@ -229,6 +235,29 @@ impl Settings {
             dialog: RefCell::new(None),
             error: None,
             thumbs: RefCell::new(Thumbs::default()),
+            updater: Updater::new(),
+        }
+    }
+
+    /// Run the updater a little. Returns true if the Update page changed.
+    pub fn tick(&mut self) -> bool {
+        self.updater.tick()
+    }
+
+    pub fn busy(&self) -> bool {
+        self.updater.busy()
+    }
+
+    /// The Update page's button, for the updater's state.
+    fn update_label(&self) -> Option<&'static str> {
+        if update::BUILD == 0 {
+            return None;
+        }
+        match self.updater.state() {
+            State::Idle | State::UpToDate => Some("Check for updates"),
+            State::Failed(_) => Some("Try again"),
+            State::Ready(_) => Some("Restart now"),
+            State::Checking | State::Downloading(_) => None,
         }
     }
 
@@ -236,6 +265,14 @@ impl Settings {
     pub fn show_page(&mut self, page: Page) {
         self.page = page;
         self.pressed = None;
+        self.page_shown();
+    }
+
+    /// Opening the Update page looks for updates, if not done yet.
+    fn page_shown(&mut self) {
+        if self.page == Page::Update && self.updater.state() == State::Idle {
+            self.updater.start();
+        }
     }
 
     pub fn on_key(&mut self, key: Key) -> bool {
@@ -308,6 +345,7 @@ impl Settings {
         match self.page {
             Page::Time => Some((Button::SwitchLayout, row_button(1))),
             Page::About => Some((Button::OpenAbout, row_button(4))),
+            Page::Update if self.update_label().is_some() => Some((Button::Update, row_button(0))),
             _ => None,
         }
     }
@@ -328,6 +366,7 @@ impl Settings {
                 if let Some(i) = (0..PAGES.len()).find(|&i| nav_rect(i).contains(ev.x, ev.y)) {
                     let changed = self.page != PAGES[i].0;
                     self.page = PAGES[i].0;
+                    self.page_shown();
                     return changed;
                 }
                 if self.page == Page::Personalization {
@@ -351,6 +390,12 @@ impl Settings {
                         Button::OpenAbout => {
                             super::request_open(App::About);
                         }
+                        Button::Update => match self.updater.state() {
+                            State::Ready(_) => {
+                                super::request_power(true);
+                            }
+                            _ => self.updater.start(),
+                        },
                     }
                 }
                 true
@@ -462,6 +507,7 @@ impl Settings {
                     c.draw_text(r.right() - 20 - w, r.y + 19, password, theme::text_dim());
                 }
             }
+            Page::Update => self.draw_update(c),
             Page::About => {
                 self.rows(
                     c,
@@ -470,7 +516,7 @@ impl Settings {
                         (
                             "Operating system",
                             "",
-                            &format!("RyzikOS {}", super::about::VERSION),
+                            &format!("RyzikOS {}", update::version()),
                         ),
                         ("Processor", "", "x86_64, long mode"),
                         ("Bootloader", "", info.bootloader),
@@ -518,6 +564,14 @@ impl Settings {
                     c.fill_round(Rect::new(x + 1, y + 9, 14, 7), 3, theme::accent());
                 }
                 Page::About => pics.draw_small(c, App::About, x, y),
+                Page::Update => {
+                    let bg = if page == self.page {
+                        theme::hover()
+                    } else {
+                        theme::face()
+                    };
+                    super::start::restart_symbol(c, x + 8, y + 8, theme::accent(), bg);
+                }
                 Page::Personalization => brush_icon(c, x, y),
             }
             c.draw_text(
@@ -553,6 +607,72 @@ impl Settings {
             let w = UI.width(value);
             let y = r.y + (ROW_H - UI.line_height) / 2;
             c.draw_text(right - w, y, value, theme::text_dim());
+        }
+    }
+
+    fn draw_update(&self, c: &mut Canvas) {
+        let state = self.updater.state();
+        let (title, note) = match &state {
+            State::Idle | State::Checking => (
+                String::from("Checking for updates..."),
+                String::from("Looking for a newer RyzikOS on GitHub"),
+            ),
+            State::UpToDate => (
+                String::from("You're up to date"),
+                String::from("This is the newest RyzikOS"),
+            ),
+            State::Downloading(b) => (
+                format!("Downloading RyzikOS {}...", update::version_of(*b)),
+                String::from("You can keep working meanwhile"),
+            ),
+            State::Ready(b) => (
+                format!("RyzikOS {} is ready", update::version_of(*b)),
+                String::from("Restart to finish installing it"),
+            ),
+            State::Failed(e) => (String::from("Couldn't update"), e.clone()),
+        };
+        let (title, note) = if update::BUILD == 0 {
+            (
+                String::from("Updates are off"),
+                String::from("This RyzikOS was built from source, not a GitHub release"),
+            )
+        } else {
+            (title, note)
+        };
+        let r = row_rect(0);
+        card(c, r);
+        c.draw_text_in(&UI_BOLD, r.x + 20, r.y + 10, &title, theme::text());
+        let color = if matches!(state, State::Failed(_)) {
+            theme::error()
+        } else {
+            theme::text_dim()
+        };
+        c.draw_text(r.x + 20, r.y + 29, &note, color);
+        if let Some(label) = self.update_label() {
+            if let Some((_, b)) = self.button() {
+                let pressed = self.pressed == Some(Button::Update);
+                if matches!(state, State::Ready(_)) {
+                    theme::accent_button(c, b, label, pressed);
+                } else {
+                    theme::button(c, b, label, pressed);
+                }
+            }
+        }
+        let rows = [
+            ("Current version", update::version()),
+            ("Updates come from", String::from("GitHub releases")),
+            (
+                "How it installs",
+                String::from("Saved on the system disk, started on restart"),
+            ),
+        ];
+        for (i, (label, value)) in rows.iter().enumerate() {
+            let r = row_rect(i + 1);
+            card(c, r);
+            let y = r.y + (ROW_H - UI.line_height) / 2;
+            c.draw_text(r.x + 20, y, label, theme::text());
+            let w = UI.width(value);
+            c.draw_text(r.right() - 20 - w, y, value, theme::text_dim());
         }
     }
 

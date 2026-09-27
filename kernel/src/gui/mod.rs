@@ -2760,6 +2760,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
     crate::net::init();
     let mut next_blink = 0;
     let mut last_second = u64::MAX;
+    // look for an update once, after signing in with the network up
+    let mut update_checked = false;
     loop {
         while let Some(scancode) = KEYBOARD_BYTES.pop() {
             if let Some(key) = keyboard.feed(scancode) {
@@ -2820,6 +2822,13 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         }
         if desk.store.busy() && desk.store.tick() {
             desk.app_changed(App::Store);
+        }
+        if !update_checked && matches!(desk.phase, Phase::Desktop) && crate::net::configured() {
+            update_checked = true;
+            desk.settings.updater.start();
+        }
+        if desk.settings.busy() && desk.settings.tick() {
+            desk.app_changed(App::Settings);
         }
         if desk.windows[App::TaskManager.index()].open && desk.taskmgr.tick() {
             desk.damage_client(App::TaskManager);
@@ -2892,7 +2901,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             || desk.program.busy()
             || (desk.windows[App::Photos.index()].open && desk.photos.busy())
             || (desk.windows[App::Video.index()].open && desk.video.busy())
-            || desk.store.busy();
+            || desk.store.busy()
+            || desk.settings.busy();
         interrupts::wait_for_interrupt(|| {
             busy || !KEYBOARD_BYTES.is_empty() || !MOUSE_BYTES.is_empty() || !REQUESTS.is_empty()
         });

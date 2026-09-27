@@ -9,6 +9,10 @@ RUST_LIB   := kernel/target/x86_64-unknown-none/release/libeveros_kernel.a
 ASM_SRC    := $(wildcard boot/*.asm)
 ASM_OBJ    := $(patsubst boot/%.asm,$(BUILD)/boot/%.o,$(ASM_SRC))
 QEMU       := qemu-system-x86_64
+# The release number, the N in 1.0.N; GitHub sets it, 0 for your own build.
+# The kernel reads it at compile time, for Settings > Update.
+RYZIKOS_BUILD ?= 0
+export RYZIKOS_BUILD
 
 .PHONY: all iso run test clean kernel-lib FORCE
 
@@ -40,7 +44,7 @@ MEDIA      := iso/media/Pictures iso/media/Videos $(wildcard programs/*)
 $(ISO): $(KERNEL) iso/boot/grub/grub.cfg $(MEDIA)
 	@mkdir -p $(BUILD)/iso/boot/grub
 	cp $(KERNEL) $(BUILD)/iso/boot/kernel.bin
-	cp iso/boot/grub/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
+	sed 's/@BUILD@/$(RYZIKOS_BUILD)/' iso/boot/grub/grub.cfg > $(BUILD)/iso/boot/grub/grub.cfg
 	rm -rf $(BUILD)/iso/Pictures $(BUILD)/iso/Videos $(BUILD)/iso/Programs
 	cp -r iso/media/. $(BUILD)/iso/
 	mkdir -p $(BUILD)/iso/Programs
