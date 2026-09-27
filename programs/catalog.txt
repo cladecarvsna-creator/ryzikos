@@ -12,3 +12,4 @@ tictactoe.rzapp | Tic-Tac-Toe | Games | Noughts and crosses against the computer
 todo.rzapp | To-Do List | Tools | A list of things to do that is kept when you close it.
 converter.rzapp | Unit Converter | Tools | Length, weight, speed, data sizes and temperature.
 stopwatch.rzapp | Stopwatch | Tools | A stopwatch with laps and a countdown timer.
+cube.rzapp | 3D Cube | Games | Rotate and play with an interactive 3D cube right in your browser.
