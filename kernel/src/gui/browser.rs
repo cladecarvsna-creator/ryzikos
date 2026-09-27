@@ -388,9 +388,7 @@ impl Browser {
                     "Network card {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, getting an address...",
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 ),
-                    None => {
-                        String::from("No network card found. Start QEMU with -nic user,model=e1000")
-                    }
+                    None => String::from(net::NO_CARD),
                 };
             self.tabs[self.active].status = status;
         }

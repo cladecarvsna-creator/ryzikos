@@ -1,10 +1,12 @@
-//! Networking: the e1000 driver under the smoltcp TCP/IP stack, with
+//! Networking: wired network card drivers (Intel e1000 and e1000e,
+//! Realtek RTL8111/8168 and RTL8139) under the smoltcp TCP/IP stack, with
 //! DHCP, DNS and blocking TCP streams for the browser.
 //!
 //! The stack lives in one global. The desktop's main loop polls it, and
 //! blocking calls (connect, read, write) poll it while they wait.
 
 pub mod e1000;
+pub mod realtek;
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -20,15 +22,113 @@ use smoltcp::wire::{
 
 use crate::interrupts;
 use crate::sync::IrqMutex;
-use e1000::E1000;
+use alloc::boxed::Box;
+use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Medium};
 
 /// Seconds to wait for anything before giving up.
 const TIMEOUT_SECS: u64 = 15;
 /// If DHCP says nothing for this long, use QEMU's user network settings.
 const DHCP_FALLBACK_SECS: u64 = 4;
 
+/// What the stack needs from a network card driver.
+pub trait Card: Send {
+    fn name(&self) -> &'static str;
+    fn mac(&self) -> [u8; 6];
+    /// Whether a cable is plugged in and the link is up.
+    fn link_up(&self) -> bool;
+    /// The next received frame without its CRC; an empty one was dropped.
+    fn receive(&mut self) -> Option<Vec<u8>>;
+    fn can_send(&self) -> bool;
+    /// Send one Ethernet frame (without CRC). Only after `can_send`.
+    fn send(&mut self, frame: &[u8]);
+}
+
+/// Wait a few milliseconds, for cards that need time after a reset.
+pub fn delay_ms(ms: u64) {
+    let end = interrupts::ticks() + (ms * interrupts::TIMER_HZ).div_ceil(1000) + 1;
+    while interrupts::ticks() < end {
+        core::hint::spin_loop();
+    }
+}
+
+/// Whether there is a driver for this card.
+pub fn drives(vendor: u16, device: u16) -> bool {
+    e1000::drives(vendor, device) || realtek::drives(vendor, device)
+}
+
+/// Start the first network card there is a driver for.
+fn find_card() -> Option<Box<dyn Card>> {
+    if let Some(c) = e1000::E1000::init() {
+        return Some(Box::new(c));
+    }
+    if let Some(c) = realtek::Rtl8169::init() {
+        return Some(Box::new(c));
+    }
+    if let Some(c) = realtek::Rtl8139::init() {
+        return Some(Box::new(c));
+    }
+    None
+}
+
+/// The largest Ethernet frame, without CRC.
+const MTU: usize = 1514;
+
+struct Nic(Box<dyn Card>);
+
+pub struct RxToken(Vec<u8>);
+pub struct TxToken<'a>(&'a mut Nic);
+
+impl phy::RxToken for RxToken {
+    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
+        f(&self.0)
+    }
+}
+
+impl phy::TxToken for TxToken<'_> {
+    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
+        let mut frame = vec![0u8; len];
+        let result = f(&mut frame);
+        self.0 .0.send(&frame);
+        result
+    }
+}
+
+impl phy::Device for Nic {
+    type RxToken<'a> = RxToken;
+    type TxToken<'a> = TxToken<'a>;
+
+    fn receive(&mut self, _now: Instant) -> Option<(RxToken, TxToken<'_>)> {
+        loop {
+            let packet = self.0.receive()?;
+            if !packet.is_empty() {
+                return Some((RxToken(packet), TxToken(self)));
+            }
+        }
+    }
+
+    fn transmit(&mut self, _now: Instant) -> Option<TxToken<'_>> {
+        self.0.can_send().then_some(TxToken(self))
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.medium = Medium::Ethernet;
+        caps.max_transmission_unit = MTU;
+        caps.max_burst_size = Some(16);
+        let mut checksum = ChecksumCapabilities::default();
+        checksum.ipv4 = Checksum::Both;
+        caps.checksum = checksum;
+        caps
+    }
+}
+
 struct Stack {
-    nic: E1000,
+    nic: Nic,
+    /// The link was up at the last poll.
+    link: bool,
+    /// QEMU's network card (its MACs start 52:54:00), so QEMU's user
+    /// network settings are a fair guess when DHCP is slow.
+    emulated: bool,
     iface: Interface,
     sockets: SocketSet<'static>,
     dhcp: SocketHandle,
@@ -51,14 +151,16 @@ fn rdtsc() -> u64 {
 /// Find the network card and start DHCP, once. Returns the MAC address.
 pub fn init() -> Option<[u8; 6]> {
     if let Some(s) = STACK.lock().as_ref() {
-        return Some(s.nic.mac);
+        return Some(s.nic.0.mac());
     }
-    let Some(mut nic) = E1000::init() else {
+    let Some(card) = find_card() else {
         crate::serial::write_str("\nnet: no network card\n");
         return None;
     };
-    crate::serial::write_str("\nnet: e1000 found\n");
-    let mac = nic.mac;
+    let line = alloc::format!("\nnet: {} found\n", card.name());
+    crate::serial::write_str(&line);
+    let mac = card.mac();
+    let mut nic = Nic(card);
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     config.random_seed = rdtsc();
     let iface = Interface::new(config, &mut nic, now());
@@ -66,6 +168,8 @@ pub fn init() -> Option<[u8; 6]> {
     let dhcp = sockets.add(dhcpv4::Socket::new());
     let dns = sockets.add(dns::Socket::new(&[], Vec::new()));
     *STACK.lock() = Some(Stack {
+        link: nic.0.link_up(),
+        emulated: mac[..3] == [0x52, 0x54, 0x00],
         nic,
         iface,
         sockets,
@@ -78,6 +182,15 @@ pub fn init() -> Option<[u8; 6]> {
     Some(mac)
 }
 
+/// The network card's name, like "Intel e1000e".
+pub fn card_name() -> Option<&'static str> {
+    STACK.lock().as_ref().map(|s| s.nic.0.name())
+}
+
+/// What to tell the user when there is no network card we can drive.
+pub const NO_CARD: &str =
+    "No supported wired network card. RyzikOS drives Intel e1000/e1000e and Realtek RTL8111/8168/8139.";
+
 /// Whether the card has an IP address yet.
 pub fn configured() -> bool {
     STACK.lock().as_ref().is_some_and(|s| s.configured)
@@ -85,7 +198,7 @@ pub fn configured() -> bool {
 
 /// Whether there is a network card, and whether its cable is plugged in.
 pub fn link() -> Option<bool> {
-    STACK.lock().as_ref().map(|s| s.nic.link_up())
+    STACK.lock().as_ref().map(|s| s.nic.0.link_up())
 }
 
 /// Our IP address as text, for the status bar.
@@ -109,6 +222,14 @@ pub fn poll() {
 
 impl Stack {
     fn poll(&mut self) {
+        // a real card takes a few seconds to agree on a speed with the
+        // switch; ask DHCP again as soon as the cable works
+        let link = self.nic.0.link_up();
+        if link && !self.link {
+            self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).reset();
+            self.started = interrupts::ticks();
+        }
+        self.link = link;
         self.iface.poll(now(), &mut self.nic, &mut self.sockets);
         let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
         match event {
@@ -125,7 +246,8 @@ impl Stack {
             }
             None => {
                 let waited = interrupts::ticks() - self.started;
-                if !self.configured && waited > DHCP_FALLBACK_SECS * interrupts::TIMER_HZ {
+                let slow = waited > DHCP_FALLBACK_SECS * interrupts::TIMER_HZ;
+                if !self.configured && self.emulated && slow {
                     // QEMU's user network: 10.0.2.15, gateway .2, DNS .3
                     self.apply(
                         Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24),

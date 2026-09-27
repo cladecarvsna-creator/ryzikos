@@ -113,3 +113,58 @@ pub fn find_class(class: u8, subclass: u8) -> alloc::vec::Vec<Device> {
     }
     out
 }
+
+/// Every device on the bus: (device, vendor id, device id, class, subclass).
+pub fn all() -> alloc::vec::Vec<(Device, u16, u16, u8, u8)> {
+    let mut out = alloc::vec::Vec::new();
+    for bus in 0..=255u8 {
+        for slot in 0..32u8 {
+            for function in 0..8u8 {
+                let dev = Device {
+                    bus,
+                    slot,
+                    function,
+                };
+                let id = dev.read(0);
+                if id & 0xffff == 0xffff {
+                    if function == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                let class_reg = dev.read(0x08);
+                out.push((dev, id as u16, (id >> 16) as u16, (class_reg >> 24) as u8, (class_reg >> 16) as u8));
+                if function == 0 && dev.read(0x0c) & 0x0080_0000 == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A short name for a device class, for the `devices` command.
+pub fn class_name(class: u8, subclass: u8) -> &'static str {
+    match (class, subclass) {
+        (0x01, 0x01) => "IDE controller",
+        (0x01, 0x06) => "SATA controller",
+        (0x01, 0x08) => "NVMe SSD",
+        (0x01, _) => "storage",
+        (0x02, 0x00) => "Ethernet",
+        (0x02, 0x80) => "Wi-Fi / network",
+        (0x02, _) => "network",
+        (0x03, _) => "graphics",
+        (0x04, 0x01) => "sound card",
+        (0x04, 0x03) => "HD Audio",
+        (0x04, _) => "multimedia",
+        (0x06, 0x00) => "host bridge",
+        (0x06, 0x01) => "ISA bridge",
+        (0x06, 0x04) => "PCI bridge",
+        (0x06, _) => "bridge",
+        (0x0c, 0x03) => "USB controller",
+        (0x0c, 0x05) => "SMBus",
+        (0x0c, _) => "serial bus",
+        (0x0d, _) => "wireless",
+        _ => "other",
+    }
+}

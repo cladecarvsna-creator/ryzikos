@@ -45,6 +45,9 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     heap::init();
     users::init();
     let boot = unsafe { multiboot::parse(multiboot_info) };
+    if let Some(fb) = &boot.framebuffer {
+        framebuffer::write_combine(fb);
+    }
     CONSOLE.lock().init(boot.framebuffer);
 
     console::print_colored(Color::LightCyan, format_args!("RyzikOS {}", gui::VERSION));

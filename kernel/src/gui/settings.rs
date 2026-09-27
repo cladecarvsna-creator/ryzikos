@@ -406,11 +406,7 @@ impl Settings {
                 } else {
                     info.address
                 };
-                let adapter = if info.net == Net::NoCard {
-                    "None found"
-                } else {
-                    "Intel PRO/1000 (e1000)"
-                };
+                let adapter = crate::net::card_name().unwrap_or("None found");
                 self.rows(
                     c,
                     &[
