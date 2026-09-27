@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="100%" height="100%" fill="none">
+  <!-- Ручки пакета -->
+  <path d="M24 16V12C24 9 26 7 32 7C38 7 40 9 40 12V16" stroke="#1E2022" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Корпус сумки -->
+  <path d="M10 16H54L50 54C50 56.5 47.5 57 45 57H19C16.5 57 14 56.5 14 54L10 16Z" fill="#74B9FF" stroke="#1E2022" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- Плитки приложений (магазинная витрина) -->
+  <rect x="20" y="26" width="10" height="10" rx="3" fill="#FFEAA7" stroke="#1E2022" stroke-width="2"/>
+  <rect x="34" y="26" width="10" height="10" rx="3" fill="#FF7675" stroke="#1E2022" stroke-width="2"/>
+  <rect x="20" y="40" width="10" height="10" rx="3" fill="#55E6C1" stroke="#1E2022" stroke-width="2"/>
+  <rect x="34" y="40" width="10" height="10" rx="3" fill="#FFD24C" stroke="#1E2022" stroke-width="2"/>
+</svg>

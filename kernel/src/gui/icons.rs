@@ -74,7 +74,8 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::Photos => include_bytes!("../../assets/icons/photos.bmp"),
         App::Video => include_bytes!("../../assets/icons/video.bmp"),
         App::TaskManager => include_bytes!("../../assets/icons/taskmgr.bmp"),
-        App::Store | App::Program => return None,
+        App::Store => include_bytes!("../../assets/icons/store.bmp"),
+        App::Program => include_bytes!("../../assets/icons/program.bmp"),
     })
 }
 
