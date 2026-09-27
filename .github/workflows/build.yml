@@ -1,0 +1,57 @@
+name: Build and boot
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm grub-pc-bin grub-common xorriso mtools dosfstools qemu-system-x86 clang
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --target x86_64-unknown-none
+
+      - name: Check formatting
+        run: cd kernel && cargo fmt --check
+
+      - name: Clippy
+        run: cd kernel && cargo clippy --release -- -D warnings
+
+      - name: Build ISO
+        run: make
+
+      - name: Boot test
+        run: make test
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ryzikos-iso
+          path: |
+            build/ryzikos.iso
+            scripts/run-windows.bat
+
+      # Every push to main publishes a release with a fresh ISO, so the OS can
+      # be run in QEMU without building it. The newest one is always reachable
+      # at /releases/latest/download/ryzikos.iso.
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" build/ryzikos.iso scripts/run-windows.bat \
+            --target "$GITHUB_SHA" --latest \
+            --title "RyzikOS build ${GITHUB_RUN_NUMBER}" \
+            --notes "Сборка из main, коммит ${GITHUB_SHA::7}. Как запустить на Windows: см. README."

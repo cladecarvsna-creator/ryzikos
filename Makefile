@@ -1,9 +1,9 @@
-# EverOS build: nasm (boot code) + cargo (Rust kernel) -> ld -> GRUB ISO.
+# RyzikOS build: nasm (boot code) + cargo (Rust kernel) -> ld -> GRUB ISO.
 
 BUILD      := build
 KERNEL     := $(BUILD)/kernel.bin
-ISO        := $(BUILD)/everos.iso
-# the hard disk for `make run`: files saved in EverOS stay here
+ISO        := $(BUILD)/ryzikos.iso
+# the hard disk for `make run`: files saved in RyzikOS stay here
 DISK       := $(BUILD)/disk.img
 RUST_LIB   := kernel/target/x86_64-unknown-none/release/libeveros_kernel.a
 ASM_SRC    := $(wildcard boot/*.asm)
@@ -35,13 +35,13 @@ $(ISO): $(KERNEL) iso/boot/grub/grub.cfg
 	cp iso/boot/grub/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
 	grub-mkrescue -o $@ $(BUILD)/iso 2> /dev/null
 
-# A blank disk; EverOS formats it as FAT32 on first boot. Read it with
+# A blank disk; RyzikOS formats it as FAT32 on first boot. Read it with
 # mtools: mdir -i build/disk.img@@1M ::/Users/root
 $(DISK):
 	@mkdir -p $(BUILD)
 	truncate -s 128M $@
 
-# Boot EverOS in a QEMU window. Serial output goes to the terminal, and
+# Boot RyzikOS in a QEMU window. Serial output goes to the terminal, and
 # the taskbar clock shows local time.
 run: $(ISO) $(DISK)
 	$(QEMU) -cdrom $(ISO) -boot d -m 512M -serial stdio -rtc base=localtime \

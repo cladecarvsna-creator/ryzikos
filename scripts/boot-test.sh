@@ -11,7 +11,7 @@
 # Exits 0 if everything works, 1 otherwise.
 set -u
 
-iso="${1:-build/everos.iso}"
+iso="${1:-build/ryzikos.iso}"
 dir="$(mktemp -d)"
 log="$dir/serial.log"
 monitor="$dir/monitor.sock"
