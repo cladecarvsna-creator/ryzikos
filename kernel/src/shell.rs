@@ -112,6 +112,7 @@ impl Shell {
                 println!("  video   open Video Player (video <file.avi> plays one)");
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
+                println!("  beep    play the volume sound on the ES1370 sound card");
                 println!("  store   open the App Store to install programs");
                 println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
                 println!("  browser open the web browser (browser <address> goes there)");
@@ -190,6 +191,13 @@ impl Shell {
                 open(app);
             }
             "store" | "apps" => open(App::Store),
+            "beep" => {
+                if crate::sound::available() {
+                    crate::sound::play(&crate::sound::volume_chime());
+                } else {
+                    error("No sound card: start QEMU with -device ES1370");
+                }
+            }
             "open" | "run" => {
                 // the desktop picks the app: programs get their own window
                 if args.trim().is_empty() {

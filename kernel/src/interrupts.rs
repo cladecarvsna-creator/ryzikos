@@ -242,7 +242,8 @@ extern "C" fn interrupt_dispatch(frame: &mut InterruptFrame) {
     match vector {
         0..=31 => exception(frame),
         IRQ_TIMER => {
-            TICKS.fetch_add(1, Ordering::Relaxed);
+            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            crate::sound::on_tick(now);
         }
         IRQ_KEYBOARD => KEYBOARD_BYTES.push(unsafe { inb(0x60) }),
         IRQ_MOUSE => MOUSE_BYTES.push(unsafe { inb(0x60) }),

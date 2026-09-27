@@ -23,6 +23,8 @@ RyzikOS — любительская операционная система д�
 - **Фото и Видео.** Галерея с просмотром картинок и видеоплеер (MJPEG AVI).
 - **Браузер** открывает сайты на jQuery, в том числе Википедию: раньше такие
   страницы были пустыми.
+- **Звук.** Драйвер звуковой карты Ensoniq ES1370. Когда отпускаешь
+  ползунок громкости, звучит короткий сигнал, как в Windows и macOS.
 - **Меньше Windows.** Лаунчер вместо меню «Пуск», док внизу, строка меню
   сверху, «Files», «Computer», «Trash», пути вида `/Users/root`, сочетания
   клавиш с Super.
@@ -93,6 +95,17 @@ RyzikOS — любительская операционная система д�
 
 - Сетевая карта Intel e1000, TCP/IP ([smoltcp](https://github.com/smoltcp-rs/smoltcp)),
   DHCP и DNS. В QEMU нужен флаг `-nic user,model=e1000`.
+
+### Звук
+
+- Звуковая карта Ensoniq AudioPCI ES1370 (её эмулирует QEMU):
+  16 бит, стерео, 22050 Гц, воспроизведение через DMA.
+- Громкость задаётся ползунком в быстрых настройках (значок динамика в
+  строке меню). Когда ползунок отпускаешь, звучит короткий сигнал новой
+  громкости. Команда `beep` в терминале играет его же.
+- В QEMU нужен флаг `-device ES1370` (на Windows
+  `-audiodev dsound,id=snd0 -device ES1370,audiodev=snd0`, как в
+  `run-windows.bat`). Без карты RyzikOS работает молча.
 - HTTP/1.1 и HTTPS (TLS 1.3, [embedded-tls](https://github.com/drogue-iot/embedded-tls)),
   перенаправления, cookie, загрузка страниц в фоне.
 - Свой движок страниц: HTML, CSS (flexbox, grid, таблицы, градиенты),
@@ -101,7 +114,7 @@ RyzikOS — любительская операционная система д�
 - Скачанные файлы сохраняются в Downloads, программы `.rzapp`
   устанавливаются в Programs.
 
-Честно о пределах: нет звука, `<canvas>`, WebGL, WebSocket, SVG и шрифтов с
+Честно о пределах: страницы и видео пока без звука, нет `<canvas>`, WebGL, WebSocket, SVG и шрифтов с
 сайтов, поэтому YouTube, VK и похожие сайты не заработают. Очень тяжёлые
 страницы в QEMU без аппаратного ускорения грузятся медленно. Сертификаты
 HTTPS не проверяются.
@@ -109,7 +122,7 @@ HTTPS не проверяются.
 ### Команды терминала
 
 `help`, `clear`, `echo`, `info`, `ls` (`dir`), `cd`, `pwd`, `cat`, `mkdir`,
-`rm`, `echo текст > файл`, `open <файл>` (открыть файл или запустить
+`rm`, `echo текст > файл`, `beep` (сигнал на звуковой карте), `open <файл>` (открыть файл или запустить
 программу), `drives` (список дисков), `disc`, `store`, `browser [адрес]`,
 `fetch <адрес>`, `notepad`, `explorer`, `photos`, `video`, `paint`, `calc`,
 `settings`, `about`, `theme dark|light`, `wallpaper`, `whoami`, `users`,
@@ -129,7 +142,7 @@ HTTPS не проверяются.
 
 ```powershell
 & "C:\Program Files\qemu\qemu-img.exe" create -f vpc -o subformat=fixed everos-disk.vhd 128M
-& "C:\Program Files\qemu\qemu-system-x86_64.exe" -cdrom everos.iso -boot d -m 512M -nic user,model=e1000 -drive file=everos-disk.vhd,format=vpc,if=ide,index=0,media=disk
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" -cdrom everos.iso -boot d -m 512M -nic user,model=e1000 -audiodev dsound,id=snd0 -device ES1370,audiodev=snd0 -drive file=everos-disk.vhd,format=vpc,if=ide,index=0,media=disk
 ```
 
 Файлы из RyzikOS можно посмотреть в Windows: закройте QEMU и дважды
@@ -170,6 +183,7 @@ make clean  # удалить сборку (диск build/disk.img остаёт�
 | `kernel/src/net/`, `kernel/src/pci.rs` | сетевая карта e1000, TCP/IP, DHCP, DNS, шина PCI |
 | `kernel/src/web/` | движок браузера: HTTP и HTTPS, DOM, CSS, раскладка, картинки, мост к JavaScript, каталог программ |
 | `kernel/src/js/`, `kernel/quickjs/` | движок JavaScript QuickJS |
+| `kernel/src/sound.rs` | звуковая карта ES1370 и сигнал громкости |
 | `kernel/src/shell.rs` | терминал |
 | `programs/` | программы `.rzapp` и `catalog.txt` для App Store |
 | `iso/media/`, `scripts/gen-media.py` | фото и видео для CD |

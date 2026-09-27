@@ -1889,7 +1889,10 @@ impl<'a> Desktop<'a> {
             return;
         }
         self.drag = None;
-        self.slider = None;
+        if self.slider.take() == Some(tray::Slider::Volume) {
+            // let go of the volume: play a sound at the new loudness
+            crate::sound::play(&crate::sound::volume_chime());
+        }
         if let Some(app) = self.capture.take() {
             self.send_mouse(app, MouseKind::Up);
         }
@@ -2006,6 +2009,7 @@ impl<'a> Desktop<'a> {
             if s == tray::Slider::Brightness {
                 self.present_all = true;
             } else {
+                crate::sound::set_volume(self.tray.volume);
                 self.damage_tray();
             }
         }
