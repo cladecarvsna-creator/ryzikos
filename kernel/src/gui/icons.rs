@@ -22,6 +22,9 @@ pub enum Pic {
     Drives,
     BinEmpty,
     BinFull,
+    /// The dock's Search and Overview (the second desktop) buttons.
+    Search,
+    Desktops,
 }
 
 /// Icon sizes, in pixels.
@@ -35,7 +38,7 @@ struct Set([Vec<u32>; 3]);
 
 pub struct Icons {
     apps: Vec<Set>,
-    pics: [Set; 4],
+    pics: [Set; 6],
     /// The RyzikOS logo at each of LOGO_SIZES.
     logo: Vec<(usize, Vec<u32>)>,
 }
@@ -68,7 +71,11 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::About => include_bytes!("../../assets/icons/about.bmp"),
         App::Calculator => include_bytes!("../../assets/icons/calculator.png"),
         App::Browser => include_bytes!("../../assets/icons/browser.png"),
-        App::Photos | App::Video | App::Store | App::Program => return None,
+        App::Photos => include_bytes!("../../assets/icons/photos.bmp"),
+        App::Video => include_bytes!("../../assets/icons/video.bmp"),
+        App::TaskManager => include_bytes!("../../assets/icons/taskmgr.bmp"),
+        App::Store => include_bytes!("../../assets/icons/store.bmp"),
+        App::Program => include_bytes!("../../assets/icons/program.bmp"),
     })
 }
 
@@ -102,6 +109,8 @@ impl Icons {
             pic(include_bytes!("../../assets/icons/drives.bmp")),
             pic(include_bytes!("../../assets/icons/recycle-bin.png")),
             recycle_full(include_bytes!("../../assets/icons/recycle-bin.png")),
+            pic(include_bytes!("../../assets/icons/search.bmp")),
+            pic(include_bytes!("../../assets/icons/desktops.bmp")),
         ];
         // not counted: the boot test knows how many app pictures there are
         let logo = match Picture::from_file(include_bytes!("../../assets/ryzikos-logo.png")) {
@@ -587,6 +596,22 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
             }
             c.fill_polygon(&[(x + 18, y + 14), (x + 18, y + 34), (x + 35, y + 24)], 0xffffff);
             c.outline_round(tile, 8, rgb(0x90, 0x10, 0x30));
+        }
+        App::TaskManager => {
+            // a pulse line on a green tile, like a heart monitor
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0x34, 0xc7, 0x7b), rgb(0x0f, 0x8a, 0x52));
+            }
+            let pts = [(8, 26), (16, 26), (20, 16), (26, 34), (31, 20), (35, 26), (40, 26)];
+            for k in 1..pts.len() {
+                let (a, b) = (pts[k - 1], pts[k]);
+                for d in 0..3 {
+                    c.line(x + a.0, y + a.1 + d - 1, x + b.0, y + b.1 + d - 1, 0xffffff);
+                }
+            }
+            c.outline_round(tile, 8, rgb(0x0a, 0x60, 0x3a));
         }
         App::Program => {
             // a small window holding four tiles, on a teal tile

@@ -3,7 +3,7 @@
 //! The entry stubs live in boot/interrupts.asm. They save the registers
 //! and call `interrupt_dispatch` with a pointer to the saved frame.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::port::{inb, io_wait, outb};
 use crate::sync::ByteQueue;
@@ -24,6 +24,10 @@ pub const TIMER_HZ: u64 = 100;
 
 /// Timer ticks since boot.
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// Timer ticks that found the processor asleep in `hlt`, for Task Manager.
+static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
+/// The processor is between `sti; hlt` and the interrupt that wakes it.
+static HALTED: AtomicBool = AtomicBool::new(false);
 /// Raw scancodes from the keyboard interrupt.
 pub static KEYBOARD_BYTES: ByteQueue = ByteQueue::new();
 /// Raw packet bytes from the mouse interrupt.
@@ -222,8 +226,15 @@ pub fn wait_for_interrupt(has_work: impl Fn() -> bool) {
     } else {
         // sti takes effect after the next instruction, so no interrupt
         // can arrive between it and hlt
+        HALTED.store(true, Ordering::Relaxed);
         unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)) };
+        HALTED.store(false, Ordering::Relaxed);
     }
+}
+
+/// Timer ticks the processor spent asleep with nothing to do.
+pub fn idle_ticks() -> u64 {
+    IDLE_TICKS.load(Ordering::Relaxed)
 }
 
 fn end_of_interrupt(vector: u8) {
@@ -242,7 +253,11 @@ extern "C" fn interrupt_dispatch(frame: &mut InterruptFrame) {
     match vector {
         0..=31 => exception(frame),
         IRQ_TIMER => {
-            TICKS.fetch_add(1, Ordering::Relaxed);
+            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            if HALTED.load(Ordering::Relaxed) {
+                IDLE_TICKS.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::sound::on_tick(now);
         }
         IRQ_KEYBOARD => KEYBOARD_BYTES.push(unsafe { inb(0x60) }),
         IRQ_MOUSE => MOUSE_BYTES.push(unsafe { inb(0x60) }),

@@ -84,7 +84,7 @@ pub struct StartMenu {
 }
 
 /// Apps in alphabetical order, for search results.
-const SORTED: [App; 11] = [
+const SORTED: [App; 12] = [
     App::About,
     App::Store,
     App::Browser,
@@ -93,6 +93,7 @@ const SORTED: [App; 11] = [
     App::Explorer,
     App::Photos,
     App::Settings,
+    App::TaskManager,
     App::Terminal,
     App::Notepad,
     App::Video,

@@ -1,7 +1,9 @@
-//! Driver for the Intel 8254x (e1000) network card, the one QEMU emulates
-//! by default. The card copies packets to and from memory by itself
-//! (DMA) using two rings of descriptors; we poll the rings instead of
-//! using interrupts.
+//! Driver for Intel's gigabit network cards: the 8254x (e1000) that QEMU,
+//! VirtualBox and VMware emulate, and the 8257x, 82577-82579, I217, I218
+//! and I219 (e1000e) built into most PCs with Intel network since 2008.
+//! They share the registers and the legacy descriptors used here. The card
+//! copies packets to and from memory by itself (DMA) using two rings of
+//! descriptors; we poll the rings instead of using interrupts.
 //!
 //! Memory is identity-mapped, so the address of a buffer is also its
 //! physical address, which is what the card needs.
@@ -10,21 +12,40 @@ use alloc::vec::Vec;
 use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 
-use smoltcp::phy::{self, Checksum, ChecksumCapabilities, DeviceCapabilities, Medium};
-use smoltcp::time::Instant;
-
+use super::{delay_ms, Card};
 use crate::pci;
 
-/// Vendor and device ids of 8254x cards QEMU, VirtualBox and VMware offer.
-const IDS: [(u16, u16); 4] = [
-    (0x8086, 0x100e), // 82540EM, QEMU's default
-    (0x8086, 0x100f), // 82545EM, VMware
-    (0x8086, 0x10d3), // 82574L
-    (0x8086, 0x1004), // 82543GC
+/// Device ids (Intel's vendor id 0x8086) of 8254x cards: 82540EM is
+/// QEMU's default, 82545EM VMware's.
+const IDS: &[u16] = &[
+    0x1000, 0x1001, 0x1004, 0x1008, 0x1009, 0x100c, 0x100d, 0x100e, 0x100f, 0x1010, 0x1011,
+    0x1012, 0x1013, 0x1014, 0x1015, 0x1016, 0x1017, 0x1018, 0x1019, 0x101a, 0x101d, 0x101e,
+    0x1026, 0x1027, 0x1028, 0x1075, 0x1076, 0x1077, 0x1078, 0x1079, 0x107a, 0x107b, 0x107c,
+    0x108a, 0x1099, 0x10b5, 0x1107, 0x1112,
+];
+
+/// Device ids of e1000e cards.
+const NEWER_IDS: &[u16] = &[
+    // 82571, 82572, 82573, 82574L (QEMU's e1000e), 82583V
+    0x105e, 0x105f, 0x1060, 0x10a4, 0x10a5, 0x10bc, 0x10d9, 0x10da, 0x107d, 0x107e, 0x107f,
+    0x10b9, 0x108b, 0x108c, 0x109a, 0x10d3, 0x10f6, 0x150c,
+    // built into ICH8, ICH9 and ICH10 chipsets
+    0x1049, 0x104a, 0x104b, 0x104c, 0x104d, 0x10c4, 0x10c5, 0x10bd, 0x10bf, 0x10c0, 0x10c2,
+    0x10c3, 0x10cb, 0x10cc, 0x10cd, 0x10ce, 0x10e5, 0x10f5, 0x294c, 0x10de, 0x10df, 0x1525,
+    // 82577, 82578, 82579 and I217, I218
+    0x10ea, 0x10eb, 0x10ef, 0x10f0, 0x1502, 0x1503, 0x153a, 0x153b, 0x155a, 0x1559, 0x15a0,
+    0x15a1, 0x15a2, 0x15a3,
+    // I219, in its many chipset generations
+    0x156f, 0x1570, 0x15b7, 0x15b8, 0x15b9, 0x15bb, 0x15bc, 0x15bd, 0x15be, 0x15d6, 0x15d7,
+    0x15d8, 0x15e3, 0x15df, 0x15e0, 0x15e1, 0x15e2, 0x0d4e, 0x0d4f, 0x0d4c, 0x0d4d, 0x0d53,
+    0x0d55, 0x15fb, 0x15fc, 0x15f9, 0x15fa, 0x15f4, 0x15f5, 0x1a1c, 0x1a1d, 0x1a1e, 0x1a1f,
+    0x0dc5, 0x0dc6, 0x0dc7, 0x0dc8, 0x550a, 0x550b, 0x550c, 0x550d, 0x550e, 0x550f, 0x5510,
+    0x5511, 0x57a0, 0x57a1, 0x57b3, 0x57b4, 0x57b5, 0x57b6, 0x57b7, 0x57b8, 0x57b9, 0x57ba,
 ];
 
 const CTRL: usize = 0x0000;
 const REG_STATUS: usize = 0x0008;
+const CTRL_EXT: usize = 0x0018;
 const EERD: usize = 0x0014;
 const IMC: usize = 0x00d8;
 const RCTL: usize = 0x0100;
@@ -40,6 +61,7 @@ const TDBAH: usize = 0x3804;
 const TDLEN: usize = 0x3808;
 const TDH: usize = 0x3810;
 const TDT: usize = 0x3818;
+const TXDCTL: usize = 0x3828;
 const MTA: usize = 0x5200;
 const RAL: usize = 0x5400;
 const RAH: usize = 0x5404;
@@ -47,6 +69,12 @@ const RAH: usize = 0x5404;
 const CTRL_ASDE: u32 = 1 << 5;
 const CTRL_SLU: u32 = 1 << 6;
 const CTRL_RST: u32 = 1 << 26;
+const CTRL_PHY_RST: u32 = 1 << 31;
+const CTRL_FRCSPD: u32 = 1 << 11;
+const CTRL_FRCDPX: u32 = 1 << 12;
+const CTRL_ILOS: u32 = 1 << 7;
+/// Software owns the card, not the management engine (e1000e).
+const CTRL_EXT_DRV_LOAD: u32 = 1 << 28;
 /// Link up, in the device status register.
 const STATUS_LU: u32 = 1 << 1;
 
@@ -66,7 +94,6 @@ const RX_STATUS_EOP: u8 = 1 << 1;
 const RX_COUNT: usize = 64;
 const TX_COUNT: usize = 32;
 const BUF_SIZE: usize = 2048;
-pub const MTU: usize = 1514;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -128,9 +155,15 @@ static mut BUFFERS: Buffers = Buffers {
     tx: [[0; BUF_SIZE]; TX_COUNT],
 };
 
+pub fn drives(vendor: u16, device: u16) -> bool {
+    vendor == 0x8086 && (IDS.contains(&device) || NEWER_IDS.contains(&device))
+}
+
 pub struct E1000 {
     mmio: usize,
-    pub mac: [u8; 6],
+    mac: [u8; 6],
+    /// An e1000e (82571 or newer), not a plain 8254x.
+    newer: bool,
     rx_next: usize,
     tx_next: usize,
 }
@@ -138,15 +171,19 @@ pub struct E1000 {
 impl E1000 {
     /// Find the card on the PCI bus and start it. Call once.
     pub fn init() -> Option<Self> {
-        let dev = pci::find(&IDS)?;
+        let ids: Vec<(u16, u16)> = IDS.iter().chain(NEWER_IDS).map(|&d| (0x8086, d)).collect();
+        let dev = pci::find(&ids)?;
         dev.enable_bus_master();
         let mmio = dev.bar(0);
         if mmio == 0 {
             return None;
         }
+        let device = (dev.read(0) >> 16) as u16;
+        let newer = NEWER_IDS.contains(&device);
         let mut nic = E1000 {
             mmio,
             mac: [0; 6],
+            newer,
             rx_next: 0,
             tx_next: 0,
         };
@@ -154,11 +191,6 @@ impl E1000 {
         nic.read_mac();
         nic.set_up_rings();
         Some(nic)
-    }
-
-    /// Whether a cable is plugged in and the link is up.
-    pub fn link_up(&self) -> bool {
-        self.read(REG_STATUS) & STATUS_LU != 0
     }
 
     fn read(&self, reg: usize) -> u32 {
@@ -172,6 +204,8 @@ impl E1000 {
     fn reset(&mut self) {
         self.write(IMC, 0xffff_ffff);
         self.write(CTRL, self.read(CTRL) | CTRL_RST);
+        // newer cards reload their settings from flash, which takes a while
+        delay_ms(if self.newer { 20 } else { 1 });
         for _ in 0..100_000 {
             if self.read(CTRL) & CTRL_RST == 0 {
                 break;
@@ -179,7 +213,13 @@ impl E1000 {
             core::hint::spin_loop();
         }
         self.write(IMC, 0xffff_ffff);
-        self.write(CTRL, self.read(CTRL) | CTRL_SLU | CTRL_ASDE);
+        if self.newer {
+            // tell the firmware a driver has the card now
+            self.write(CTRL_EXT, self.read(CTRL_EXT) | CTRL_EXT_DRV_LOAD);
+        }
+        // let the card and the switch agree on speed by themselves
+        let ctrl = self.read(CTRL) & !(CTRL_PHY_RST | CTRL_FRCSPD | CTRL_FRCDPX | CTRL_ILOS);
+        self.write(CTRL, ctrl | CTRL_SLU | CTRL_ASDE);
     }
 
     fn read_mac(&mut self) {
@@ -243,13 +283,42 @@ impl E1000 {
             self.write(TDLEN, (TX_COUNT * 16) as u32);
             self.write(TDH, 0);
             self.write(TDT, 0);
+            if self.newer {
+                // bit 22 must be set on these, and descriptors are written
+                // back one at a time
+                self.write(TXDCTL, 1 << 22 | 1 << 24 | 1 << 16);
+            }
             self.write(TCTL, TCTL_EN | TCTL_PSP | 0x0f << 4 | 0x40 << 12);
             self.write(TIPG, 10 | 8 << 10 | 6 << 20);
         }
     }
 
-    /// Take the next received packet, if any.
-    fn receive_packet(&mut self) -> Option<Vec<u8>> {
+    fn tx_free(&self) -> bool {
+        unsafe {
+            let desc = addr_of!(RINGS.tx[self.tx_next]);
+            read_volatile(addr_of!((*desc).status)) & STATUS_DD != 0
+        }
+    }
+}
+
+impl Card for E1000 {
+    fn name(&self) -> &'static str {
+        if self.newer {
+            "Intel e1000e"
+        } else {
+            "Intel e1000"
+        }
+    }
+
+    fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+
+    fn link_up(&self) -> bool {
+        self.read(REG_STATUS) & STATUS_LU != 0
+    }
+
+    fn receive(&mut self) -> Option<Vec<u8>> {
         let i = self.rx_next;
         unsafe {
             let desc = addr_of_mut!(RINGS.rx[i]);
@@ -261,31 +330,28 @@ impl E1000 {
             let len = read_volatile(addr_of!((*desc).length)) as usize;
             let errors = read_volatile(addr_of!((*desc).errors));
             let packet = if status & RX_STATUS_EOP != 0 && errors == 0 {
-                Some((&*addr_of!(BUFFERS.rx[i]))[..len.min(BUF_SIZE)].to_vec())
+                (&*addr_of!(BUFFERS.rx[i]))[..len.min(BUF_SIZE)].to_vec()
             } else {
-                Some(Vec::new()) // dropped, the caller skips it
+                Vec::new() // dropped, the caller skips it
             };
             write_volatile(addr_of_mut!((*desc).status), 0);
             fence(Ordering::Release);
             // hand the descriptor back to the card
             self.write(RDT, i as u32);
             self.rx_next = (i + 1) % RX_COUNT;
-            packet
+            Some(packet)
         }
     }
 
-    fn tx_free(&self) -> bool {
-        unsafe {
-            let desc = addr_of!(RINGS.tx[self.tx_next]);
-            read_volatile(addr_of!((*desc).status)) & STATUS_DD != 0
-        }
+    fn can_send(&self) -> bool {
+        self.tx_free()
     }
 
-    fn send_packet(&mut self, len: usize, fill: impl FnOnce(&mut [u8])) {
+    fn send(&mut self, data: &[u8]) {
         let i = self.tx_next;
-        let len = len.min(BUF_SIZE);
+        let len = data.len().min(BUF_SIZE);
         unsafe {
-            fill(&mut (&mut *addr_of_mut!(BUFFERS.tx[i]))[..len]);
+            (&mut *addr_of_mut!(BUFFERS.tx[i]))[..len].copy_from_slice(&data[..len]);
             let desc = addr_of_mut!(RINGS.tx[i]);
             write_volatile(addr_of_mut!((*desc).length), len as u16);
             write_volatile(
@@ -297,51 +363,5 @@ impl E1000 {
         fence(Ordering::Release);
         self.tx_next = (i + 1) % TX_COUNT;
         self.write(TDT, self.tx_next as u32);
-    }
-}
-
-pub struct RxToken(Vec<u8>);
-pub struct TxToken<'a>(&'a mut E1000);
-
-impl phy::RxToken for RxToken {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.0)
-    }
-}
-
-impl phy::TxToken for TxToken<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut result = None;
-        self.0.send_packet(len, |buf| result = Some(f(buf)));
-        result.unwrap()
-    }
-}
-
-impl phy::Device for E1000 {
-    type RxToken<'a> = RxToken;
-    type TxToken<'a> = TxToken<'a>;
-
-    fn receive(&mut self, _now: Instant) -> Option<(RxToken, TxToken<'_>)> {
-        loop {
-            let packet = self.receive_packet()?;
-            if !packet.is_empty() {
-                return Some((RxToken(packet), TxToken(self)));
-            }
-        }
-    }
-
-    fn transmit(&mut self, _now: Instant) -> Option<TxToken<'_>> {
-        self.tx_free().then_some(TxToken(self))
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = MTU;
-        caps.max_burst_size = Some(RX_COUNT / 2);
-        let mut checksum = ChecksumCapabilities::default();
-        checksum.ipv4 = Checksum::Both;
-        caps.checksum = checksum;
-        caps
     }
 }

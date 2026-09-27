@@ -165,3 +165,55 @@ impl Framebuffer {
         }
     }
 }
+
+/// Make writes to the framebuffer write-combining. Firmware on real PCs
+/// usually leaves video memory uncached, so every pixel is its own trip
+/// over the bus and drawing is many times slower than in an emulator.
+/// Page attribute slot 1 (the PWT bit alone) becomes write-combining, and
+/// the 2 MiB pages that hold the framebuffer use it. Nothing else sets PWT.
+pub fn write_combine(fb: &Framebuffer) {
+    use core::arch::x86_64::__cpuid;
+    const IA32_PAT: u32 = 0x277;
+    const PWT: u64 = 1 << 3;
+    const HUGE: u64 = 1 << 7;
+    const WC: u64 = 0x01;
+    if __cpuid(1).edx & (1 << 16) == 0 {
+        return; // no page attribute table
+    }
+    let start = fb.base as u64;
+    let end = start + (fb.pitch * fb.height) as u64;
+    // the boot code maps the first 4 GiB with 2 MiB pages
+    if end > 1 << 32 {
+        return;
+    }
+    unsafe {
+        let pat = rdmsr(IA32_PAT);
+        wrmsr(IA32_PAT, pat & !(0xff << 8) | WC << 8);
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        let p4 = (cr3 & !0xfff) as *const u64;
+        let p3 = (*p4 & 0x000f_ffff_ffff_f000) as *const u64;
+        let mut page = start & !0x1f_ffff;
+        while page < end {
+            let p3e = *p3.add((page >> 30) as usize);
+            let p2 = (p3e & 0x000f_ffff_ffff_f000) as *mut u64;
+            let entry = p2.add(((page >> 21) & 0x1ff) as usize);
+            if *entry & HUGE != 0 {
+                *entry |= PWT;
+            }
+            page += 0x20_0000;
+        }
+        // drop cached lines and old translations of those pages
+        core::arch::asm!("wbinvd", "mov {0}, cr3", "mov cr3, {0}", out(reg) _, options(nostack));
+    }
+}
+
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack));
+    (hi as u64) << 32 | lo as u64
+}
+
+unsafe fn wrmsr(msr: u32, value: u64) {
+    core::arch::asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32, options(nostack));
+}

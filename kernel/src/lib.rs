@@ -23,6 +23,7 @@ mod ps2;
 mod rtc;
 mod serial;
 mod shell;
+mod sound;
 mod sync;
 mod users;
 mod vga;
@@ -44,6 +45,9 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     heap::init();
     users::init();
     let boot = unsafe { multiboot::parse(multiboot_info) };
+    if let Some(fb) = &boot.framebuffer {
+        framebuffer::write_combine(fb);
+    }
     CONSOLE.lock().init(boot.framebuffer);
 
     console::print_colored(Color::LightCyan, format_args!("RyzikOS {}", gui::VERSION));
@@ -54,6 +58,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     let mouse = ps2::init();
     interrupts::enable();
     fs::init();
+    let sound = sound::init();
 
     match &boot.framebuffer {
         Some(fb) => println!("Graphics:  {}x{} framebuffer", fb.width, fb.height),
@@ -61,6 +66,10 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     }
     println!("Keyboard:  ready (Alt+Shift switches EN/RU)");
     println!("Mouse:     {}", if mouse { "ready" } else { "not found" });
+    println!(
+        "Sound:     {}",
+        if sound { "ES1370" } else { "none (start QEMU with -device ES1370)" }
+    );
     match fs::storage() {
         fs::Storage::Disk => println!(
             "Disk:      {} MiB FAT32, files are saved on it",

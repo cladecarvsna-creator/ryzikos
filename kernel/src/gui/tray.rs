@@ -4,7 +4,8 @@
 //!
 //! Quick settings has tiles for the network and the layout, and sliders
 //! for brightness and volume. Brightness dims the whole picture in
-//! software. There is no sound driver yet, so volume is only a setting.
+//! software. Volume sets how loud the ES1370 sound card plays, and a
+//! little bell sounds when the slider is let go.
 
 use core::fmt::Write;
 

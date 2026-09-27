@@ -112,6 +112,8 @@ impl Shell {
                 println!("  video   open Video Player (video <file.avi> plays one)");
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
+                println!("  devices list the PC's hardware and which parts have drivers");
+                println!("  beep    play the volume sound on the ES1370 sound card");
                 println!("  store   open the App Store to install programs");
                 println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
                 println!("  browser open the web browser (browser <address> goes there)");
@@ -190,6 +192,13 @@ impl Shell {
                 open(app);
             }
             "store" | "apps" => open(App::Store),
+            "beep" => {
+                if crate::sound::available() {
+                    crate::sound::play(&crate::sound::volume_chime());
+                } else {
+                    error("No sound card: start QEMU with -device ES1370");
+                }
+            }
             "open" | "run" => {
                 // the desktop picks the app: programs get their own window
                 if args.trim().is_empty() {
@@ -198,6 +207,24 @@ impl Shell {
                     gui::request_file(&self.path(args));
                 } else {
                     error("File not found");
+                }
+            }
+            "devices" | "lspci" => {
+                // what is in this PC, and what RyzikOS can use
+                for (d, vendor, device, class, sub) in crate::pci::all() {
+                    let driver = match (class, sub) {
+                        (0x02, 0x00) if crate::net::card_name().is_some() && crate::net::drives(vendor, device) => "in use",
+                        (0x02, 0x00) if crate::net::drives(vendor, device) => "supported",
+                        (0x01, 0x01) | (0x01, 0x06) => "supported",
+                        (0x04, 0x01) if (vendor, device) == (0x1274, 0x5000) => "supported",
+                        (0x03, _) => "screen via the boot framebuffer",
+                        (0x06, _) => "",
+                        _ => "no driver",
+                    };
+                    println!(
+                        "{:02x}:{:02x}.{} {:04x}:{:04x} {:<16} {}",
+                        d.bus, d.slot, d.function, vendor, device, crate::pci::class_name(class, sub), driver
+                    );
                 }
             }
             "drives" | "disks" => {
@@ -457,7 +484,7 @@ fn fetch(address: &str) {
         return;
     }
     if crate::net::init().is_none() {
-        println!("No network card. Start QEMU with -nic user,model=e1000");
+        println!("{}", crate::net::NO_CARD);
         return;
     }
     let Some(url) = crate::web::address_to_url(address) else {

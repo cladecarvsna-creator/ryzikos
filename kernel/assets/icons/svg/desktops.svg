@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="100%" height="100%" fill="none">
+  <!-- Задний рабочий стол -->
+  <rect x="6" y="10" width="38" height="28" rx="6" fill="#FFEAA7" stroke="#1E2022" stroke-width="3"/>
+  <!-- Передний рабочий стол -->
+  <rect x="20" y="26" width="38" height="28" rx="6" fill="#74B9FF" stroke="#1E2022" stroke-width="3"/>
+  <!-- Бэйдж с цифрой '2' -->
+  <circle cx="46" cy="40" r="8" fill="#FF7675" stroke="#1E2022" stroke-width="2.5"/>
+  <path d="M43 37C43 35 49 35 49 38C49 41 43 42 43 44H49" stroke="#F5F6FA" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

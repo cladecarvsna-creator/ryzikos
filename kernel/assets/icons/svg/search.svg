@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="100%" height="100%" fill="none">
+  <!-- Карточка-фон -->
+  <rect x="6" y="8" width="52" height="48" rx="12" fill="#F5F6FA" stroke="#1E2022" stroke-width="3"/>
+  <!-- Стекло лупы -->
+  <circle cx="28" cy="28" r="11" fill="#74B9FF" stroke="#1E2022" stroke-width="3"/>
+  <!-- Блик на стекле -->
+  <path d="M23 23C25 21 29 21 31 23" stroke="#F5F6FA" stroke-width="2" stroke-linecap="round"/>
+  <!-- Ручка лупы -->
+  <path d="M36 36L48 48" stroke="#1E2022" stroke-width="4" stroke-linecap="round"/>
+</svg>

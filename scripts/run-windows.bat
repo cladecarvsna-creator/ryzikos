@@ -12,4 +12,4 @@ where %QEMU_IMG% >nul 2>nul || set QEMU_IMG="C:\Program Files\qemu\qemu-img.exe"
 if not exist everos-disk.vhd %QEMU_IMG% create -f vpc -o subformat=fixed everos-disk.vhd 128M
 set DISK=
 if exist everos-disk.vhd set DISK=-drive file=everos-disk.vhd,format=vpc,if=ide,index=0,media=disk
-%QEMU% -cdrom everos.iso -boot d -m 512M -serial stdio -rtc base=localtime -nic user,model=e1000 %DISK%
+%QEMU% -cdrom everos.iso -boot d -m 512M -serial stdio -rtc base=localtime -nic user,model=e1000 -audiodev dsound,id=snd0 -device ES1370,audiodev=snd0 %DISK%

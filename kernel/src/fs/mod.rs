@@ -100,8 +100,14 @@ pub fn changes() -> u32 {
     CHANGES.load(Ordering::Relaxed)
 }
 
+/// Count a change when something may have changed: a folder that was
+/// already there, for one, changes nothing, and the desktop redraws on
+/// every change. A disk error or a full disk can stop halfway, so those
+/// count.
 fn changed<T>(r: Result<T, Error>) -> Result<T, Error> {
-    CHANGES.fetch_add(1, Ordering::Relaxed);
+    if matches!(r, Ok(_) | Err(Error::Io | Error::Full)) {
+        CHANGES.fetch_add(1, Ordering::Relaxed);
+    }
     r
 }
 static STORAGE: IrqMutex<Storage> = IrqMutex::new(Storage::None);
@@ -648,6 +654,8 @@ pub fn unique_name(dir: &str, base: &str, ext: &str) -> String {
 /// Where apps keep a user's settings: `/Users/<name>/AppData`.
 pub fn app_data(user: &str) -> String {
     let dir = join(&home(user), "AppData");
-    let _ = create_dir(&dir);
+    if !is_dir(&dir) {
+        let _ = create_dir(&dir);
+    }
     dir
 }

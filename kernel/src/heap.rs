@@ -111,6 +111,11 @@ pub fn init() {
     }
 }
 
+/// The size of the kernel heap.
+pub fn total_bytes() -> usize {
+    HEAP_SIZE
+}
+
 /// Bytes the big allocator has free (blocks on the small free lists are
 /// not counted), for deciding whether there is room for more.
 pub fn free_bytes() -> usize {

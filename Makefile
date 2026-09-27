@@ -58,7 +58,7 @@ $(DISK):
 run: $(ISO) $(DISK)
 	$(QEMU) -cdrom $(ISO) -boot d -m 512M -serial stdio -rtc base=localtime \
 		-drive file=$(DISK),format=raw,if=ide,index=0,media=disk \
-		-nic user,model=e1000
+		-nic user,model=e1000 -device ES1370
 
 # Boot headless and check that the kernel reached Rust code.
 test: $(ISO)
