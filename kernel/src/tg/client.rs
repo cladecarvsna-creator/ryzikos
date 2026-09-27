@@ -119,7 +119,13 @@ pub fn load_config() -> Option<Config> {
         .get("api_id")
         .and_then(|v| v.parse().ok())
         .zip(map.get("api_hash").filter(|h| h.len() == 32).cloned());
+    let from_build = own.is_none();
     let (api_id, api_hash) = own.or_else(built_in)?;
+    if from_build {
+        // keep the build's keys with the settings, so a later update
+        // built without them still signs in
+        let _ = save_config(&format!("{}", api_id), &api_hash);
+    }
     let mut keys = Vec::new();
     if let Some(hex) = map.get("rsa") {
         let n = crypto::from_hex(hex);
