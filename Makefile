@@ -62,7 +62,7 @@ run: $(ISO) $(DISK)
 
 # Boot headless and check that the kernel reached Rust code.
 test: $(ISO)
-	./scripts/boot-test.sh $(ISO)
+	bash scripts/boot-test.sh $(ISO)
 
 # keeps build/disk.img, so saved files survive a clean
 clean:
