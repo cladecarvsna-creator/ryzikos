@@ -12,7 +12,7 @@ use core::cell::RefCell;
 
 use super::canvas::{mix, rgb, Canvas, Rect};
 use super::text::{HEADING, UI, UI_BOLD};
-use super::{theme, MouseEvent, MouseKind};
+use super::{theme, widgets, MouseEvent, MouseKind};
 use crate::fiber::Fiber;
 use crate::fs;
 use crate::keyboard::Key;
@@ -81,6 +81,8 @@ pub struct Store {
     /// Stopped jobs, run until they notice.
     draining: Vec<Fiber>,
     scroll: i32,
+    /// Dragging the scroll bar's thumb, grabbed this far from its top.
+    thumb_grab: Option<i32>,
     hover: Option<(usize, Act)>,
     started: bool,
     /// A program to run, for the desktop to pick up.
@@ -192,6 +194,12 @@ fn list_rect() -> Rect {
     Rect::new(0, LIST_Y, CLIENT_W, CLIENT_H - LIST_Y - STATUS_H)
 }
 
+/// The scroll bar, in the margin right of the cards.
+fn track() -> Rect {
+    let list = list_rect();
+    Rect::new(CLIENT_W - 18, list.y + 6, 12, list.h - 12)
+}
+
 impl Store {
     pub fn new() -> Self {
         Self {
@@ -203,6 +211,7 @@ impl Store {
             jobs: Vec::new(),
             draining: Vec::new(),
             scroll: 0,
+            thumb_grab: None,
             hover: None,
             started: false,
             open_request: None,
@@ -409,9 +418,20 @@ impl Store {
         }
     }
 
-    fn max_scroll(&self) -> i32 {
+    /// The height of all the cards.
+    fn total(&self) -> i32 {
         let rows = (self.shown().len() as i32 + 1) / 2;
-        (rows * (CARD_H + GAP) + 16 - list_rect().h).max(0)
+        rows * (CARD_H + GAP) + 16
+    }
+
+    fn max_scroll(&self) -> i32 {
+        (self.total() - list_rect().h).max(0)
+    }
+
+    fn scroll_to(&mut self, to: i32) -> bool {
+        let old = self.scroll;
+        self.scroll = to.clamp(0, self.max_scroll());
+        old != self.scroll
     }
 
     fn hit(&self, x: i32, y: i32) -> Option<(usize, Act)> {
@@ -429,9 +449,33 @@ impl Store {
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) -> bool {
-        let MouseKind::Down { right: false } = ev.kind else {
-            return false;
-        };
+        let view = list_rect().h;
+        match ev.kind {
+            MouseKind::Move => {
+                let Some(grab) = self.thumb_grab else {
+                    return false;
+                };
+                let to = widgets::thumb_drag(track(), true, self.total(), view, ev.y, grab);
+                return self.scroll_to(to);
+            }
+            MouseKind::Up => {
+                self.thumb_grab = None;
+                return false;
+            }
+            MouseKind::Down { right: true } => return false,
+            MouseKind::Down { right: false } => {}
+        }
+        if self.max_scroll() > 0 && track().inset(-4).contains(ev.x, ev.y) {
+            let t = widgets::thumb(track(), true, self.total(), view, self.scroll);
+            if t.contains(ev.x, ev.y) {
+                self.thumb_grab = Some(ev.y - t.y);
+                return false;
+            }
+            // a click above or below the thumb turns a page
+            let page = view - CARD_H / 2;
+            let to = if ev.y < t.y { self.scroll - page } else { self.scroll + page };
+            return self.scroll_to(to);
+        }
         for (i, (tab, _)) in TABS.iter().enumerate() {
             if tab_rect(i).contains(ev.x, ev.y) {
                 self.tab = *tab;
@@ -464,9 +508,7 @@ impl Store {
     }
 
     pub fn on_wheel(&mut self, clicks: i32) -> bool {
-        let old = self.scroll;
-        self.scroll = (self.scroll + clicks * 60).clamp(0, self.max_scroll());
-        old != self.scroll
+        self.scroll_to(self.scroll + clicks * 60)
     }
 
     pub fn on_key(&mut self, key: Key) -> bool {
@@ -475,6 +517,8 @@ impl Store {
             Key::PageDown => self.on_wheel(5),
             Key::Up => self.on_wheel(-1),
             Key::PageUp => self.on_wheel(-5),
+            Key::Home => self.scroll_to(0),
+            Key::End => self.scroll_to(self.max_scroll()),
             _ => false,
         }
     }
@@ -527,6 +571,13 @@ impl Store {
                 }
                 self.draw_card(&mut s, i, e, r);
             }
+        }
+        if self.max_scroll() > 0 {
+            let (t, total, view) = (track(), self.total(), list.h);
+            c.fill_round(t, 6, mix(theme::stroke(), theme::light(), 140));
+            let thumb = widgets::thumb(t, true, total, view, self.scroll).inset(2);
+            let color = if self.thumb_grab.is_some() { theme::accent() } else { theme::thumb() };
+            c.fill_round(thumb, 4, color);
         }
         // the status line
         let st = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);

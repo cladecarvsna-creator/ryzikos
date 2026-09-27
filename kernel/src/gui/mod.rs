@@ -510,6 +510,8 @@ pub struct Desktop<'a> {
     vm_buttons: (bool, bool),
     /// Last vmmouse position, to tell moves from button-only events.
     vm_position: (u32, u32),
+    /// The absolute vmmouse is on (in QEMU and VMware).
+    absolute: bool,
 
     layout: Layout,
     clock: StackString<16>,
@@ -642,6 +644,7 @@ impl<'a> Desktop<'a> {
             ps2_buttons: (false, false),
             vm_buttons: (false, false),
             vm_position: (0, 0),
+            absolute: false,
             layout: Layout::Us,
             clock: StackString::new(),
             date: StackString::new(),
@@ -1538,6 +1541,10 @@ impl<'a> Desktop<'a> {
     fn on_ps2(&mut self, packet: ps2::MousePacket) {
         self.ps2_buttons = (packet.left, packet.right);
         self.pointer(self.mouse_x + packet.dx, self.mouse_y + packet.dy);
+        // with the absolute vmmouse the same wheel turn also comes from it
+        if !self.absolute {
+            self.wheel(packet.wheel);
+        }
     }
 
     /// A vmmouse event: an absolute position.
@@ -1555,18 +1562,23 @@ impl<'a> Desktop<'a> {
             y = (ev.y as u64 * self.height as u64 / 65536) as i32;
         }
         self.pointer(x, y);
-        if ev.wheel != 0 && matches!(self.phase, Phase::Desktop) {
+        self.wheel(ev.wheel);
+    }
+
+    /// Scroll the window under the mouse.
+    fn wheel(&mut self, clicks: i32) {
+        if clicks != 0 && matches!(self.phase, Phase::Desktop) {
             let app = self.window_at(self.mouse_x, self.mouse_y);
             let changed = match app {
-                Some(App::Browser) => self.browser.on_wheel(ev.wheel),
-                Some(App::Notepad) => self.notepad.on_wheel(ev.wheel),
-                Some(App::Explorer) => self.explorer.on_wheel(ev.wheel),
-                Some(App::Settings) => self.settings.on_wheel(ev.wheel),
-                Some(App::Paint) => self.paint.on_wheel(ev.wheel),
-                Some(App::Photos) => self.photos.on_wheel(ev.wheel),
-                Some(App::Video) => self.video.on_wheel(ev.wheel),
-                Some(App::Store) => self.store.on_wheel(ev.wheel),
-                Some(App::Program) => self.program.on_wheel(ev.wheel),
+                Some(App::Browser) => self.browser.on_wheel(clicks),
+                Some(App::Notepad) => self.notepad.on_wheel(clicks),
+                Some(App::Explorer) => self.explorer.on_wheel(clicks),
+                Some(App::Settings) => self.settings.on_wheel(clicks),
+                Some(App::Paint) => self.paint.on_wheel(clicks),
+                Some(App::Photos) => self.photos.on_wheel(clicks),
+                Some(App::Video) => self.video.on_wheel(clicks),
+                Some(App::Store) => self.store.on_wheel(clicks),
+                Some(App::Program) => self.program.on_wheel(clicks),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -2738,6 +2750,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
     let mut keyboard = Keyboard::new();
     let mut mouse = ps2::MouseDecoder::new();
     let absolute = vmmouse::init();
+    desk.absolute = absolute;
     serial::write_str(if absolute {
         "desktop: absolute mouse\n"
     } else {

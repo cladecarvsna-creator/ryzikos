@@ -1,6 +1,8 @@
 //! PS/2 controller (i8042): turns on keyboard and mouse interrupts and
 //! decodes mouse packets.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::port::{inb, outb};
 
 const DATA: u16 = 0x60;
@@ -15,6 +17,9 @@ const CONFIG_MOUSE_IRQ: u8 = 1 << 1;
 const CONFIG_MOUSE_CLOCK_OFF: u8 = 1 << 5;
 
 const ACK: u8 = 0xfa;
+
+/// The mouse has a wheel and sends four-byte packets (IntelliMouse).
+static WHEEL: AtomicBool = AtomicBool::new(false);
 
 /// Wait until the controller can take a byte. False on timeout.
 fn wait_write() -> bool {
@@ -68,10 +73,18 @@ pub fn init() -> bool {
     command(0xae); // enable keyboard port
     command(0xa8); // enable mouse port
 
-    // defaults, 200 samples/s for smoother movement, then start sending
-    // packets
-    let mouse =
-        mouse_command(0xf6) && mouse_command(0xf3) && mouse_command(200) && mouse_command(0xf4);
+    let mouse = mouse_command(0xf6); // defaults
+    if mouse {
+        // the IntelliMouse knock: sample rates 200, 100, 80 turn the wheel
+        // on, and the mouse then says it is type 3
+        let knock = [200, 100, 80].iter().all(|&r| mouse_command(0xf3) && mouse_command(r));
+        if knock && mouse_command(0xf2) && read() == Some(3) {
+            WHEEL.store(true, Ordering::Relaxed);
+            crate::serial::write_str("ps2: mouse wheel on\n");
+        }
+    }
+    // 200 samples/s for smoother movement, then start sending packets
+    let mouse = mouse && mouse_command(0xf3) && mouse_command(200) && mouse_command(0xf4);
     flush();
     mouse
 }
@@ -82,19 +95,24 @@ pub struct MousePacket {
     pub dy: i32,
     pub left: bool,
     pub right: bool,
+    /// Wheel clicks, positive when scrolling down.
+    pub wheel: i32,
 }
 
-/// Collects the three bytes of a standard PS/2 mouse packet.
+/// Collects the bytes of a PS/2 mouse packet: three, or four with a wheel.
 pub struct MouseDecoder {
-    bytes: [u8; 3],
+    bytes: [u8; 4],
     count: usize,
+    size: usize,
 }
 
 impl MouseDecoder {
-    pub const fn new() -> Self {
+    /// Call after `init`, which finds out whether the mouse has a wheel.
+    pub fn new() -> Self {
         Self {
-            bytes: [0; 3],
+            bytes: [0; 4],
             count: 0,
+            size: if WHEEL.load(Ordering::Relaxed) { 4 } else { 3 },
         }
     }
 
@@ -106,11 +124,11 @@ impl MouseDecoder {
         }
         self.bytes[self.count] = byte;
         self.count += 1;
-        if self.count < 3 {
+        if self.count < self.size {
             return None;
         }
         self.count = 0;
-        let [flags, x, y] = self.bytes;
+        let [flags, x, y, z] = self.bytes;
         if flags & 0xc0 != 0 {
             return None; // overflow, the movement is garbage
         }
@@ -121,6 +139,8 @@ impl MouseDecoder {
             dy: -dy,
             left: flags & 0x01 != 0,
             right: flags & 0x02 != 0,
+            // the low four bits, signed
+            wheel: if self.size == 4 { ((z << 4) as i8 >> 4) as i32 } else { 0 },
         })
     }
 }
