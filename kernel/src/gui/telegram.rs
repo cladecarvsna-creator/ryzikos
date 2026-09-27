@@ -1163,10 +1163,11 @@ impl Telegram {
         let visible = self.visible_chats();
         let s = self.shared.borrow();
         let mut y = TOP_H;
-        let status = if !online {
-            Some(String::from("Connecting..."))
-        } else {
-            error
+        // a failed connection says why, not just "Connecting..."
+        let status = match error {
+            Some(e) => Some(e),
+            None if !online => Some(String::from("Connecting...")),
+            None => None,
         };
         if let Some(e) = status {
             let r = Rect::new(0, y, LIST_W, 30);
