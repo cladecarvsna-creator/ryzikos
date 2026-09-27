@@ -78,6 +78,7 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::Program => include_bytes!("../../assets/icons/program.bmp"),
         App::Installer => include_bytes!("../../assets/icons/installer.bmp"),
         App::Welcome => include_bytes!("../../assets/ryzikos-logo.png"),
+        App::Telegram => include_bytes!("../../assets/icons/telegram.png"),
     })
 }
 
@@ -638,7 +639,7 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.outline_round(tile, 8, rgb(0x06, 0x5c, 0x66));
         }
         // these have pictures; a plain tile if one can't be read
-        App::Installer | App::Welcome => c.fill_round(tile, 8, rgb(0x2e, 0x7d, 0xd8)),
+        App::Installer | App::Welcome | App::Telegram => c.fill_round(tile, 8, rgb(0x2e, 0x7d, 0xd8)),
         App::Store => {
             // a shopping bag on a violet to blue tile
             {

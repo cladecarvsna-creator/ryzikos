@@ -46,6 +46,9 @@ pub enum Cmd {
     SignOut,
     Restart,
     ShutDown,
+    /// Cut ('x'), copy ('c'), paste ('v') or select all ('a') in an app,
+    /// as if Ctrl and the letter were pressed.
+    Edit(App, char),
 }
 
 pub struct Popup {
@@ -77,6 +80,12 @@ impl Builder {
     pub fn maybe(mut self, label: &str, cmd: Cmd, on: bool) -> Self {
         self.entries
             .push((String::from(label), "", on.then_some(cmd)));
+        self
+    }
+
+    /// A greyed-out or usable item with its shortcut.
+    pub fn keyed_maybe(mut self, label: &str, key: &'static str, cmd: Cmd, on: bool) -> Self {
+        self.entries.push((String::from(label), key, on.then_some(cmd)));
         self
     }
 

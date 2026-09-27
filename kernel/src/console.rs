@@ -232,6 +232,20 @@ impl Console {
         (ch, cell.fg, cell.bg)
     }
 
+    /// The text on screen, a line per row, without trailing spaces or
+    /// empty rows at the end.
+    pub fn text(&self) -> alloc::string::String {
+        let mut out = alloc::string::String::new();
+        for row in 0..self.rows {
+            let line: alloc::string::String = (0..self.cols).map(|c| self.cell(row, c).0).collect();
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        let end = out.trim_end().len();
+        out.truncate(end);
+        out
+    }
+
     /// Text cursor as (row, column).
     pub fn cursor(&self) -> (usize, usize) {
         (self.row, self.col)

@@ -181,6 +181,24 @@ impl Calc {
     }
 
     pub fn on_key(&mut self, key: Key) -> bool {
+        match key {
+            Key::Ctrl('c') | Key::Ctrl('x') => {
+                super::widgets::copy(self.entry.as_str());
+                return false;
+            }
+            Key::Ctrl('v') => {
+                let clip = super::widgets::paste();
+                let mut any = false;
+                for c in clip.trim().chars().take(32) {
+                    let c = if c == ',' { '.' } else { c };
+                    if c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | '*' | '/' | '%') {
+                        any |= self.on_key(Key::Char(c));
+                    }
+                }
+                return any;
+            }
+            _ => {}
+        }
         let label = match key {
             Key::Char(c) => match c {
                 '0'..='9' => {

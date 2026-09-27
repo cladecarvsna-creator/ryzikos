@@ -1161,6 +1161,30 @@ impl Tab {
                 self.cursor = len;
                 return true;
             }
+            // there is no partial selection here: copy and cut take the
+            // whole text
+            Key::Ctrl('c') | Key::Ctrl('x') => {
+                if !text.is_empty() {
+                    super::widgets::copy(text);
+                }
+                if matches!(key, Key::Ctrl('x')) {
+                    text.clear();
+                    cursor = 0;
+                }
+            }
+            Key::Ctrl('v') => {
+                let clip = super::widgets::paste();
+                let clip: String = clip.chars().filter(|c| !c.is_control()).collect();
+                if select_all {
+                    text.clear();
+                    cursor = 0;
+                }
+                if text.len() + clip.len() <= 4096 {
+                    let b = byte(text, cursor);
+                    text.insert_str(b, &clip);
+                    cursor += clip.chars().count();
+                }
+            }
             Key::Enter => {
                 match self.focus {
                     Focus::Address => {

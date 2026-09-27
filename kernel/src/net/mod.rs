@@ -458,6 +458,25 @@ impl TcpStream {
         })
     }
 
+    /// Read what has arrived without waiting: `Ok(None)` if nothing has
+    /// yet, `Ok(Some(0))` if the other side closed the connection.
+    pub fn try_read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, String> {
+        let mut guard = STACK.lock();
+        let s = guard.as_mut().ok_or("no network card")?;
+        s.poll();
+        let socket = s.sockets.get_mut::<tcp::Socket>(self.handle);
+        if socket.can_recv() {
+            socket
+                .recv_slice(buf)
+                .map(Some)
+                .map_err(|e| alloc::format!("{:?}", e))
+        } else if !socket.may_recv() {
+            Ok(Some(0))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn write_all(&mut self, mut data: &[u8]) -> Result<(), String> {
         let handle = self.handle;
         while !data.is_empty() {

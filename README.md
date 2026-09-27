@@ -29,6 +29,25 @@ RyzikOS — любительская операционная система д�
   сверху, «Files», «Computer», «Trash», пути вида `/Users/root`, сочетания
   клавиш с Super.
 
+## Telegram, скриншоты и буфер обмена
+
+- **Telegram.** Клиент Telegram из EverOS. Войти можно по QR-коду (на
+  телефоне: Настройки → Устройства → Подключить устройство) или по номеру
+  телефона с кодом, есть двухэтапная проверка. Скрепка рядом с полем ввода
+  отправляет любой файл с диска, Ctrl+V отправляет картинку из буфера.
+  Официальная сборка содержит api_id и api_hash RyzikOS, если они заданы в
+  секретах репозитория `RYZIKOS_TG_API_ID` и `RYZIKOS_TG_API_HASH`. Без них
+  Telegram один раз спросит ваши собственные с my.telegram.org.
+- **Скриншоты.** PrintScreen или Super+Shift+S затемняют экран: выделите
+  мышью область (Enter — весь экран, Esc — отмена). Снимок сохраняется в
+  `Pictures/Screenshots` и попадает в буфер обмена: Ctrl+V вставляет его в
+  Draw или отправляет в Telegram.
+- **Вырезать, копировать, вставить.** Ctrl+X, Ctrl+C и Ctrl+V работают в
+  полях ввода, адресной строке и формах браузера, в терминале (Ctrl+V
+  вставляет, Ctrl+Shift+C копирует экран) и в калькуляторе. Правый клик в
+  терминале, браузере, Telegram, настройках, калькуляторе и App Store
+  открывает меню Cut, Copy, Paste, Select all.
+
 ## Live CD и установка
 
 ISO — это live CD: RyzikOS запускается прямо с диска или флешки, всё
@@ -185,8 +204,16 @@ Esc в первую секунду загрузки и выберите преж
 
 ```powershell
 & "C:\Program Files\qemu\qemu-img.exe" create -f vpc -o subformat=fixed everos-disk.vhd 128M
-& "C:\Program Files\qemu\qemu-system-x86_64.exe" -cdrom everos.iso -boot d -m 512M -nic user,model=e1000 -audiodev dsound,id=snd0 -device ES1370,audiodev=snd0 -drive file=everos-disk.vhd,format=vpc,if=ide,index=0,media=disk
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" -accel whpx,kernel-irqchip=off -accel tcg -cdrom everos.iso -boot d -m 512M -nic user,model=e1000 -audiodev dsound,id=snd0 -device ES1370,audiodev=snd0 -drive file=everos-disk.vhd,format=vpc,if=ide,index=0,media=disk
 ```
+
+`run-windows.bat` включает аппаратное ускорение WHPX. Без него QEMU
+эмулирует процессор программно, и вся система, особенно браузер, работает
+в несколько раз медленнее. Чтобы ускорение заработало, один раз включите
+компонент Windows «Платформа низкоуровневой оболочки Windows» (Windows
+Hypervisor Platform): Пуск → «Включение или отключение компонентов
+Windows», отметьте его и перезагрузите компьютер. Если WHPX недоступен,
+QEMU сам вернётся к обычному режиму.
 
 Файлы из RyzikOS можно посмотреть в Windows: закройте QEMU и дважды
 щёлкните `everos-disk.vhd`. Перед следующим запуском извлеките этот диск.

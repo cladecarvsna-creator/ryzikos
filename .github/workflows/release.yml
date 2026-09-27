@@ -42,7 +42,12 @@ jobs:
           key: cargo-${{ hashFiles('kernel/Cargo.lock') }}
 
       - name: Build
-        # the build number goes into the kernel and the disc's GRUB menu
+        # the build number goes into the kernel and the disc's GRUB menu;
+        # Telegram's api_id and api_hash, when the repository has them as
+        # secrets, let people log in without getting their own
+        env:
+          RYZIKOS_TG_API_ID: ${{ secrets.RYZIKOS_TG_API_ID }}
+          RYZIKOS_TG_API_HASH: ${{ secrets.RYZIKOS_TG_API_HASH }}
         run: make RYZIKOS_BUILD=${{ github.run_number }}
 
       - name: Publish release

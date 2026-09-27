@@ -14,6 +14,7 @@ use crate::sync::IrqMutex;
 static CLIPBOARD: IrqMutex<String> = IrqMutex::new(String::new());
 
 pub fn copy(text: &str) {
+    *CLIP_IMAGE.lock() = None;
     let mut clip = CLIPBOARD.lock();
     clip.clear();
     clip.push_str(text);
@@ -21,6 +22,33 @@ pub fn copy(text: &str) {
 
 pub fn paste() -> String {
     CLIPBOARD.lock().clone()
+}
+
+/// A picture on the clipboard: a screenshot, or a piece of a painting.
+#[derive(Clone)]
+pub struct ClipImage {
+    pub w: usize,
+    pub h: usize,
+    /// 0xRRGGBB, row by row.
+    pub pixels: Vec<u32>,
+    /// The file it was saved to, if it was.
+    pub path: Option<String>,
+}
+
+/// The clipboard holds text or a picture, not both.
+static CLIP_IMAGE: IrqMutex<Option<ClipImage>> = IrqMutex::new(None);
+
+pub fn copy_image(img: ClipImage) {
+    CLIPBOARD.lock().clear();
+    *CLIP_IMAGE.lock() = Some(img);
+}
+
+pub fn paste_image() -> Option<ClipImage> {
+    CLIP_IMAGE.lock().clone()
+}
+
+pub fn has_image() -> bool {
+    CLIP_IMAGE.lock().is_some()
 }
 
 // ---- one-line text box --------------------------------------------------------

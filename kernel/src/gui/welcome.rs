@@ -173,7 +173,7 @@ impl Welcome {
         c.draw_text(
             32,
             CLIENT_H - 26 - 26,
-            "Welcome opens again from the launcher.",
+            "Search the launcher for Welcome to see this again.",
             theme::text_dim(),
         );
         theme::accent_button(c, done_rect(), "Get started", self.pressed == Some(DONE));
