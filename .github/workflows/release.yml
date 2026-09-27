@@ -1,5 +1,6 @@
 # Build the RyzikOS ISO on every push to main and publish it as the latest
-# GitHub release. The website's download button always points at it.
+# GitHub release. The website's download button always points at it, and
+# Settings > Update in RyzikOS downloads kernel.gz and version.txt from it.
 name: Release ISO
 
 on:
@@ -41,7 +42,8 @@ jobs:
           key: cargo-${{ hashFiles('kernel/Cargo.lock') }}
 
       - name: Build
-        run: make
+        # the build number goes into the kernel and the disc's GRUB menu
+        run: make RYZIKOS_BUILD=${{ github.run_number }}
 
       - name: Publish release
         env:
@@ -50,7 +52,12 @@ jobs:
           version="1.0.${{ github.run_number }}"
           cp build/everos.iso "ryzikos-${version}.iso"
           sha256sum "ryzikos-${version}.iso" > "ryzikos-${version}.iso.sha256"
+          # for Settings > Update: the kernel (GRUB unpacks gzip) and
+          # "<build> <sha256 of kernel.gz>"
+          gzip -9 -n -c build/kernel.bin > kernel.gz
+          echo "${{ github.run_number }} $(sha256sum kernel.gz | cut -d' ' -f1)" > version.txt
           gh release create "v${version}" "ryzikos-${version}.iso" "ryzikos-${version}.iso.sha256" \
+            kernel.gz version.txt \
             --title "RyzikOS ${version}" \
             --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \
             --latest
