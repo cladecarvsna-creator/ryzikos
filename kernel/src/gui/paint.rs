@@ -13,7 +13,7 @@ use super::canvas::{mix, rgb, Canvas, Color, Rect};
 use super::filedialog::{self, FileDialog, Mode};
 use super::personalize::{self, Fit};
 use super::text::UI;
-use super::{picture, theme, wallpaper};
+use super::{picture, theme, wallpaper, widgets};
 use super::{MouseEvent, MouseKind};
 use crate::fs;
 use crate::keyboard::Key;
@@ -270,6 +270,31 @@ impl Paint {
         }
     }
 
+    /// Ctrl+V: a picture from the clipboard (a screenshot) goes in the
+    /// top left corner, shrunk to the page if it is bigger.
+    fn paste(&mut self) {
+        let Some(clip) = widgets::paste_image() else {
+            self.note = String::from("There is no picture on the clipboard");
+            return;
+        };
+        if clip.w > PICTURE_W || clip.h > PICTURE_H {
+            let img = picture::Image {
+                width: clip.w,
+                height: clip.h,
+                pixels: clip.pixels.iter().map(|p| p | 0xff00_0000).collect(),
+            };
+            let (w, h) = (PICTURE_W as i32, PICTURE_H as i32);
+            wallpaper::fit(&img, Fit::Fit, WHITE, self.picture, w, h);
+        } else {
+            for y in 0..clip.h {
+                let src = &clip.pixels[y * clip.w..(y + 1) * clip.w];
+                self.picture[y * PICTURE_W..y * PICTURE_W + clip.w].copy_from_slice(src);
+            }
+        }
+        self.modified = true;
+        self.note = format!("Pasted, {} x {}", clip.w, clip.h);
+    }
+
     fn new_picture(&mut self) {
         self.picture.fill(WHITE);
         self.path = None;
@@ -320,6 +345,16 @@ impl Paint {
             Key::Ctrl('s') => self.save(),
             Key::Ctrl('o') => self.file_command(FileButton::Open),
             Key::Ctrl('n') => self.new_picture(),
+            Key::Ctrl('c') => {
+                widgets::copy_image(widgets::ClipImage {
+                    w: PICTURE_W,
+                    h: PICTURE_H,
+                    pixels: self.picture.to_vec(),
+                    path: None,
+                });
+                self.note = String::from("Copied the picture");
+            }
+            Key::Ctrl('v') => self.paste(),
             _ => return false,
         }
         true

@@ -84,7 +84,7 @@ pub struct StartMenu {
 }
 
 /// Apps in alphabetical order, for search results.
-const SORTED: [App; 14] = [
+const SORTED: [App; 15] = [
     App::About,
     App::Installer,
     App::Store,
@@ -95,6 +95,7 @@ const SORTED: [App; 14] = [
     App::Photos,
     App::Settings,
     App::TaskManager,
+    App::Telegram,
     App::Terminal,
     App::Notepad,
     App::Video,
@@ -210,7 +211,7 @@ impl StartMenu {
         // two rows of six; Welcome and the installer are found by search
         let grid = APPS
             .into_iter()
-            .filter(|a| a.listed() && !matches!(a, App::Welcome | App::Installer));
+            .filter(|a| a.listed() && !matches!(a, App::Welcome | App::Installer | App::About));
         for (i, app) in grid.take(2 * PER_ROW).enumerate() {
             let (col, row) = ((i % PER_ROW) as i32, (i / PER_ROW) as i32);
             push(

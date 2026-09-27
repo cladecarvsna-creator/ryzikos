@@ -26,6 +26,7 @@ mod serial;
 mod shell;
 mod sound;
 mod sync;
+mod tg;
 mod update;
 mod users;
 mod vga;

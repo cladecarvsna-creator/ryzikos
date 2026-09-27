@@ -57,6 +57,22 @@ impl Shell {
                 }
             }
             Key::Escape => self.erase_line(),
+            // Ctrl+V pastes; Ctrl+Shift+C copies the screen (Ctrl+C
+            // stops the line, as in other terminals)
+            Key::Ctrl('v') => {
+                let clip = crate::gui::clipboard_text();
+                for c in clip.chars().filter(|c| !c.is_control()) {
+                    if self.len == MAX_LINE {
+                        break;
+                    }
+                    self.line[self.len] = c;
+                    self.len += 1;
+                    print!("{}", c);
+                }
+            }
+            Key::Ctrl('c') if crate::keyboard::shift_held() => {
+                crate::gui::copy_text(&CONSOLE.lock().text());
+            }
             Key::Ctrl('c') => {
                 println!("^C");
                 self.len = 0;
@@ -113,6 +129,7 @@ impl Shell {
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
                 println!("  devices list the PC's hardware and which parts have drivers");
+                println!("  telegram open Telegram (telegram selftest checks its crypto)");
                 println!("  install install RyzikOS on a hard disk (from the live CD)");
                 println!("  update  show the version and a downloaded update (update undo removes it)");
                 println!("  beep    play the volume sound on the ES1370 sound card");
@@ -209,6 +226,22 @@ impl Shell {
                     gui::request_file(&self.path(args));
                 } else {
                     error("File not found");
+                }
+            }
+            "telegram" | "tg" => {
+                if args.trim() == "selftest" {
+                    match crate::tg::self_test() {
+                        Ok(()) => {
+                            println!("Telegram self-test passed.");
+                            crate::serial::write_str("\ntelegram: self-test ok\n");
+                        }
+                        Err(what) => {
+                            println!("Telegram self-test failed: {}", what);
+                            crate::serial::write_str("\ntelegram: self-test FAILED\n");
+                        }
+                    }
+                } else {
+                    open(App::Telegram);
                 }
             }
             "install" => {

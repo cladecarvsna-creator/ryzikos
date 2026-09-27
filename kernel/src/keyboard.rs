@@ -68,6 +68,8 @@ pub enum Key {
     Function(u8),
     /// Alt+Shift switched the layout.
     LayoutChanged,
+    /// Print Screen (also Alt+Print Screen, which sends SysRq).
+    PrintScreen,
 }
 
 /// Key rows of the main block as [layout][shift] strings.
@@ -243,6 +245,7 @@ impl Keyboard {
                 0x4f => Some(Key::End),
                 0x53 => Some(Key::Delete),
                 0x1c => Some(Key::Enter), // keypad enter
+                0x37 => Some(Key::PrintScreen),
                 _ => None,
             };
         }
@@ -253,6 +256,7 @@ impl Keyboard {
             0x0f if self.ctrl => return Some(Key::Ctrl('\t')),
             0x0f => return Some(Key::Char('\t')),
             0x1c => return Some(Key::Enter),
+            0x54 => return Some(Key::PrintScreen),
             0x3b..=0x44 => return Some(Key::Function(code - 0x3a)),
             0x57 | 0x58 => return Some(Key::Function(code - 0x57 + 11)),
             0x3a => {

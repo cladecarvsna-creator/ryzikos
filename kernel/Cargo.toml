@@ -26,6 +26,13 @@ zune-png = { version = "0.5.2", default-features = false }
 zune-jpeg = { version = "0.5.15", default-features = false }
 zune-core = { version = "0.5.3", default-features = false }
 libm = "0.2"
+aes = "0.8"
+sha1 = { version = "0.10", default-features = false, features = ["force-soft"] }
+num-bigint = { version = "0.4", default-features = false }
+num-traits = { version = "0.2", default-features = false }
+num-integer = { version = "0.1", default-features = false }
+zune-inflate = { version = "0.2", default-features = false, features = ["gzip"] }
+qrcodegen-no-heap = "1.8"
 
 [build-dependencies]
 cc = "1"

@@ -17,6 +17,7 @@
 //! icons with a selection rectangle and the Recycle Bin (deskicons.rs).
 
 mod about;
+mod telegram;
 mod installer;
 mod welcome;
 mod anim;
@@ -27,6 +28,7 @@ mod deskicons;
 mod desktops;
 mod explorer;
 mod filedialog;
+mod snip;
 #[rustfmt::skip]
 mod font_data;
 mod icons;
@@ -86,7 +88,7 @@ static BACK_BUFFER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 static WALLPAPER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// Window contents. Each app draws into its own part only when its content
 /// changes, so moving a window just copies pixels.
-static SURFACES: StaticBuffer<{ 9 * 1024 * 1024 }> = StaticBuffer::new();
+static SURFACES: StaticBuffer<{ 10 * 1024 * 1024 }> = StaticBuffer::new();
 /// The blurred wallpaper behind the sign-in panel.
 static BACKDROP: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// The screen being faded away when signing in or locking.
@@ -138,9 +140,10 @@ pub enum App {
     /// "Install RyzikOS", on the live CD.
     Installer,
     Welcome,
+    Telegram,
 }
 
-const APPS: [App; 15] = [
+const APPS: [App; 16] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -156,6 +159,7 @@ const APPS: [App; 15] = [
     App::Program,
     App::Installer,
     App::Welcome,
+    App::Telegram,
 ];
 
 impl App {
@@ -180,6 +184,7 @@ impl App {
             App::Program => "Program",
             App::Installer => "Install RyzikOS",
             App::Welcome => "Welcome",
+            App::Telegram => "Telegram",
         }
     }
 
@@ -200,6 +205,7 @@ impl App {
             App::Program => (browser::PROGRAM_W, browser::PROGRAM_H),
             App::Installer => (installer::CLIENT_W, installer::CLIENT_H),
             App::Welcome => (welcome::CLIENT_W, welcome::CLIENT_H),
+            App::Telegram => (telegram::CLIENT_W, telegram::CLIENT_H),
         }
     }
 
@@ -221,6 +227,7 @@ impl App {
             App::Program => "program",
             App::Installer => "installer",
             App::Welcome => "welcome",
+            App::Telegram => "telegram",
         }
     }
 
@@ -246,6 +253,7 @@ impl App {
             App::Program => "",
             App::Installer => "install setup disk live установить установка диск",
             App::Welcome => "welcome start tips get started добро пожаловать приветствие",
+            App::Telegram => "messenger chat телеграм телеграмм мессенджер чат",
         }
     }
 
@@ -266,6 +274,7 @@ impl App {
             App::Program => (440, 110),
             App::Installer => (560, 120),
             App::Welcome => (580, 130),
+            App::Telegram => (380, 90),
         }
     }
 
@@ -281,6 +290,30 @@ impl App {
 }
 
 /// Ask the desktop to open an app. Returns false in text mode.
+/// Apps whose right-click menu is Cut, Copy, Paste: they have text boxes
+/// and no menu of their own.
+fn has_edit_menu(app: App) -> bool {
+    matches!(
+        app,
+        App::Terminal
+            | App::Browser
+            | App::Program
+            | App::Telegram
+            | App::Settings
+            | App::Calculator
+            | App::Store
+    )
+}
+
+/// Text on the clipboard, for the shell.
+pub fn clipboard_text() -> String {
+    widgets::paste()
+}
+
+pub fn copy_text(text: &str) {
+    widgets::copy(text);
+}
+
 pub fn request_open(app: App) -> bool {
     REQUESTS.push(app.index() as u8);
     ACTIVE.load(Ordering::Relaxed)
@@ -562,6 +595,7 @@ pub struct Desktop<'a> {
     settings: settings::Settings,
     about: about::About,
     installer: Box<installer::Installer>,
+    telegram: Box<telegram::Telegram>,
     welcome: welcome::Welcome,
     /// The window the mouse was last over, for hover highlights.
     hover_app: Option<App>,
@@ -576,6 +610,10 @@ pub struct Desktop<'a> {
     /// Windows "Show desktop" minimised, to bring back.
     peeked: Vec<App>,
     popup: Option<Popup>,
+    /// Picking an area for a screenshot.
+    snip: Option<Box<snip::Snip>>,
+    /// "Screenshot copied" for a few seconds.
+    toast: Option<snip::Toast>,
     search: Box<Search>,
     /// Asking before emptying the Recycle Bin.
     confirm_empty: bool,
@@ -692,6 +730,7 @@ impl<'a> Desktop<'a> {
             settings: settings::Settings::new(),
             about: about::About::new(),
             installer: Box::new(installer::Installer::new()),
+            telegram: Box::new(telegram::Telegram::new()),
             welcome: welcome::Welcome::new(),
             hover_app: None,
             pins: taskbar::DEFAULT_PINS.to_vec(),
@@ -701,6 +740,8 @@ impl<'a> Desktop<'a> {
             tip: None,
             peeked: Vec::new(),
             popup: None,
+            snip: None,
+            toast: None,
             search: Box::new(Search::new()),
             confirm_empty: false,
             desk_count: 1,
@@ -869,6 +910,11 @@ impl<'a> Desktop<'a> {
             self.damage(self.screen());
         }
         self.tick_tip();
+        if self.toast.as_ref().is_some_and(|t| t.expired()) {
+            if let Some(t) = self.toast.take() {
+                self.damage(t.rect(self.width, self.height - TASKBAR_H).inset(-16));
+            }
+        }
     }
 
     // ---- personalization -------------------------------------------------
@@ -1205,6 +1251,9 @@ impl<'a> Desktop<'a> {
         if app == App::Browser {
             self.browser.start();
         }
+        if app == App::Telegram {
+            self.telegram.start();
+        }
         if app == App::Explorer {
             self.explorer.start();
             self.stale[app.index()] = true;
@@ -1231,6 +1280,9 @@ impl<'a> Desktop<'a> {
         }
         if app == App::Program {
             self.program.close_program();
+        }
+        if app == App::Telegram {
+            self.telegram.stop();
         }
         self.damage_window(app);
         // it stays in the stacking order until it has faded out
@@ -1333,6 +1385,15 @@ impl<'a> Desktop<'a> {
             Cmd::SignOut => self.lock(true),
             Cmd::Restart => self.power(power::Power::Restart),
             Cmd::ShutDown => self.power(power::Power::ShutDown),
+            Cmd::Edit(App::Terminal, 'c') => {
+                widgets::copy(&CONSOLE.lock().text());
+            }
+            Cmd::Edit(app, letter) => {
+                if self.windows[app.index()].open {
+                    self.focus(app);
+                    self.on_key(Key::Ctrl(letter));
+                }
+            }
         }
     }
 
@@ -1417,6 +1478,23 @@ impl<'a> Desktop<'a> {
             Phase::Locking(_) | Phase::Boot(_) | Phase::Power(..) => return,
             // typing can start while the desktop fades in
             Phase::Unlocking(_) | Phase::Desktop => {}
+        }
+        if self.snip.is_some() {
+            match key {
+                Key::Escape => self.cancel_snip(),
+                Key::Enter => {
+                    let whole = self.snip.as_ref().map(|s| s.whole());
+                    if let Some(r) = whole {
+                        self.finish_snip(r);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if let Key::PrintScreen = key {
+            self.start_snip();
+            return;
         }
         if let Key::LayoutChanged = key {
             self.damage_taskbar();
@@ -1522,6 +1600,7 @@ impl<'a> Desktop<'a> {
             App::Store => self.store.on_key(key),
             App::Program => self.program.on_key(key),
             App::Installer => self.installer.on_key(key),
+            App::Telegram => self.telegram.on_key(key),
             App::Welcome => self.welcome.on_key(key),
             App::About | App::TaskManager => false,
         };
@@ -1551,6 +1630,9 @@ impl<'a> Desktop<'a> {
             Key::Function(4) if ctrl => {
                 let d = self.current_desk;
                 self.close_desktop(d);
+            }
+            Key::Char(c) if keyboard::shift_held() && matches!(c, 's' | 'S' | 'ы' | 'Ы') => {
+                self.start_snip()
             }
             Key::Char(c) => match c.to_ascii_lowercase() {
                 'd' | 'в' | 'm' | 'ь' => self.toggle_show_desktop(),
@@ -1614,6 +1696,7 @@ impl<'a> Desktop<'a> {
                 Some(App::Video) => self.video.on_wheel(clicks),
                 Some(App::Store) => self.store.on_wheel(clicks),
                 Some(App::Program) => self.program.on_wheel(clicks),
+                Some(App::Telegram) => self.telegram.on_wheel(clicks),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -1648,6 +1731,10 @@ impl<'a> Desktop<'a> {
                 return;
             }
             Phase::Unlocking(_) | Phase::Locking(_) | Phase::Boot(_) | Phase::Power(..) => return,
+        }
+        if self.snip.is_some() {
+            self.snip_mouse(was_left, was_right, moved);
+            return;
         }
 
         if self.left && !was_left {
@@ -1715,6 +1802,7 @@ impl<'a> Desktop<'a> {
             App::Video => self.video.on_hover(x, y),
             App::Store => self.store.on_hover(x, y),
             App::Program => self.program.on_hover(x, y),
+            App::Telegram => self.telegram.on_hover(x, y),
             _ => false,
         }
     }
@@ -1922,6 +2010,8 @@ impl<'a> Desktop<'a> {
                 self.minimize(app);
             } else if !right && w.title_bar().contains(x, y) {
                 self.drag = Some((app, x - w.rect.x, y - w.rect.y));
+            } else if right && w.client().contains(x, y) && has_edit_menu(app) {
+                self.edit_menu(app, x, y);
             } else if w.client().contains(x, y) {
                 self.capture = Some(app);
                 self.send_mouse(app, MouseKind::Down { right });
@@ -1931,6 +2021,25 @@ impl<'a> Desktop<'a> {
         // the desktop itself: icons and the selection rectangle
         self.focused_away();
         self.icons_press(x, y, right);
+    }
+
+    /// Right-click in an app with text boxes but no menu of its own.
+    fn edit_menu(&mut self, app: App, x: i32, y: i32) {
+        let clip = !widgets::paste().is_empty() || widgets::has_image();
+        let menu = if app == App::Terminal {
+            popup::Builder::default()
+                .keyed("Copy all", "Ctrl+Shift+C", Cmd::Edit(app, 'c'))
+                .keyed_maybe("Paste", "Ctrl+V", Cmd::Edit(app, 'v'), clip)
+        } else {
+            popup::Builder::default()
+                .keyed("Cut", "Ctrl+X", Cmd::Edit(app, 'x'))
+                .keyed("Copy", "Ctrl+C", Cmd::Edit(app, 'c'))
+                .keyed_maybe("Paste", "Ctrl+V", Cmd::Edit(app, 'v'), clip)
+                .sep()
+                .keyed("Select all", "Ctrl+A", Cmd::Edit(app, 'a'))
+        };
+        let menu = menu.at(x, y, false, self.screen());
+        self.show_popup(menu);
     }
 
     /// Right-click on a title bar.
@@ -2009,6 +2118,7 @@ impl<'a> Desktop<'a> {
             App::Store => self.store.on_mouse(ev),
             App::Program => self.program.on_mouse(ev),
             App::Installer => self.installer.on_mouse(ev),
+            App::Telegram => self.telegram.on_mouse(ev),
             App::Welcome => self.welcome.on_mouse(ev),
             App::Terminal => false,
         };
@@ -2256,6 +2366,10 @@ impl<'a> Desktop<'a> {
                     App::Store => self.store.draw(&mut c),
                     App::Program => self.program.draw(&mut c),
                     App::Installer => self.installer.draw(&mut c),
+                    App::Telegram => {
+                        let focused = self.focused == Some(App::Telegram);
+                        self.telegram.draw(&mut c, focused, self.cursor_on)
+                    }
                     App::Welcome => self.welcome.draw(&mut c),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
@@ -2282,6 +2396,10 @@ impl<'a> Desktop<'a> {
         }
         if matches!(self.phase, Phase::Login | Phase::Locking(_)) {
             self.login.draw(c, self.wallpaper);
+            return;
+        }
+        if let Some(s) = &self.snip {
+            s.draw(c);
             return;
         }
         if self.tv.open {
@@ -2333,6 +2451,78 @@ impl<'a> Desktop<'a> {
         }
         self.draw_icon_drag(c);
         self.draw_tip(c);
+        if let Some(t) = &self.toast {
+            t.draw(c, t.rect(self.width, self.height - TASKBAR_H));
+        }
+    }
+
+    // ---- screenshots -----------------------------------------------------
+
+    /// Freeze the screen and let the user pick an area.
+    fn start_snip(&mut self) {
+        if !matches!(self.phase, Phase::Desktop) || self.snip.is_some() {
+            return;
+        }
+        self.close_popup();
+        self.update_surfaces();
+        let (w, h) = (self.width, self.height);
+        let mut shot = alloc::vec![0u32; (w * h) as usize];
+        let mut scratch = core::mem::take(&mut self.scratch);
+        {
+            let mut c = Canvas::new(&mut shot, w as usize, h as usize);
+            self.draw_scene(&mut c, scratch);
+        }
+        core::mem::swap(&mut self.scratch, &mut scratch);
+        self.snip = Some(Box::new(snip::Snip::new(shot, w, h)));
+        self.damage(self.screen());
+        serial::write_str("\nscreenshot: pick an area\n");
+    }
+
+    fn cancel_snip(&mut self) {
+        self.snip = None;
+        self.damage(self.screen());
+    }
+
+    fn finish_snip(&mut self, r: Rect) {
+        let Some(s) = self.snip.take() else {
+            return;
+        };
+        let img = s.crop(r);
+        drop(s);
+        self.damage(self.screen());
+        if img.w < 2 || img.h < 2 {
+            return;
+        }
+        let note = snip::finish(img);
+        if let Some(old) = self.toast.take() {
+            self.damage(old.rect(self.width, self.height - TASKBAR_H));
+        }
+        let t = snip::Toast::new(note);
+        self.damage(t.rect(self.width, self.height - TASKBAR_H).inset(-16));
+        self.toast = Some(t);
+    }
+
+    fn snip_mouse(&mut self, was_left: bool, was_right: bool, moved: bool) {
+        let (x, y) = (self.mouse_x, self.mouse_y);
+        if self.right && !was_right {
+            self.cancel_snip();
+            return;
+        }
+        let Some(s) = self.snip.as_mut() else {
+            return;
+        };
+        if self.left && !was_left {
+            s.press(x, y);
+            self.damage(self.screen());
+        } else if self.left && moved {
+            let r = s.drag(x, y);
+            self.damage(r);
+        } else if was_left && !self.left {
+            s.drag(x, y);
+            if let Some(r) = s.selection() {
+                self.finish_snip(r);
+            }
+        }
     }
 
     /// Copy part of the back buffer to the screen.
@@ -2875,6 +3065,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if desk.installer.busy() && desk.installer.tick() {
             desk.app_changed(App::Installer);
         }
+        if desk.telegram.tick() {
+            desk.damage_client(App::Telegram);
+        }
         if desk.windows[App::TaskManager.index()].open && desk.taskmgr.tick() {
             desk.damage_client(App::TaskManager);
         }
@@ -2908,7 +3101,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             } else if let Some((i, _)) = &desk.desk_icons.renaming {
                 let r = desk.icon_rect(*i).inset(-8);
                 desk.damage(r);
-            } else if let Some(app @ (App::Terminal | App::Notepad | App::Explorer)) = desk.focused
+            } else if let Some(app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram)) =
+                desk.focused
             {
                 // the text caret blinks
                 desk.stale[app.index()] = true;
@@ -2948,7 +3142,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             || (desk.windows[App::Video.index()].open && desk.video.busy())
             || desk.store.busy()
             || desk.settings.busy()
-            || desk.installer.busy();
+            || desk.installer.busy()
+            || desk.telegram.busy();
         interrupts::wait_for_interrupt(|| {
             busy || !KEYBOARD_BYTES.is_empty() || !MOUSE_BYTES.is_empty() || !REQUESTS.is_empty()
         });
