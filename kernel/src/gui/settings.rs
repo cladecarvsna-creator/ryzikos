@@ -24,6 +24,14 @@ use crate::update::{self, State, Updater};
 pub const CLIENT_W: i32 = 940;
 pub const CLIENT_H: i32 = 620;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Settings)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Settings)
+}
+
 const NAV_W: i32 = 260;
 const NAV_TOP: i32 = 112;
 const NAV_ROW: i32 = 40;
@@ -107,30 +115,32 @@ enum Target {
 }
 
 // the Personalization page
-const PAGE_W: i32 = CLIENT_W - PAGE_X - 28;
+fn page_w() -> i32 {
+    cw() - PAGE_X - 28
+}
 const PREVIEW: Rect = Rect::new(PAGE_X + 16, 84, 248, 140);
 const THUMB_W: i32 = 120;
 const THUMB_H: i32 = 68;
 const SWATCH: i32 = 26;
 
 fn mode_card() -> Rect {
-    Rect::new(PAGE_X, 72, PAGE_W, 164)
+    Rect::new(PAGE_X, 72, page_w(), 164)
 }
 
 fn accent_card() -> Rect {
-    Rect::new(PAGE_X, 244, PAGE_W, 64)
+    Rect::new(PAGE_X, 244, page_w(), 64)
 }
 
 fn background_card() -> Rect {
-    Rect::new(PAGE_X, 316, PAGE_W, 176)
+    Rect::new(PAGE_X, 316, page_w(), 176)
 }
 
 fn fit_card() -> Rect {
-    Rect::new(PAGE_X, 500, PAGE_W, 52)
+    Rect::new(PAGE_X, 500, page_w(), 52)
 }
 
 fn color_card() -> Rect {
-    Rect::new(PAGE_X, 560, PAGE_W, 52)
+    Rect::new(PAGE_X, 560, page_w(), 52)
 }
 
 fn mode_tile(dark: bool) -> Rect {
@@ -203,7 +213,7 @@ fn targets(prefs: &Prefs) -> Vec<(Target, Rect)> {
 }
 
 fn dialog_area() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 fn nav_rect(i: usize) -> Rect {
@@ -215,7 +225,7 @@ fn row_rect(i: usize) -> Rect {
     Rect::new(
         PAGE_X,
         72 + i as i32 * (ROW_H + 4),
-        CLIENT_W - PAGE_X - 28,
+        cw() - PAGE_X - 28,
         ROW_H,
     )
 }
@@ -405,7 +415,7 @@ impl Settings {
     }
 
     pub fn draw(&self, c: &mut Canvas, info: &Info) {
-        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, theme::face());
+        c.fill_rect(0, 0, cw(), ch(), theme::face());
         self.draw_nav(c, info);
         let title = PAGES.iter().find(|p| p.0 == self.page).map_or("", |p| p.1);
         c.draw_text_in(&TITLE, PAGE_X, 26, title, theme::text());

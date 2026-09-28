@@ -14,6 +14,14 @@ use crate::interrupts;
 pub const CLIENT_W: i32 = 860;
 pub const CLIENT_H: i32 = 600;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::TaskManager)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::TaskManager)
+}
+
 const SIDE_W: i32 = 190;
 const ROW_H: i32 = 34;
 const HEADER_Y: i32 = 70;
@@ -67,15 +75,15 @@ fn nav_rect(i: i32) -> Rect {
 
 fn button_rect(b: Button) -> Rect {
     let w = 130;
-    let right = CLIENT_W - 20;
+    let right = cw() - 20;
     match b {
-        Button::EndTask => Rect::new(right - w, CLIENT_H - 52, w, 34),
-        Button::SwitchTo => Rect::new(right - 2 * w - 10, CLIENT_H - 52, w, 34),
+        Button::EndTask => Rect::new(right - w, ch() - 52, w, 34),
+        Button::SwitchTo => Rect::new(right - 2 * w - 10, ch() - 52, w, 34),
     }
 }
 
 fn row_rect(i: usize) -> Rect {
-    Rect::new(SIDE_W + 12, LIST_Y + i as i32 * ROW_H, CLIENT_W - SIDE_W - 32, ROW_H)
+    Rect::new(SIDE_W + 12, LIST_Y + i as i32 * ROW_H, cw() - SIDE_W - 32, ROW_H)
 }
 
 pub fn size_text(bytes: u64) -> String {
@@ -213,9 +221,9 @@ impl TaskManager {
     // ---- drawing -----------------------------------------------------------
 
     pub fn draw(&self, c: &mut Canvas) {
-        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, theme::light());
-        c.fill_rect(0, 0, SIDE_W, CLIENT_H, theme::face());
-        c.fill_rect(SIDE_W, 0, 1, CLIENT_H, theme::stroke());
+        c.fill_rect(0, 0, cw(), ch(), theme::light());
+        c.fill_rect(0, 0, SIDE_W, ch(), theme::face());
+        c.fill_rect(SIDE_W, 0, 1, ch(), theme::stroke());
         c.draw_text_in(&UI_BOLD, 22, 22, "Task Manager", theme::text());
         for (i, (page, label)) in [(Page::Apps, "Apps"), (Page::Performance, "Performance")]
             .into_iter()
@@ -264,7 +272,7 @@ impl TaskManager {
         c.draw_text_in(&UI_BOLD, x, top, "System", theme::text());
         for (i, s) in services().iter().enumerate() {
             let y = top + 30 + i as i32 * 26;
-            if y > CLIENT_H - 80 {
+            if y > ch() - 80 {
                 break;
             }
             c.draw_text(x + 16, y, s.name, theme::text());
@@ -287,7 +295,7 @@ impl TaskManager {
     fn draw_performance(&self, c: &mut Canvas) {
         let x = SIDE_W + 24;
         c.draw_text_in(&HEADING, x, 20, "Performance", theme::text());
-        let w = CLIENT_W - x - 24;
+        let w = cw() - x - 24;
         let cpu_now = self.cpu.last().copied().unwrap_or(0);
         let mem_now = heap_percent();
         let blue = rgb(0x1a, 0x73, 0xe8);
@@ -315,7 +323,7 @@ impl TaskManager {
         }
         c.draw_text(
             x,
-            CLIENT_H - 40,
+            ch() - 40,
             "Processor: time not spent waiting. Memory: the kernel's heap.",
             theme::text_dim(),
         );

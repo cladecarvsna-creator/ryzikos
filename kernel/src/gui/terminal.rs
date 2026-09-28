@@ -17,6 +17,22 @@ const CELL_H: i32 = 18;
 const PAD: i32 = 8;
 pub const CLIENT_W: i32 = COLS as i32 * CELL_W + 2 * PAD;
 pub const CLIENT_H: i32 = ROWS as i32 * CELL_H + 2 * PAD;
+
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Terminal)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Terminal)
+}
+/// How many columns and rows fit in the window now.
+pub fn grid() -> (usize, usize) {
+    (
+        ((cw() - 2 * PAD) / CELL_W).max(1) as usize,
+        ((ch() - 2 * PAD) / CELL_H).max(1) as usize,
+    )
+}
+
 /// Background, a little darker than the console's black.
 const BACKGROUND: u32 = 0x0c0c10;
 
@@ -39,15 +55,22 @@ impl Terminal {
         self.shell.on_key(key, boot);
     }
 
+    /// Fit the text area to the window's size now.
+    pub fn resized(&mut self) {
+        let (cols, rows) = grid();
+        CONSOLE.lock().resize(cols, rows);
+    }
+
     pub fn draw(&self, c: &mut Canvas, show_cursor: bool) {
-        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, BACKGROUND);
+        c.fill_rect(0, 0, cw(), ch(), BACKGROUND);
         let con = CONSOLE.lock();
-        for row in 0..ROWS {
+        let (cols, rows) = con.size();
+        for row in 0..rows {
             let y = PAD + row as i32 * CELL_H;
-            if !c.visible(Rect::new(0, y, CLIENT_W, CELL_H)) {
+            if !c.visible(Rect::new(0, y, cw(), CELL_H)) {
                 continue;
             }
-            for col in 0..COLS {
+            for col in 0..cols {
                 let (ch, fg, bg) = con.cell(row, col);
                 let x = PAD + col as i32 * CELL_W;
                 if bg != Color::Black {
@@ -61,7 +84,7 @@ impl Terminal {
         }
         if show_cursor {
             let (row, col) = con.cursor();
-            if col < COLS {
+            if col < cols {
                 let x = PAD + col as i32 * CELL_W;
                 let y = PAD + row as i32 * CELL_H;
                 c.fill_rect(x, y + CELL_H - 3, CELL_W, 2, con.color().rgb().raw());

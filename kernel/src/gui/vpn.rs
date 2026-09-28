@@ -22,6 +22,14 @@ use crate::vpn::{self, Group, Saved, Server};
 pub const CLIENT_W: i32 = 880;
 pub const CLIENT_H: i32 = 640;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Vpn)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Vpn)
+}
+
 const HEAD_H: i32 = 150;
 const INPUT_Y: i32 = HEAD_H + 16;
 const TOOLS_Y: i32 = HEAD_H + 64;
@@ -86,7 +94,7 @@ pub struct Vpn {
 }
 
 fn client() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 fn power_rect() -> Rect {
@@ -94,7 +102,7 @@ fn power_rect() -> Rect {
 }
 
 fn add_rect() -> Rect {
-    Rect::new(CLIENT_W - 20 - 90, INPUT_Y, 90, 36)
+    Rect::new(cw() - 20 - 90, INPUT_Y, 90, 36)
 }
 
 fn paste_rect() -> Rect {
@@ -114,12 +122,12 @@ fn test_all_rect() -> Rect {
 }
 
 fn list_rect() -> Rect {
-    Rect::new(0, LIST_Y, CLIENT_W, CLIENT_H - LIST_Y - STATUS_H)
+    Rect::new(0, LIST_Y, cw(), ch() - LIST_Y - STATUS_H)
 }
 
 fn track() -> Rect {
     let l = list_rect();
-    Rect::new(CLIENT_W - 16, l.y + 6, 10, l.h - 12)
+    Rect::new(cw() - 16, l.y + 6, 10, l.h - 12)
 }
 
 /// Cut `text` to fit `w` pixels, with an ellipsis.
@@ -150,6 +158,11 @@ fn clock_text(secs: u64) -> String {
 }
 
 impl Vpn {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+        self.scroll = self.scroll.clamp(0, self.max_scroll());
+    }
+
     pub fn new() -> Self {
         Self {
             saved: Saved {
@@ -529,7 +542,7 @@ impl Vpn {
         let mut out = Vec::new();
         for line in self.lines() {
             let h = Self::line_height(line);
-            out.push((line, Rect::new(16, y, CLIENT_W - 40, h)));
+            out.push((line, Rect::new(16, y, cw() - 40, h)));
             y += h;
         }
         out
@@ -749,17 +762,17 @@ impl Vpn {
         theme::button(c, test_all_rect(), if self.testing() { "Testing..." } else { "Test delays" }, hot(Hit::TestAll));
         let n = self.servers().count();
         let count = format!("{} server{}", n, if n == 1 { "" } else { "s" });
-        c.draw_text(CLIENT_W - 24 - UI.width(&count), TOOLS_Y + 6, &count, theme::text_dim());
+        c.draw_text(cw() - 24 - UI.width(&count), TOOLS_Y + 6, &count, theme::text_dim());
         self.draw_list(c);
         // the status line
-        let st = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);
+        let st = Rect::new(0, ch() - STATUS_H, cw(), STATUS_H);
         c.fill(st, theme::face());
-        c.fill_rect(0, st.y, CLIENT_W, 1, theme::stroke());
-        c.draw_text(14, st.y + 6, &fit(&self.status, CLIENT_W - 28), theme::text());
+        c.fill_rect(0, st.y, cw(), 1, theme::stroke());
+        c.draw_text(14, st.y + 6, &fit(&self.status, cw() - 28), theme::text());
     }
 
     fn draw_head(&self, c: &mut Canvas) {
-        let head = Rect::new(0, 0, CLIENT_W, HEAD_H);
+        let head = Rect::new(0, 0, cw(), HEAD_H);
         let route = vpn::route();
         let connecting = self.connecting().is_some();
         let (top, bottom) = if connecting {
@@ -801,7 +814,7 @@ impl Vpn {
             ),
         };
         c.draw_text_in(&HEADING, tx, 30, &title, 0xffffff);
-        c.draw_text_in(&UI_BOLD, tx, 72, &fit(&sub, CLIENT_W - tx - 24), rgb(0xf0, 0xf4, 0xff));
+        c.draw_text_in(&UI_BOLD, tx, 72, &fit(&sub, cw() - tx - 24), rgb(0xf0, 0xf4, 0xff));
         let line = if route.is_some() && !connecting {
             let (up, down) = vpn::traffic();
             format!(
@@ -813,12 +826,12 @@ impl Vpn {
         } else {
             String::from("Press the button to send all programs through the VPN server")
         };
-        c.draw_text(tx, 102, &fit(&line, CLIENT_W - tx - 24), rgb(0xe0, 0xe8, 0xf4));
+        c.draw_text(tx, 102, &fit(&line, cw() - tx - 24), rgb(0xe0, 0xe8, 0xf4));
     }
 
     fn draw_list(&self, c: &mut Canvas) {
         let list = list_rect();
-        c.fill_rect(0, list.y - 1, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, list.y - 1, cw(), 1, theme::stroke());
         let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
         s.clip_to(list);
         if self.saved.groups.is_empty() {
@@ -830,7 +843,7 @@ impl Vpn {
             for (i, l) in lines.iter().enumerate() {
                 let f = if i == 0 { &UI_BOLD } else { &UI };
                 let w = f.width(l);
-                s.draw_text_in(f, (CLIENT_W - w) / 2, list.y + 60 + i as i32 * 28, l, theme::text_dim());
+                s.draw_text_in(f, (cw() - w) / 2, list.y + 60 + i as i32 * 28, l, theme::text_dim());
             }
         }
         let route_link = vpn::route().map(|r| r.link);

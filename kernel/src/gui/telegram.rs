@@ -34,6 +34,14 @@ use crate::{fs, users};
 pub const CLIENT_W: i32 = 1100;
 pub const CLIENT_H: i32 = 720;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Telegram)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Telegram)
+}
+
 const LIST_W: i32 = 340;
 const TOP_H: i32 = 56;
 const ROW_H: i32 = 68;
@@ -369,8 +377,8 @@ impl Context {
     fn rect(&self) -> Rect {
         let r = widgets::menu_rect(self.x, self.y, &self.list());
         // keep it in the window
-        let x = r.x.min(CLIENT_W - r.w - 4);
-        let y = if r.bottom() > CLIENT_H - 4 {
+        let x = r.x.min(cw() - r.w - 4);
+        let y = if r.bottom() > ch() - 4 {
             self.y - r.h
         } else {
             r.y
@@ -485,6 +493,10 @@ pub struct Telegram {
 }
 
 impl Telegram {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+    }
+
     pub fn new() -> Self {
         Self {
             shared: Rc::new(RefCell::new(Shared::new())),
@@ -611,7 +623,7 @@ impl Telegram {
     // ---- places -----------------------------------------------------------------------
 
     fn card() -> Rect {
-        Rect::new((CLIENT_W - 420) / 2, 70, 420, 520)
+        Rect::new((cw() - 420) / 2, 70, 420, 520)
     }
 
     fn field_rect(i: i32) -> Rect {
@@ -637,7 +649,7 @@ impl Telegram {
     }
 
     fn attach_rect() -> Rect {
-        Rect::new(LIST_W + 10, CLIENT_H - INPUT_H + 8, 40, 40)
+        Rect::new(LIST_W + 10, ch() - INPUT_H + 8, 40, 40)
     }
 
     fn search_rect() -> Rect {
@@ -664,48 +676,48 @@ impl Telegram {
         Rect::new(
             LIST_W + 1,
             TOP_H,
-            CLIENT_W - LIST_W - 1,
-            CLIENT_H - TOP_H - INPUT_H,
+            cw() - LIST_W - 1,
+            ch() - TOP_H - INPUT_H,
         )
     }
 
     fn input_rect() -> Rect {
         Rect::new(
             LIST_W + 56,
-            CLIENT_H - INPUT_H + 10,
-            CLIENT_W - LIST_W - 160,
+            ch() - INPUT_H + 10,
+            cw() - LIST_W - 160,
             36,
         )
     }
 
     fn send_rect() -> Rect {
-        Rect::new(CLIENT_W - 52, CLIENT_H - INPUT_H + 8, 40, 40)
+        Rect::new(cw() - 52, ch() - INPUT_H + 8, 40, 40)
     }
 
     fn emoji_rect() -> Rect {
-        Rect::new(CLIENT_W - 94, CLIENT_H - INPUT_H + 8, 40, 40)
+        Rect::new(cw() - 94, ch() - INPUT_H + 8, 40, 40)
     }
 
     fn join_rect(&self) -> Rect {
-        let mut w = CLIENT_W - LIST_W - 1;
+        let mut w = cw() - LIST_W - 1;
         if self.profile {
             w -= PROFILE_W;
         }
-        Rect::new(LIST_W + 1 + w / 2 - 110, CLIENT_H - INPUT_H + 9, 220, 38)
+        Rect::new(LIST_W + 1 + w / 2 - 110, ch() - INPUT_H + 9, 220, 38)
     }
 
     fn picker_rect() -> Rect {
         let w = EMOJI_COLS * EMOJI_CELL + 16;
         let h = 7 * EMOJI_CELL + EMOJI_TABS_H + 16;
-        Rect::new(CLIENT_W - w - 8, CLIENT_H - INPUT_H - h - 6, w, h)
+        Rect::new(cw() - w - 8, ch() - INPUT_H - h - 6, w, h)
     }
 
     fn profile_rect() -> Rect {
-        Rect::new(CLIENT_W - PROFILE_W, TOP_H, PROFILE_W, CLIENT_H - TOP_H)
+        Rect::new(cw() - PROFILE_W, TOP_H, PROFILE_W, ch() - TOP_H)
     }
 
     fn list_rows() -> i32 {
-        (CLIENT_H - TOP_H + ROW_H - 1) / ROW_H
+        (ch() - TOP_H + ROW_H - 1) / ROW_H
     }
 
     /// The rows of the chat list: our chats the search box lets through,
@@ -765,7 +777,7 @@ impl Telegram {
                 return (*r != Row::Section).then_some(i);
             }
             ry += r.height();
-            if ry > CLIENT_H {
+            if ry > ch() {
                 break;
             }
         }
@@ -1537,9 +1549,9 @@ impl Telegram {
     }
 
     fn draw_qr(&mut self, c: &mut Canvas, link: &str) {
-        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, panel());
+        c.fill_rect(0, 0, cw(), ch(), panel());
         let card = Self::card();
-        let cx = CLIENT_W / 2;
+        let cx = cw() / 2;
         let bx = Rect::new(cx - 120, card.y, 240, 240);
         c.fill_round(bx, 12, rgb(0xff, 0xff, 0xff));
         if link.is_empty() || !draw_qr_code(c, bx, link) {
@@ -1583,9 +1595,9 @@ impl Telegram {
     }
 
     fn draw_form(&mut self, c: &mut Canvas, stage: &Stage, caret: bool) {
-        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, panel());
+        c.fill_rect(0, 0, cw(), ch(), panel());
         let card = Self::card();
-        let cx = CLIENT_W / 2;
+        let cx = cw() / 2;
         draw_logo(c, cx, card.y + 70, 56);
         let (title, lines): (&str, Vec<String>) = match stage {
             Stage::Starting => {
@@ -1705,9 +1717,9 @@ impl Telegram {
     }
 
     fn draw_main(&mut self, c: &mut Canvas, caret: bool) {
-        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, panel());
+        c.fill_rect(0, 0, cw(), ch(), panel());
         self.draw_list(c, caret);
-        c.fill_rect(LIST_W, 0, 1, CLIENT_H, line());
+        c.fill_rect(LIST_W, 0, 1, ch(), line());
         match self.open {
             Some(peer) => {
                 self.draw_chat(c, peer, caret);
@@ -1719,7 +1731,7 @@ impl Telegram {
                 }
             }
             None => {
-                let area = Rect::new(LIST_W + 1, 0, CLIENT_W - LIST_W - 1, CLIENT_H);
+                let area = Rect::new(LIST_W + 1, 0, cw() - LIST_W - 1, ch());
                 c.vertical_gradient(area, wall_top(), wall_bottom());
                 let msg = "Select a chat to start messaging";
                 let w = UI.width(msg) + 24;
@@ -1801,12 +1813,12 @@ impl Telegram {
             y += 30;
         }
         let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
-        sub.clip_to(Rect::new(0, y, LIST_W, CLIENT_H - y));
+        sub.clip_to(Rect::new(0, y, LIST_W, ch() - y));
         let c = &mut sub;
         let empty_found = Vec::new();
         let found = s.found.as_ref().map_or(&empty_found, |f| &f.1);
         for (pos, row) in rows.iter().enumerate().skip(self.list_top as usize) {
-            if y >= CLIENT_H {
+            if y >= ch() {
                 break;
             }
             let chat = match *row {
@@ -1858,7 +1870,7 @@ impl Telegram {
         let tz = s.tz;
 
         // the header: a click opens the profile
-        let head = Rect::new(LIST_W + 1, 0, CLIENT_W - LIST_W - 1, TOP_H);
+        let head = Rect::new(LIST_W + 1, 0, cw() - LIST_W - 1, TOP_H);
         c.fill(head, panel());
         if self.hover_hit == Some(Hit::Header) {
             c.fill(head, hover());
@@ -1981,8 +1993,8 @@ impl Telegram {
         // the box to write in, or a Join button
         let bar = Rect::new(
             LIST_W + 1,
-            CLIENT_H - INPUT_H,
-            CLIENT_W - LIST_W - 1,
+            ch() - INPUT_H,
+            cw() - LIST_W - 1,
             INPUT_H,
         );
         c.fill(bar, panel());
@@ -2923,7 +2935,7 @@ fn draw_logo(c: &mut Canvas, cx: i32, cy: i32, radius: i32) {
 }
 
 fn full() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 /// A paper clip, 16 wide and 24 high.

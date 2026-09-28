@@ -273,6 +273,16 @@ impl Page {
         out
     }
 
+    /// The window showing the page changed size; the next update lays it
+    /// out again for the new one.
+    pub fn set_viewport(&mut self, viewport: (i32, i32)) {
+        if self.viewport != viewport {
+            self.viewport = viewport;
+            self.st.viewport = viewport;
+            self.laid_out = None;
+        }
+    }
+
     /// Restyle and lay out again if the DOM changed.
     pub fn update(&mut self) -> bool {
         if self.laid_out == Some(self.dom.version) {

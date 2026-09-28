@@ -63,7 +63,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use anim::{lerp, Fader, Tween, ONE};
 use canvas::{fast_mix, mix, rgb, Canvas, Dirty, Rect};
@@ -89,18 +89,37 @@ const MAX_H: usize = 1200;
 static BACK_BUFFER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// The desktop background, drawn once at start.
 static WALLPAPER: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
-/// Window contents. Each app draws into its own part only when its content
-/// changes, so moving a window just copies pixels.
-static SURFACES: StaticBuffer<{ 10 * 1024 * 1024 }> = StaticBuffer::new();
 /// The blurred wallpaper behind the sign-in panel.
 static BACKDROP: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// The screen being faded away when signing in or locking.
 static SNAPSHOT: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 /// Where a zooming window or the sliding start menu is drawn before it
 /// is scaled and blended onto the screen.
-static SCRATCH: StaticBuffer<{ MAX_W * 1000 }> = StaticBuffer::new();
+static SCRATCH: StaticBuffer<{ MAX_W * MAX_H }> = StaticBuffer::new();
 
 pub use about::VERSION;
+
+/// Each window's client size now (width << 16 | height), so apps can lay
+/// themselves out for it.
+static SIZES: [AtomicU32; APPS.len()] = [const { AtomicU32::new(0) }; APPS.len()];
+
+fn client_w(app: App) -> i32 {
+    (SIZES[app.index()].load(Ordering::Relaxed) >> 16) as i32
+}
+
+fn client_h(app: App) -> i32 {
+    (SIZES[app.index()].load(Ordering::Relaxed) & 0xffff) as i32
+}
+
+fn set_client_size(app: App, w: i32, h: i32) {
+    SIZES[app.index()].store((w as u32) << 16 | h as u32 & 0xffff, Ordering::Relaxed);
+}
+
+/// Edges of a window being resized.
+const LEFT: u8 = 1;
+const RIGHT: u8 = 2;
+const TOP: u8 = 4;
+const BOTTOM: u8 = 8;
 
 /// Whether the desktop is running (the shell asks before opening apps).
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -117,6 +136,10 @@ const TASKBAR_H: i32 = 80;
 const MENUBAR_H: i32 = 30;
 const TITLE_H: i32 = 32;
 const BORDER: i32 = 1;
+/// How far outside a window's frame the mouse can still grab an edge to
+/// resize it, and how big the corners are.
+const GRIP: i32 = 6;
+const CORNER: i32 = 16;
 const WINDOW_RADIUS: i32 = 8;
 /// How far window shadows reach.
 const SPREAD: i32 = 16;
@@ -195,7 +218,8 @@ impl App {
         }
     }
 
-    fn client_size(self) -> (i32, i32) {
+    /// The client size a window opens at.
+    fn default_size(self) -> (i32, i32) {
         match self {
             App::Terminal => (terminal::CLIENT_W, terminal::CLIENT_H),
             App::Explorer => (explorer::CLIENT_W, explorer::CLIENT_H),
@@ -214,6 +238,34 @@ impl App {
             App::Welcome => (welcome::CLIENT_W, welcome::CLIENT_H),
             App::Telegram => (telegram::CLIENT_W, telegram::CLIENT_H),
             App::Vpn => (vpn::CLIENT_W, vpn::CLIENT_H),
+        }
+    }
+
+    /// Whether the window can be resized and maximised. Small dialogs and
+    /// Draw, whose picture has a fixed size, can't.
+    fn resizable(self) -> bool {
+        !matches!(
+            self,
+            App::Calculator | App::About | App::Installer | App::Welcome | App::Paint
+        )
+    }
+
+    /// The smallest client size its layout still fits in.
+    fn min_size(self) -> (i32, i32) {
+        match self {
+            App::Terminal => (420, 200),
+            App::Explorer => (720, 400),
+            App::Notepad => (780, 320),
+            App::Photos => (560, 380),
+            App::Video => (600, 400),
+            App::Store => (560, 440),
+            App::Browser => (640, 360),
+            App::Program => (320, 240),
+            App::Settings => (900, 620),
+            App::TaskManager => (780, 480),
+            App::Telegram => (760, 620),
+            App::Vpn => (700, 520),
+            _ => self.default_size(),
         }
     }
 
@@ -436,6 +488,8 @@ struct Window {
     rect: Rect,
     open: bool,
     minimized: bool,
+    /// Where it was before it was maximised; None when it is not.
+    restore: Option<Rect>,
     anim: Option<WindowAnim>,
     /// The virtual desktop it is on, and whether that is not the one
     /// shown now.
@@ -478,6 +532,14 @@ impl Window {
         caption_button(self.rect, 1)
     }
 
+    fn maximize_button(&self) -> Rect {
+        caption_button(self.rect, 2)
+    }
+
+    fn maximized(&self) -> bool {
+        self.restore.is_some()
+    }
+
     /// Everything the window draws on, shadow included.
     fn bounds(&self) -> Rect {
         shadow_bounds(self.rect)
@@ -514,6 +576,7 @@ enum Phase {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hover {
     Minimize(App),
+    Maximize(App),
     Close(App),
     /// A button in the dock.
     Task(TaskItem),
@@ -548,6 +611,13 @@ pub struct Desktop<'a> {
     right: bool,
     /// Window being moved, and where in its title bar it was grabbed.
     drag: Option<(App, i32, i32)>,
+    /// Window being resized: which edges move, its frame and where the
+    /// mouse was when it was grabbed.
+    resize: Option<(App, u8, Rect, i32, i32)>,
+    /// Edges the pointer shows arrows for (0 is the normal arrow).
+    pointer_edges: u8,
+    /// The last left press on a title bar, for double-clicks.
+    title_click: Option<(App, u64)>,
     /// App that got the button press and gets the moves until release.
     capture: Option<App>,
     hover: Fader<Hover>,
@@ -586,7 +656,9 @@ pub struct Desktop<'a> {
     dirty: Dirty,
     snapshot: &'static mut [u32],
     scratch: &'static mut [u32],
-    surfaces: [&'static mut [u32]; APPS.len()],
+    /// Window contents. Each app draws into its own surface only when its
+    /// content changes, so moving a window just copies pixels.
+    surfaces: [Vec<u32>; APPS.len()],
     /// Apps whose surface must be drawn again.
     stale: [bool; APPS.len()],
 
@@ -652,13 +724,25 @@ impl<'a> Desktop<'a> {
             rect: Rect::default(),
             open: false,
             minimized: false,
+            restore: None,
             anim: None,
             desk: 0,
             away: false,
             opened: 0,
         }; APPS.len()];
         for app in APPS {
-            let (w, h) = app.client_size();
+            let (w, h) = app.default_size();
+            // big windows fit on small screens when they can
+            let (w, h) = if app.resizable() {
+                let (min_w, min_h) = app.min_size();
+                (
+                    w.min(width - 2 * BORDER - 40).max(min_w),
+                    h.min(height - MENUBAR_H - TASKBAR_H - TITLE_H - BORDER - 20).max(min_h),
+                )
+            } else {
+                (w, h)
+            };
+            set_client_size(app, w, h);
             let (x, y) = app.default_position();
             // keep windows on small screens
             let x = x.min(width - w - 2 * BORDER).max(0);
@@ -667,13 +751,7 @@ impl<'a> Desktop<'a> {
                 .max(MENUBAR_H);
             windows[app.index()].rect = Rect::new(x, y, w + 2 * BORDER, h + TITLE_H + BORDER);
         }
-        let mut pool = SURFACES.take();
-        let surfaces = core::array::from_fn(|i| {
-            let (w, h) = APPS[i].client_size();
-            let (mine, rest) = core::mem::take(&mut pool).split_at_mut((w * h) as usize);
-            pool = rest;
-            mine
-        });
+        let surfaces = core::array::from_fn(|_| Vec::new());
         let wallpaper = WALLPAPER.take();
         // the look the lock screen had before the restart
         personalize::load_boot();
@@ -699,6 +777,9 @@ impl<'a> Desktop<'a> {
             left: false,
             right: false,
             drag: None,
+            resize: None,
+            pointer_edges: 0,
+            title_click: None,
             capture: None,
             hover: Fader::new(anim::ms(120)),
             start: StartMenu::new(),
@@ -1105,7 +1186,7 @@ impl<'a> Desktop<'a> {
             .filter(|&a| self.windows[a.index()].open)
             .map(|a| {
                 let w = self.windows[a.index()];
-                let (cw, ch) = a.client_size();
+                let (cw, ch) = (client_w(a), client_h(a));
                 taskmgr::Row {
                     app: a,
                     name: self.window_title(a),
@@ -1376,6 +1457,7 @@ impl<'a> Desktop<'a> {
                 }
             }
             Cmd::Minimize(app) => self.minimize(app),
+            Cmd::Maximize(app) => self.toggle_maximize(app),
             Cmd::MoveTo(app, d) => self.move_to_desktop(app, Some(d)),
             Cmd::MoveToNew(app) => self.move_to_desktop(app, None),
             Cmd::NewDesktop => {
@@ -1490,6 +1572,183 @@ impl<'a> Desktop<'a> {
             self.windows[app.index()].rect.x = x;
             self.windows[app.index()].rect.y = y;
             self.damage_window(app);
+        }
+    }
+
+    /// The part of the screen a maximised window fills: between the menu
+    /// bar and the dock.
+    fn work_area(&self) -> Rect {
+        Rect::new(0, MENUBAR_H, self.width, self.height - MENUBAR_H - TASKBAR_H)
+    }
+
+    /// Give a window a new frame. When its size changes the app lays
+    /// itself out again.
+    fn set_rect(&mut self, app: App, r: Rect) {
+        let old = self.windows[app.index()];
+        if old.rect == r {
+            return;
+        }
+        self.damage(old.bounds());
+        self.windows[app.index()].rect = r;
+        let (w, h) = (r.w - 2 * BORDER, r.h - TITLE_H - BORDER);
+        if (w, h) != (client_w(app), client_h(app)) {
+            set_client_size(app, w, h);
+            self.resized(app);
+            self.stale[app.index()] = true;
+        }
+        self.damage_window(app);
+    }
+
+    /// Tell an app its window has a new size.
+    fn resized(&mut self, app: App) {
+        match app {
+            App::Terminal => self.terminal.resized(),
+            App::Browser => self.browser.resized(),
+            App::Program => self.program.resized(),
+            App::Explorer => self.explorer.resized(),
+            App::Notepad => self.notepad.resized(),
+            App::Photos => self.photos.resized(),
+            App::Video => self.video.resized(),
+            App::Store => self.store.resized(),
+            App::Telegram => self.telegram.resized(),
+            App::Vpn => self.vpn.resized(),
+            _ => {}
+        }
+    }
+
+    /// Fill the screen with a window, or put it back as it was.
+    fn toggle_maximize(&mut self, app: App) {
+        if !app.resizable() {
+            return;
+        }
+        let w = self.windows[app.index()];
+        match w.restore {
+            Some(old) => {
+                self.windows[app.index()].restore = None;
+                self.set_rect(app, old);
+            }
+            None => {
+                self.windows[app.index()].restore = Some(w.rect);
+                let area = self.work_area();
+                self.set_rect(app, area);
+            }
+        }
+        self.focus(app);
+    }
+
+    /// The edges of a window's frame a press at (x, y) would resize: its
+    /// border, and a few pixels outside it.
+    fn edges_at(&self, app: App, x: i32, y: i32) -> u8 {
+        let w = &self.windows[app.index()];
+        if !app.resizable() || w.maximized() || !w.rect.inset(-GRIP).contains(x, y) {
+            return 0;
+        }
+        let r = w.rect;
+        let inner = 3;
+        let mut e = 0;
+        if x < r.x + inner {
+            e |= LEFT;
+        } else if x >= r.right() - inner {
+            e |= RIGHT;
+        }
+        if y < r.y + inner {
+            e |= TOP;
+        } else if y >= r.bottom() - inner {
+            e |= BOTTOM;
+        }
+        // near a corner both edges move
+        if e & (LEFT | RIGHT) != 0 {
+            if y < r.y + CORNER {
+                e |= TOP;
+            } else if y >= r.bottom() - CORNER {
+                e |= BOTTOM;
+            }
+        }
+        if e & (TOP | BOTTOM) != 0 {
+            if x < r.x + CORNER {
+                e |= LEFT;
+            } else if x >= r.right() - CORNER {
+                e |= RIGHT;
+            }
+        }
+        e
+    }
+
+    /// The window whose edge is under the mouse, and which edges.
+    fn grip_at(&self, x: i32, y: i32) -> Option<(App, u8)> {
+        if y < MENUBAR_H || y >= self.height - TASKBAR_H {
+            return None;
+        }
+        for &app in self.order[..self.order_len].iter().rev() {
+            let w = &self.windows[app.index()];
+            if !w.visible() {
+                continue;
+            }
+            let edges = self.edges_at(app, x, y);
+            if edges != 0 {
+                return Some((app, edges));
+            }
+            if w.rect.contains(x, y) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Move the grabbed edges of a window being resized to the mouse.
+    fn resize_to(&mut self, x: i32, y: i32) {
+        let Some((app, edges, start, mx, my)) = self.resize else {
+            return;
+        };
+        let (min_w, min_h) = app.min_size();
+        let (min_w, min_h) = (min_w + 2 * BORDER, min_h + TITLE_H + BORDER);
+        let area = self.work_area();
+        let (dx, dy) = (x - mx, y - my);
+        let (mut left, mut top, mut right, mut bottom) =
+            (start.x, start.y, start.right(), start.bottom());
+        if edges & LEFT != 0 {
+            left = (left + dx).min(right - min_w).max(right - area.w.max(min_w));
+        }
+        if edges & RIGHT != 0 {
+            right = (right + dx).max(left + min_w).min(left + area.w.max(min_w));
+        }
+        if edges & TOP != 0 {
+            top = (top + dy)
+                .min(bottom - min_h)
+                .max(MENUBAR_H)
+                .max(bottom - area.h.max(min_h));
+        }
+        if edges & BOTTOM != 0 {
+            bottom = (bottom + dy)
+                .max(top + min_h)
+                .min((top + area.h).max(top + min_h));
+        }
+        self.set_rect(app, Rect::new(left, top, right - left, bottom - top));
+    }
+
+    /// Show resize arrows while the mouse is on a window's edge.
+    fn update_pointer_shape(&mut self) {
+        let edges = if let Some((_, e, ..)) = self.resize {
+            e
+        } else if self.left
+            || self.right
+            || !matches!(self.phase, Phase::Desktop)
+            || self.popup.is_some()
+            || self.start.open
+            || self.search.open
+            || self.panel.is_some()
+            || self.tv.open
+            || self.switcher.is_some()
+            || self.confirm_empty
+            || self.snip.is_some()
+        {
+            0
+        } else {
+            self.grip_at(self.mouse_x, self.mouse_y).map_or(0, |g| g.1)
+        };
+        if edges != self.pointer_edges {
+            self.pointer_edges = edges;
+            self.damage(pointer_rect(self.mouse_x, self.mouse_y));
         }
     }
 
@@ -1650,6 +1909,22 @@ impl<'a> Desktop<'a> {
                 }
             }
             Key::Right if ctrl => self.switch_desktop(self.current_desk + 1),
+            Key::Up => {
+                if let Some(app) = self.focused {
+                    if !self.windows[app.index()].maximized() {
+                        self.toggle_maximize(app);
+                    }
+                }
+            }
+            Key::Down => {
+                if let Some(app) = self.focused {
+                    if self.windows[app.index()].maximized() {
+                        self.toggle_maximize(app);
+                    } else {
+                        self.minimize(app);
+                    }
+                }
+            }
             Key::Ctrl('d') => {
                 if let Some(d) = self.new_desktop() {
                     self.switch_desktop(d);
@@ -1800,6 +2075,7 @@ impl<'a> Desktop<'a> {
             self.release();
         }
         self.update_hover();
+        self.update_pointer_shape();
     }
 
     /// Tell the app under the mouse where it is, so it can light up what
@@ -1839,7 +2115,7 @@ impl<'a> Desktop<'a> {
 
     /// Light up whatever is under the mouse now.
     fn update_hover(&mut self) {
-        let hover = if self.drag.is_some() || self.desk_icons.busy() {
+        let hover = if self.drag.is_some() || self.resize.is_some() || self.desk_icons.busy() {
             None
         } else {
             self.hover_at(self.mouse_x, self.mouse_y)
@@ -1901,6 +2177,8 @@ impl<'a> Desktop<'a> {
             Some(Hover::Close(app))
         } else if w.minimize_button().contains(x, y) {
             Some(Hover::Minimize(app))
+        } else if w.maximize_button().contains(x, y) && app.resizable() {
+            Some(Hover::Maximize(app))
         } else {
             None
         }
@@ -1909,6 +2187,7 @@ impl<'a> Desktop<'a> {
     fn hover_rect(&self, hover: Hover) -> Rect {
         match hover {
             Hover::Minimize(app) => self.windows[app.index()].minimize_button(),
+            Hover::Maximize(app) => self.windows[app.index()].maximize_button(),
             Hover::Close(app) => self.windows[app.index()].close_button(),
             Hover::Task(item) => self.task_rect(item).unwrap_or_default(),
             Hover::Tray(i) => self.tray_rect(i),
@@ -2029,6 +2308,12 @@ impl<'a> Desktop<'a> {
             self.tv_press(x, y, right);
             return;
         }
+        if let (Some((app, edges)), false) = (self.grip_at(x, y), right) {
+            self.focus(app);
+            let r = self.windows[app.index()].rect;
+            self.resize = Some((app, edges, r, x, y));
+            return;
+        }
         if let Some(app) = self.window_at(x, y) {
             self.focus(app);
             let w = self.windows[app.index()];
@@ -2038,7 +2323,18 @@ impl<'a> Desktop<'a> {
                 self.close(app);
             } else if !right && w.minimize_button().contains(x, y) {
                 self.minimize(app);
+            } else if !right && w.maximize_button().contains(x, y) {
+                self.toggle_maximize(app);
             } else if !right && w.title_bar().contains(x, y) {
+                // a double-click on the title bar maximises or restores
+                let now = interrupts::ticks();
+                if let Some((a, at)) = self.title_click.take() {
+                    if a == app && now - at <= DOUBLE_CLICK_TICKS {
+                        self.toggle_maximize(app);
+                        return;
+                    }
+                }
+                self.title_click = Some((app, now));
                 self.drag = Some((app, x - w.rect.x, y - w.rect.y));
             } else if right
                 && w.client().contains(x, y)
@@ -2079,8 +2375,15 @@ impl<'a> Desktop<'a> {
 
     /// Right-click on a title bar.
     fn title_menu(&mut self, app: App, x: i32, y: i32) {
+        let maximized = self.windows[app.index()].maximized();
         let mut b = popup::Builder::default()
             .item("Minimize", Cmd::Minimize(app))
+            .keyed_maybe(
+                if maximized { "Restore" } else { "Maximize" },
+                if maximized { "Super+Down" } else { "Super+Up" },
+                Cmd::Maximize(app),
+                app.resizable(),
+            )
             .keyed("Close", "Alt+F4", Cmd::Close(app))
             .sep();
         for d in (0..self.desk_count).filter(|&d| d != self.current_desk) {
@@ -2105,7 +2408,23 @@ impl<'a> Desktop<'a> {
             self.icons_move(self.mouse_x, self.mouse_y);
         } else if let Some(s) = self.slider {
             self.drag_slider(s);
+        } else if self.resize.is_some() {
+            self.resize_to(self.mouse_x, self.mouse_y);
         } else if let Some((app, dx, dy)) = self.drag {
+            let w = self.windows[app.index()];
+            if let Some(old) = w.restore {
+                // pulling a maximised window away gives it its old size,
+                // still held at the same place across its title bar
+                if (self.mouse_x - w.rect.x - dx).abs() + (self.mouse_y - w.rect.y - dy).abs() < 6 {
+                    return;
+                }
+                self.windows[app.index()].restore = None;
+                let dx = (dx * old.w / w.rect.w.max(1)).min(old.w - 90).max(0);
+                self.set_rect(app, Rect::new(self.mouse_x - dx, w.rect.y, old.w, old.h));
+                self.drag = Some((app, dx, dy));
+                self.title_click = None;
+            }
+            let (_, dx, dy) = self.drag.unwrap_or((app, dx, dy));
             self.move_window(app, self.mouse_x - dx, self.mouse_y - dy);
         } else if let Some(app) = self.capture {
             self.send_mouse(app, MouseKind::Move);
@@ -2116,7 +2435,13 @@ impl<'a> Desktop<'a> {
         if self.left || self.right {
             return;
         }
-        self.drag = None;
+        if let Some((app, ..)) = self.drag.take() {
+            // dropped against the top of the screen: fill it
+            if self.mouse_y <= 2 && !self.windows[app.index()].maximized() {
+                self.toggle_maximize(app);
+            }
+        }
+        self.resize = None;
         if self.slider.take() == Some(tray::Slider::Volume) {
             // let go of the volume: play a sound at the new loudness
             crate::sound::play(&crate::sound::volume_chime());
@@ -2350,7 +2675,7 @@ impl<'a> Desktop<'a> {
             c.clip_to(*r);
             self.draw_scene(&mut c, scratch);
             if !matches!(self.phase, Phase::Boot(_) | Phase::Power(..)) {
-                self.pointer_image.draw(&mut c, self.mouse_x, self.mouse_y);
+                self.pointer_image.draw(&mut c, self.mouse_x, self.mouse_y, self.pointer_edges);
             }
         }
         core::mem::swap(&mut self.back, &mut back);
@@ -2390,12 +2715,17 @@ impl<'a> Desktop<'a> {
 
     /// Bring stale window contents up to date.
     fn update_surfaces(&mut self) {
-        let surfaces = core::mem::take(&mut self.surfaces);
+        let mut surfaces = core::mem::take(&mut self.surfaces);
         for app in APPS {
             if self.stale[app.index()] && self.windows[app.index()].drawn() {
                 self.stale[app.index()] = false;
-                let (w, h) = app.client_size();
-                let mut c = Canvas::new(surfaces[app.index()], w as usize, h as usize);
+                let (w, h) = (client_w(app), client_h(app));
+                let surface = &mut surfaces[app.index()];
+                let size = (w * h) as usize;
+                if surface.len() < size {
+                    surface.resize(size, 0);
+                }
+                let mut c = Canvas::new(&mut surface[..size], w as usize, h as usize);
                 let focused = self.focused == Some(app);
                 match app {
                     App::Terminal => self.terminal.draw(&mut c, focused && self.cursor_on),
@@ -2695,34 +3025,54 @@ impl<'a> Desktop<'a> {
         self.icons.draw_small(win, app, tx, r.y + 8);
         win.draw_text(tx + 24, r.y + 8, &title, ink);
 
-        // round caption buttons: coral closes, amber minimises; grey on
-        // windows in the back until the mouse comes near
+        // round caption buttons: coral closes, amber minimises, green
+        // maximises; grey on windows in the back until the mouse comes near
         let near = self
             .hover
             .level(Hover::Close(app))
-            .max(self.hover.level(Hover::Minimize(app)));
+            .max(self.hover.level(Hover::Minimize(app)))
+            .max(self.hover.level(Hover::Maximize(app)));
+        let maximized = self.windows[app.index()].maximized();
         for (k, hover, color) in [
             (0, Hover::Close(app), rgb(0xf2, 0x5c, 0x54)),
             (1, Hover::Minimize(app), rgb(0xff, 0x9f, 0x43)),
+            (2, Hover::Maximize(app), rgb(0x3c, 0xc8, 0x5a)),
         ] {
             let b = caption_button(r, k);
             let dot = Rect::new(b.x + 4, b.y + 4, 14, 14);
-            let face = if focused || near > 0 {
+            // a window that can't be resized has a dim green button
+            let off = k == 2 && !app.resizable();
+            let face = if (focused || near > 0) && !off {
                 color
             } else {
-                mix(title_face, theme::thumb(), 150)
+                mix(title_face, theme::thumb(), if off { 90 } else { 150 })
             };
             win.fill_round(dot, 7, face);
             win.outline_round_alpha(dot, 7, mix(face, 0, 60), ONE / 2);
-            let lit = self.hover.level(hover).max(near / 2) as u32;
+            let lit = if off {
+                0
+            } else {
+                self.hover.level(hover).max(near / 2) as u32
+            };
             if lit > 0 {
                 let ink = mix(face, rgb(0x3a, 0x1a, 0x10), lit * 255 / 256);
                 let (cx, cy) = (dot.x + 7, dot.y + 7);
-                if k == 0 {
-                    win.line(cx - 3, cy - 3, cx + 3, cy + 3, ink);
-                    win.line(cx + 3, cy - 3, cx - 3, cy + 3, ink);
-                } else {
-                    win.fill_rect(cx - 3, cy, 7, 1, ink);
+                match k {
+                    0 => {
+                        win.line(cx - 3, cy - 3, cx + 3, cy + 3, ink);
+                        win.line(cx + 3, cy - 3, cx - 3, cy + 3, ink);
+                    }
+                    1 => win.fill_rect(cx - 3, cy, 7, 1, ink),
+                    _ if maximized => {
+                        // two arrows pointing in: back to the old size
+                        win.fill_polygon(&[(cx - 4, cy - 1), (cx - 1, cy - 1), (cx - 1, cy - 4)], ink);
+                        win.fill_polygon(&[(cx + 4, cy + 1), (cx + 1, cy + 1), (cx + 1, cy + 4)], ink);
+                    }
+                    _ => {
+                        // two arrows pointing out: fill the screen
+                        win.fill_polygon(&[(cx - 4, cy - 4), (cx + 1, cy - 4), (cx - 4, cy + 1)], ink);
+                        win.fill_polygon(&[(cx + 4, cy + 4), (cx - 1, cy + 4), (cx + 4, cy - 1)], ink);
+                    }
                 }
             }
         }
@@ -2734,6 +3084,11 @@ impl<'a> Desktop<'a> {
             r.h - TITLE_H - BORDER,
         );
         let surface = &self.surfaces[app.index()];
+        if surface.len() < (client.w * client.h) as usize {
+            // not drawn at this size yet
+            win.fill(client, theme::face());
+            return;
+        }
         win.blit(
             client.x,
             client.y,
@@ -2829,13 +3184,19 @@ const CONFIRM_LINES: [&str; 1] =
 // ---- pictures ---------------------------------------------------------------
 
 /// The mouse pointer, drawn at 4x with polygons and shrunk with alpha
-/// so its edges are smooth.
+/// so its edges are smooth: the arrow, and double arrows for resizing.
 struct Pointer {
     pixels: [u32; POINTER_W * POINTER_H],
+    /// Left-right, up-down, and the two diagonals.
+    resize: [[u32; RESIZE_W * RESIZE_W]; 4],
 }
 
 const POINTER_W: usize = 16;
 const POINTER_H: usize = 24;
+/// The resize arrows are square, with the hot spot in the middle.
+const RESIZE_W: usize = 24;
+/// Drawing at 4x before shrinking.
+const S: usize = 4;
 
 impl Pointer {
     fn new() -> Self {
@@ -2858,40 +3219,98 @@ impl Pointer {
             (27, 54),
             (45, 54),
         ];
-        const S: usize = 4;
-        let mut big = [0u32; POINTER_W * S * POINTER_H * S];
-        let marker = 0xff00_0000;
-        big.fill(marker);
-        let mut c = Canvas::new(&mut big, POINTER_W * S, POINTER_H * S);
-        c.fill_polygon(&OUTER, 0x000000);
-        c.fill_polygon(&INNER, 0xffffff);
         let mut pixels = [0u32; POINTER_W * POINTER_H];
-        for (i, out) in pixels.iter_mut().enumerate() {
-            let (ox, oy) = (i % POINTER_W, i / POINTER_W);
-            let (mut sum, mut count) = (0u32, 0u32);
-            for y in oy * S..oy * S + S {
-                for x in ox * S..ox * S + S {
-                    let p = big[y * POINTER_W * S + x];
-                    if p != marker {
-                        sum += p & 0xff;
-                        count += 1;
-                    }
-                }
-            }
-            if let Some(grey) = sum.checked_div(count) {
-                *out = (count * 255 / (S * S) as u32) << 24 | grey << 16 | grey << 8 | grey;
-            }
+        smooth_shape(&mut pixels, POINTER_W, POINTER_H, &OUTER, &INNER);
+
+        // a double arrow lying left to right around (0, 0), in 1/4 pixels
+        const ARROW_OUT: [(i32, i32); 10] = [
+            (-44, 0),
+            (-16, -27),
+            (-16, -9),
+            (16, -9),
+            (16, -27),
+            (44, 0),
+            (16, 27),
+            (16, 9),
+            (-16, 9),
+            (-16, 27),
+        ];
+        const ARROW_IN: [(i32, i32); 10] = [
+            (-36, 0),
+            (-20, -16),
+            (-20, -4),
+            (20, -4),
+            (20, -16),
+            (36, 0),
+            (20, 16),
+            (20, 4),
+            (-20, 4),
+            (-20, 16),
+        ];
+        let mut resize = [[0u32; RESIZE_W * RESIZE_W]; 4];
+        // turned by 0, 90, 45 and 135 degrees (cos and sin in 1/256)
+        for (out, (cos, sin)) in resize.iter_mut().zip([(256, 0), (0, 256), (181, 181), (-181, 181)]) {
+            let mid = (RESIZE_W * S / 2) as i32;
+            let turn = |p: &(i32, i32)| {
+                (
+                    mid + (p.0 * cos - p.1 * sin) / 256,
+                    mid + (p.0 * sin + p.1 * cos) / 256,
+                )
+            };
+            let outer: Vec<(i32, i32)> = ARROW_OUT.iter().map(turn).collect();
+            let inner: Vec<(i32, i32)> = ARROW_IN.iter().map(turn).collect();
+            smooth_shape(out, RESIZE_W, RESIZE_W, &outer, &inner);
         }
-        Self { pixels }
+        Self { pixels, resize }
     }
 
-    fn draw(&self, c: &mut Canvas, x: i32, y: i32) {
-        c.blit_alpha(x, y, POINTER_W as i32, POINTER_H as i32, &self.pixels);
+    /// Draw the pointer for the mouse at (x, y); `edges` picks resize
+    /// arrows.
+    fn draw(&self, c: &mut Canvas, x: i32, y: i32, edges: u8) {
+        let kind = match edges {
+            0 => return c.blit_alpha(x, y, POINTER_W as i32, POINTER_H as i32, &self.pixels),
+            LEFT | RIGHT => 0,
+            TOP | BOTTOM => 1,
+            e if e == LEFT | TOP || e == RIGHT | BOTTOM => 2,
+            _ => 3,
+        };
+        let half = RESIZE_W as i32 / 2;
+        c.blit_alpha(x - half, y - half, RESIZE_W as i32, RESIZE_W as i32, &self.resize[kind]);
     }
 }
 
+/// Fill `outer` black and `inner` white at 4x, and shrink that into
+/// `pixels` (w x h) with alpha for the edges.
+fn smooth_shape(pixels: &mut [u32], w: usize, h: usize, outer: &[(i32, i32)], inner: &[(i32, i32)]) {
+    let mut big = alloc::vec![0u32; w * S * h * S];
+    let marker = 0xff00_0000;
+    big.fill(marker);
+    let mut c = Canvas::new(&mut big, w * S, h * S);
+    c.fill_polygon(outer, 0x000000);
+    c.fill_polygon(inner, 0xffffff);
+    for (i, out) in pixels.iter_mut().enumerate() {
+        let (ox, oy) = (i % w, i / w);
+        let (mut sum, mut count) = (0u32, 0u32);
+        for y in oy * S..oy * S + S {
+            for x in ox * S..ox * S + S {
+                let p = big[y * w * S + x];
+                if p != marker {
+                    sum += p & 0xff;
+                    count += 1;
+                }
+            }
+        }
+        if let Some(grey) = sum.checked_div(count) {
+            *out = (count * 255 / (S * S) as u32) << 24 | grey << 16 | grey << 8 | grey;
+        }
+    }
+}
+
+/// Everything the pointer may cover with the mouse at (x, y), whichever
+/// shape it has.
 fn pointer_rect(x: i32, y: i32) -> Rect {
-    Rect::new(x, y, POINTER_W as i32, POINTER_H as i32)
+    let half = RESIZE_W as i32 / 2;
+    Rect::new(x - half, y - half, POINTER_W as i32 + half, POINTER_H as i32 + half)
 }
 
 /// A row of black, to dim towards.
@@ -2919,7 +3338,8 @@ fn fade_row(out: &mut [u32], a: &[u32], b: &[u32], alpha: u32) {
     }
 }
 
-/// Caption button `k` (0 close, 1 minimise) of a window framed by `r`.
+/// Caption button `k` (0 close, 1 minimise, 2 maximise) of a window
+/// framed by `r`.
 fn caption_button(r: Rect, k: i32) -> Rect {
     Rect::new(r.x + 10 + k * 22, r.y + 5, 22, 22)
 }
@@ -3012,7 +3432,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
     // the boot animation starts once everything is ready to draw
     desk.phase = Phase::Boot(interrupts::ticks());
     // the shell now prints into the terminal window
-    CONSOLE.lock().detach(terminal::COLS, terminal::ROWS);
+    let (cols, rows) = terminal::grid();
+    CONSOLE.lock().detach(cols, rows);
     ACTIVE.store(true, Ordering::Relaxed);
     crate::print_banner();
     desk.terminal.start();

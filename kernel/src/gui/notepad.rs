@@ -21,6 +21,14 @@ use crate::{interrupts, rtc, users};
 pub const CLIENT_W: i32 = 1000;
 pub const CLIENT_H: i32 = 640;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Notepad)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Notepad)
+}
+
 const MENU_H: i32 = 34;
 const STATUS_H: i32 = 26;
 const SB: i32 = 14;
@@ -155,11 +163,11 @@ pub struct Notepad {
 }
 
 fn area() -> Rect {
-    Rect::new(0, MENU_H, CLIENT_W - SB, CLIENT_H - MENU_H - STATUS_H - SB)
+    Rect::new(0, MENU_H, cw() - SB, ch() - MENU_H - STATUS_H - SB)
 }
 
 fn client() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 fn vtrack() -> Rect {
@@ -249,6 +257,11 @@ fn cp1251(b: u8) -> char {
 }
 
 impl Notepad {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+        self.clamp_scroll();
+    }
+
     pub fn new() -> Self {
         Self {
             lines: vec![Vec::new()],
@@ -1067,8 +1080,8 @@ impl Notepad {
     fn open_menu(&mut self, kind: MenuKind, x: i32, y: i32) {
         let items = self.menu_items(kind);
         let mut r = widgets::menu_rect(x, y, &items);
-        r.x = r.x.min(CLIENT_W - r.w - 4).max(0);
-        if r.bottom() > CLIENT_H - 4 {
+        r.x = r.x.min(cw() - r.w - 4).max(0);
+        if r.bottom() > ch() - 4 {
             r.y = (y - r.h).max(0);
         }
         self.menu = Some((kind, r));
@@ -1276,9 +1289,9 @@ impl Notepad {
     }
 
     fn draw_menu_bar(&self, c: &mut Canvas) {
-        let bar = Rect::new(0, 0, CLIENT_W, MENU_H);
+        let bar = Rect::new(0, 0, cw(), MENU_H);
         c.fill(bar, theme::face());
-        c.fill_rect(0, MENU_H - 1, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, MENU_H - 1, cw(), 1, theme::stroke());
         for (i, label) in ["File", "Edit"].into_iter().enumerate() {
             let b = Self::menu_button(i);
             let open = match self.menu {
@@ -1342,9 +1355,9 @@ impl Notepad {
     }
 
     fn draw_status(&self, c: &mut Canvas) {
-        let r = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);
+        let r = Rect::new(0, ch() - STATUS_H, cw(), STATUS_H);
         c.fill(r, theme::face());
-        c.fill_rect(0, r.y, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, r.y, cw(), 1, theme::stroke());
         let ty = r.y + (STATUS_H - UI.line_height) / 2;
         let mut s = String::new();
         let col = visual_col(&self.lines[self.cur.line], self.cur.col) + 1;

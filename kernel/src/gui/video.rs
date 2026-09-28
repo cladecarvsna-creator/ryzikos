@@ -23,6 +23,14 @@ use crate::{fs, interrupts};
 pub const CLIENT_W: i32 = 1024;
 pub const CLIENT_H: i32 = 680;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Video)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Video)
+}
+
 const CONTROLS_H: i32 = 86;
 const ROW_H: i32 = 56;
 const LIST_Y: i32 = 110;
@@ -286,22 +294,22 @@ enum Button {
 }
 
 fn video_rect() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H - CONTROLS_H)
+    Rect::new(0, 0, cw(), ch() - CONTROLS_H)
 }
 
 fn seek_rect() -> Rect {
-    Rect::new(24, CLIENT_H - CONTROLS_H + 14, CLIENT_W - 48, 10)
+    Rect::new(24, ch() - CONTROLS_H + 14, cw() - 48, 10)
 }
 
 fn buttons() -> [(Button, Rect); 6] {
-    let y = CLIENT_H - CONTROLS_H + 36;
+    let y = ch() - CONTROLS_H + 36;
     [
-        (Button::Play, Rect::new(CLIENT_W / 2 - 22, y - 2, 44, 44)),
-        (Button::Previous, Rect::new(CLIENT_W / 2 - 22 - 60, y + 4, 44, 32)),
-        (Button::Next, Rect::new(CLIENT_W / 2 + 22 + 16, y + 4, 44, 32)),
-        (Button::Library, Rect::new(CLIENT_W - 24 - 92 - 8 - 92, y + 4, 92, 32)),
-        (Button::Open, Rect::new(CLIENT_W - 24 - 92, y + 4, 92, 32)),
-        (Button::Loop, Rect::new(CLIENT_W / 2 + 22 + 16 + 44 + 16, y + 4, 64, 32)),
+        (Button::Play, Rect::new(cw() / 2 - 22, y - 2, 44, 44)),
+        (Button::Previous, Rect::new(cw() / 2 - 22 - 60, y + 4, 44, 32)),
+        (Button::Next, Rect::new(cw() / 2 + 22 + 16, y + 4, 44, 32)),
+        (Button::Library, Rect::new(cw() - 24 - 92 - 8 - 92, y + 4, 92, 32)),
+        (Button::Open, Rect::new(cw() - 24 - 92, y + 4, 92, 32)),
+        (Button::Loop, Rect::new(cw() / 2 + 22 + 16 + 44 + 16, y + 4, 64, 32)),
     ]
 }
 
@@ -332,6 +340,10 @@ pub struct Video {
 }
 
 impl Video {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+    }
+
     pub fn new() -> Self {
         Self {
             path: None,
@@ -587,7 +599,7 @@ impl Video {
     }
 
     fn row_at(&self, x: i32, y: i32) -> Option<usize> {
-        if self.path.is_some() || y < LIST_Y || x < 24 || x > CLIENT_W - 24 {
+        if self.path.is_some() || y < LIST_Y || x < 24 || x > cw() - 24 {
             return None;
         }
         let i = ((y - LIST_Y) / ROW_H) as usize;
@@ -679,7 +691,7 @@ impl Video {
         }
 
         // the controls
-        let bar = Rect::new(0, CLIENT_H - CONTROLS_H, CLIENT_W, CONTROLS_H);
+        let bar = Rect::new(0, ch() - CONTROLS_H, cw(), CONTROLS_H);
         c.fill(bar, rgb(0x1c, 0x1d, 0x22));
         let seek = seek_rect();
         c.fill_round(seek, 5, rgb(0x3a, 0x3c, 0x44));
@@ -692,7 +704,7 @@ impl Video {
             c.fill_round(Rect::new(seek.x, seek.y, done.max(10), seek.h), 5, theme::accent());
             c.fill_circle(seek.x + done, seek.y + seek.h / 2, 8, 0xffffff);
         }
-        let y = CLIENT_H - CONTROLS_H + 44;
+        let y = ch() - CONTROLS_H + 44;
         let time = format!("{} / {}", fmt_time(pos_ms), fmt_time(total_ms));
         c.draw_text(24, y + 4, &time, rgb(0xe0, 0xe0, 0xe6));
         for (b, r) in buttons() {
@@ -798,7 +810,7 @@ impl Video {
 }
 
 fn client() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 /// Draw a video frame stretched to `r`: nearest pixels, which is fast.

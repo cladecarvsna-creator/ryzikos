@@ -35,6 +35,20 @@ pub const CLIENT_H: i32 = 900;
 pub const PROGRAM_W: i32 = 960;
 pub const PROGRAM_H: i32 = 720;
 
+/// The windows' sizes now; they open at the sizes above.
+fn cw() -> i32 {
+    super::client_w(App::Browser)
+}
+fn ch() -> i32 {
+    super::client_h(App::Browser)
+}
+fn pw() -> i32 {
+    super::client_w(App::Program)
+}
+fn ph() -> i32 {
+    super::client_h(App::Program)
+}
+
 const TABS_H: i32 = 40;
 const TOOLBAR_H: i32 = 48;
 /// Where the toolbar starts, and the page below it.
@@ -243,38 +257,38 @@ fn home_rect() -> Rect {
 }
 fn address_rect() -> Rect {
     let x = 8 + 3 * (BUTTON + 4) + 6;
-    Rect::new(x, BAR_Y + 7, CLIENT_W - x - 8 - 64 - 8, BUTTON)
+    Rect::new(x, BAR_Y + 7, cw() - x - 8 - 64 - 8, BUTTON)
 }
 fn go_rect() -> Rect {
-    Rect::new(CLIENT_W - 8 - 64, BAR_Y + 7, 64, BUTTON)
+    Rect::new(cw() - 8 - 64, BAR_Y + 7, 64, BUTTON)
 }
 fn content_rect(bare: bool) -> Rect {
     if bare {
-        return Rect::new(0, 0, PROGRAM_W, PROGRAM_H);
+        return Rect::new(0, 0, pw(), ph());
     }
     Rect::new(
         0,
         PAGE_Y,
-        CLIENT_W - SCROLLBAR_W,
-        CLIENT_H - PAGE_Y - STATUS_H,
+        cw() - SCROLLBAR_W,
+        ch() - PAGE_Y - STATUS_H,
     )
 }
 fn scrollbar_rect(bare: bool) -> Rect {
     if bare {
         // no scroll bar: the wheel and the keys still scroll
-        return Rect::new(PROGRAM_W, 0, 0, 0);
+        return Rect::new(pw(), 0, 0, 0);
     }
     Rect::new(
-        CLIENT_W - SCROLLBAR_W,
+        cw() - SCROLLBAR_W,
         PAGE_Y,
         SCROLLBAR_W,
-        CLIENT_H - PAGE_Y - STATUS_H,
+        ch() - PAGE_Y - STATUS_H,
     )
 }
 
 /// The tabs in the strip, left to right.
 fn tab_rects(n: usize) -> Vec<Rect> {
-    let room = CLIENT_W - 16 - 44;
+    let room = cw() - 16 - 44;
     let w = (room / n.max(1) as i32).clamp(56, TAB_MAX_W);
     (0..n)
         .map(|i| Rect::new(8 + i as i32 * w, 6, w, TABS_H - 6))
@@ -313,6 +327,15 @@ fn hash_text(s: &str, extra: u64) -> u64 {
 }
 
 impl Browser {
+    /// The window got a new size: lay every page out for it.
+    pub fn resized(&mut self) {
+        for t in &mut self.tabs {
+            t.page.set_viewport(viewport(t.bare));
+            t.layout_due = true;
+            t.layout_ok_at = 0;
+        }
+    }
+
     pub fn new() -> Self {
         Browser {
             bare: false,
@@ -676,7 +699,7 @@ impl Browser {
 
     fn draw_tabs(&self, c: &mut Canvas) {
         let strip = mix(theme::FACE, theme::SHADOW, 70);
-        c.fill(Rect::new(0, 0, CLIENT_W, TABS_H), strip);
+        c.fill(Rect::new(0, 0, cw(), TABS_H), strip);
         let rects = tab_rects(self.tabs.len());
         for (i, r) in rects.iter().enumerate() {
             let tab = &self.tabs[i];
@@ -1069,6 +1092,9 @@ impl Tab {
             None => String::new(),
         };
         self.page = page;
+        // the window may have changed size while it loaded
+        self.page.set_viewport(viewport(self.bare));
+        self.page.update();
         self.scroll = 0;
         self.hover = None;
         self.select_all = false;
@@ -1468,9 +1494,9 @@ impl Tab {
     // ---- drawing -----------------------------------------------------------
 
     fn draw_toolbar(&self, c: &mut Canvas, spin: u32) {
-        let bar = Rect::new(0, BAR_Y, CLIENT_W, TOOLBAR_H);
+        let bar = Rect::new(0, BAR_Y, cw(), TOOLBAR_H);
         c.fill(bar, theme::FACE);
-        c.fill_rect(0, BAR_Y + TOOLBAR_H - 1, CLIENT_W, 1, theme::STROKE);
+        c.fill_rect(0, BAR_Y + TOOLBAR_H - 1, cw(), 1, theme::STROKE);
 
         let icon_button = |c: &mut Canvas, r: Rect, pressed: bool, enabled: bool| {
             if pressed {
@@ -1578,9 +1604,9 @@ impl Tab {
 
         // a strip running along the bottom of the toolbar while loading
         if loading {
-            let track = Rect::new(0, BAR_Y + TOOLBAR_H - 3, CLIENT_W, 3);
-            let w = CLIENT_W / 4;
-            let x = (spin as i32 * 24) % (CLIENT_W + w) - w;
+            let track = Rect::new(0, BAR_Y + TOOLBAR_H - 3, cw(), 3);
+            let w = cw() / 4;
+            let x = (spin as i32 * 24) % (cw() + w) - w;
             let mut s = c.sub(track);
             s.fill(Rect::new(x, 0, w, 3), theme::ACCENT);
         }
@@ -1827,9 +1853,9 @@ impl Tab {
     }
 
     fn draw_status(&self, c: &mut Canvas) {
-        let bar = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);
+        let bar = Rect::new(0, ch() - STATUS_H, cw(), STATUS_H);
         c.fill(bar, theme::FACE);
-        c.fill_rect(0, bar.y, CLIENT_W, 1, theme::STROKE);
+        c.fill_rect(0, bar.y, cw(), 1, theme::STROKE);
         let ty = bar.y + (STATUS_H - UI.line_height) / 2;
         let loading = self.loading();
         let x = 10;
@@ -1843,8 +1869,8 @@ impl Tab {
             images = alloc::format!("Loading images: {} left", waiting);
         }
         let right_w = UI.width(&images);
-        c.draw_text(CLIENT_W - right_w - 14, ty, &images, theme::TEXT_DIM);
-        let mut left = c.sub(Rect::new(x, bar.y, CLIENT_W - x - right_w - 40, STATUS_H));
+        c.draw_text(cw() - right_w - 14, ty, &images, theme::TEXT_DIM);
+        let mut left = c.sub(Rect::new(x, bar.y, cw() - x - right_w - 40, STATUS_H));
         left.draw_text(0, ty - bar.y, status, theme::TEXT_DIM);
     }
 }
