@@ -1,4 +1,3 @@
-Telegram: if the server can't read the first step of the secure connection ("The server forgot this session"), the next try uses the older way Telegram also accepts.
-Telegram checks the real time on the internet before connecting, so a clock set to local time doesn't stop it.
-While connecting, Telegram shows the step it is on. Type "telegram log" in the Terminal to see the last steps.
-After an update, this window shows what changed.
+VPN: a new app that works like Happ. Paste the subscription address your VPN service gave you, or a vless://, trojan:// or ss:// link, pick a server and press the big button.
+It speaks VLESS with REALITY or TLS (with XTLS Vision too), Trojan and Shadowsocks, and shows each server's delay, your traffic and when the subscription ends.
+While the VPN is on, every program goes through it, the menu bar shows a green shield, and Quick settings has a VPN tile.

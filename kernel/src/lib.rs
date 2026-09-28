@@ -31,6 +31,7 @@ mod update;
 mod users;
 mod vga;
 mod vmmouse;
+mod vpn;
 mod web;
 
 use core::fmt::Write;

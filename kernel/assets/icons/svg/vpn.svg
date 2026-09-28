@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="100%" height="100%" fill="none">
+  <!-- Щит -->
+  <path d="M32 6L52 13V30C52 43 43.5 52.5 32 58C20.5 52.5 12 43 12 30V13L32 6Z" fill="#55E6C1" stroke="#1E2022" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Блик на щите -->
+  <path d="M32 11.5V52C41 47 47 39.5 47 30V16.5L32 11.5Z" fill="#3DC9A5"/>
+  <!-- Дужка замка -->
+  <path d="M25 30V25C25 20.5 28 18 32 18C36 18 39 20.5 39 25V30" stroke="#1E2022" stroke-width="3" stroke-linecap="round"/>
+  <!-- Корпус замка -->
+  <rect x="21" y="29" width="22" height="16" rx="4" fill="#FFD24C" stroke="#1E2022" stroke-width="2.5"/>
+  <!-- Скважина -->
+  <circle cx="32" cy="35.5" r="2.5" fill="#1E2022"/>
+  <path d="M32 37V41" stroke="#1E2022" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

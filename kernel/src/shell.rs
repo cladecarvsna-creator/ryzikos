@@ -9,7 +9,7 @@ use crate::keyboard::Key;
 use crate::multiboot::BootInfo;
 use crate::{fs, print, println, users};
 
-const MAX_LINE: usize = 250;
+const MAX_LINE: usize = 1000;
 
 pub struct Shell {
     line: [char; MAX_LINE],
@@ -130,6 +130,7 @@ impl Shell {
                 println!("  drives  list the disks and CD/DVD drives");
                 println!("  devices list the PC's hardware and which parts have drivers");
                 println!("  telegram open Telegram (telegram selftest checks its crypto)");
+                println!("  vpn     open VPN (vpn help lists add, list, on, off, test, log)");
                 println!("  install install RyzikOS on a hard disk (from the live CD)");
                 println!("  update  show the version and a downloaded update (update undo removes it)");
                 println!("  beep    play the volume sound on the ES1370 sound card");
@@ -339,6 +340,7 @@ impl Shell {
                 }
             }
             "fetch" => fetch(args.trim()),
+            "vpn" => vpn(args.trim()),
             "js" => js(args.trim()),
             "whoami" => match users::current_name() {
                 Some(name) => println!("{}", name.as_str()),
@@ -559,6 +561,120 @@ fn colors() {
 }
 
 /// Download a page in the terminal: the network test without the browser.
+/// `vpn add <subscription or link>`, `vpn list`, `vpn on [n]`, `vpn off`,
+/// `vpn test [n]`, `vpn log`; plain `vpn` opens the app.
+fn vpn(args: &str) {
+    use crate::vpn;
+    let (command, rest) = args.split_once(' ').unwrap_or((args, ""));
+    let rest = rest.trim();
+    if !matches!(command, "" | "help" | "log" | "off" | "list" | "probe") && crate::net::init().is_none() {
+        println!("{}", crate::net::NO_CARD);
+        return;
+    }
+    let pick = |saved: &vpn::Saved| -> Option<vpn::Server> {
+        let all: alloc::vec::Vec<&vpn::Server> = saved.groups.iter().flat_map(|g| &g.servers).collect();
+        match rest.parse::<usize>() {
+            Ok(n) if n >= 1 => all.get(n - 1).map(|s| (*s).clone()),
+            _ => all
+                .iter()
+                .find(|s| s.link == saved.selected)
+                .or(all.first())
+                .map(|s| (*s).clone()),
+        }
+    };
+    match command {
+        "" => open(App::Vpn),
+        "add" if !rest.is_empty() => {
+            let mut saved = vpn::load();
+            let group = if rest.contains("://") && !rest.starts_with("http") && !rest.starts_with("happ://") {
+                let servers = vpn::link::parse_list(rest);
+                if servers.is_empty() {
+                    error("Not a link RyzikOS knows (vless://, trojan://, ss://)");
+                    return;
+                }
+                vpn::Group { url: String::new(), title: String::new(), usage: None, servers }
+            } else {
+                match vpn::fetch_subscription(rest) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        error(&e);
+                        return;
+                    }
+                }
+            };
+            println!("Added {} server(s).", group.servers.len());
+            vpn::add_group(&mut saved, group);
+            if let Err(e) = vpn::save(&saved) {
+                error(&e);
+            }
+        }
+        "list" => {
+            let saved = vpn::load();
+            let mut n = 0;
+            for g in &saved.groups {
+                println!("{}", if g.url.is_empty() { "Added by hand" } else { g.title.as_str() });
+                for s in &g.servers {
+                    n += 1;
+                    let mark = if s.link == saved.selected { "*" } else { " " };
+                    let why = s.unsupported().map(|w| alloc::format!(" ({})", w)).unwrap_or_default();
+                    println!("{} {:>2}. {} [{}]{}", mark, n, s.name, s.protocol(), why);
+                }
+            }
+            if n == 0 {
+                println!("No servers. Add one: vpn add <subscription address or vless:// link>");
+            }
+        }
+        "on" | "connect" | "test" => {
+            let mut saved = vpn::load();
+            let Some(server) = pick(&saved) else {
+                error("No such server; see vpn list");
+                return;
+            };
+            println!("{} {} ...", if command == "test" { "Testing" } else { "Connecting to" }, server.name);
+            let result = if command == "test" { vpn::test(&server) } else { vpn::connect(&server) };
+            match result {
+                Ok(ms) => {
+                    println!("{} ({} ms)", if command == "test" { "Works" } else { "VPN is on" }, ms);
+                    crate::serial::write_str(&alloc::format!("\nvpn: {} ok {} ms\n", command, ms));
+                    if command != "test" {
+                        saved.selected = server.link.clone();
+                        let _ = vpn::save(&saved);
+                    }
+                }
+                Err(e) => {
+                    crate::serial::write_str(&alloc::format!("\nvpn: {} failed: {}\n", command, e));
+                    error(&e);
+                }
+            }
+        }
+        "off" => {
+            vpn::disconnect();
+            println!("VPN is off.");
+        }
+        "status" => match vpn::route() {
+            Some(s) => {
+                let (up, down) = vpn::traffic();
+                println!("On: {} [{}], {} s, sent {}, received {}", s.name, s.protocol(), vpn::uptime(), vpn::size_text(up), vpn::size_text(down));
+            }
+            None => println!("Off."),
+        },
+        "probe" if !rest.is_empty() => vpn::set_probe(rest),
+        "log" => {
+            for l in vpn::recent_log() {
+                println!("{}", l);
+            }
+        }
+        _ => {
+            println!("vpn                open the VPN app");
+            println!("vpn add <address>  add a subscription, or a vless://, trojan:// or ss:// link");
+            println!("vpn list           list the servers (* is the chosen one)");
+            println!("vpn on [n]         connect through server n (vpn off disconnects)");
+            println!("vpn test [n]       measure the delay through server n");
+            println!("vpn status, vpn log");
+        }
+    }
+}
+
 fn fetch(address: &str) {
     if address.is_empty() {
         println!("usage: fetch <address>");

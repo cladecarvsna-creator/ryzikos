@@ -20,7 +20,7 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 
 use super::url::Url;
-use crate::net::{self, TcpStream};
+use crate::net::TcpStream;
 
 /// Pages and downloads bigger than this are refused, to leave memory.
 const MAX_BODY: usize = 40 * 1024 * 1024;
@@ -35,6 +35,8 @@ pub struct Response {
     pub disposition: String,
     /// The server's clock (the Date header), in Unix seconds.
     pub date: Option<i64>,
+    /// All the headers, names in lower case.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
@@ -50,16 +52,28 @@ pub fn get(url: &Url, form: Option<&str>) -> Result<Response, String> {
     }
 }
 
+/// Download `url` introducing ourselves as `agent` (VPN subscriptions
+/// answer differently for different apps).
+pub fn get_as(url: &Url, form: Option<&str>, agent: &str) -> Result<Response, String> {
+    let body = form.map(|f| ("application/x-www-form-urlencoded", f.as_bytes()));
+    request_as(if form.is_some() { "POST" } else { "GET" }, url, body, Some(agent))
+}
+
 /// Send a request with any method and an optional (content type, body).
-pub fn request(
+pub fn request(method: &str, url: &Url, body: Option<(&str, &[u8])>) -> Result<Response, String> {
+    request_as(method, url, body, None)
+}
+
+fn request_as(
     method: &str,
     url: &Url,
     mut body: Option<(&str, &[u8])>,
+    agent: Option<&str>,
 ) -> Result<Response, String> {
     let mut url = url.clone();
     let mut method = method.to_string();
     for _ in 0..MAX_REDIRECTS {
-        let raw = fetch_raw(&method, &url, body)?;
+        let raw = fetch_raw(&method, &url, body, agent)?;
         let head = parse_head(&raw).ok_or("bad reply from server")?;
         for c in &head.cookies {
             store_cookie(&url.host, c);
@@ -90,6 +104,7 @@ pub fn request(
             content_type: head.content_type,
             disposition: head.disposition,
             date: head.date,
+            headers: head.headers,
             body: data,
         });
     }
@@ -163,8 +178,7 @@ impl Drop for TlsLink {
 
 impl Link {
     fn open(url: &Url) -> Result<Link, String> {
-        let ip = net::resolve(&url.host)?;
-        let stream = TcpStream::connect(ip, url.port)?;
+        let stream = TcpStream::connect_host(&url.host, url.port)?;
         if !url.https {
             return Ok(Link::Plain(stream));
         }
@@ -262,6 +276,13 @@ fn pool_take(key: &str) -> Option<Link> {
     found
 }
 
+/// Close the kept connections (the VPN went on or off, so they lead
+/// the wrong way now).
+pub fn drop_pool() {
+    let old = core::mem::take(&mut *POOL.lock());
+    drop(old);
+}
+
 fn pool_put(key: String, link: Link) {
     let evicted = {
         let mut pool = POOL.lock();
@@ -275,7 +296,12 @@ fn pool_put(key: String, link: Link) {
     drop(evicted);
 }
 
-fn fetch_raw(method: &str, url: &Url, body: Option<(&str, &[u8])>) -> Result<Vec<u8>, String> {
+fn fetch_raw(
+    method: &str,
+    url: &Url,
+    body: Option<(&str, &[u8])>,
+    agent: Option<&str>,
+) -> Result<Vec<u8>, String> {
     log(&format!("{} ", method), &url.to_string());
     let host = if url.port == if url.https { 443 } else { 80 } {
         url.host.clone()
@@ -283,10 +309,13 @@ fn fetch_raw(method: &str, url: &Url, body: Option<(&str, &[u8])>) -> Result<Vec
         format!("{}:{}", url.host, url.port)
     };
     let mut request = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Mozilla/5.0 (EverOS; x86_64) EverBrowser/0.3\r\n\
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\n\
          Accept: text/html,application/xhtml+xml,*/*;q=0.8\r\nAccept-Language: ru,en;q=0.8\r\n\
          Accept-Encoding: identity\r\nConnection: keep-alive\r\n",
-        method, url.path, host
+        method,
+        url.path,
+        host,
+        agent.unwrap_or("Mozilla/5.0 (EverOS; x86_64) EverBrowser/0.3")
     );
     let cookie = cookies(&url.host);
     if !cookie.is_empty() {
@@ -395,6 +424,7 @@ struct Head {
     /// The server will close the connection after this reply.
     close: bool,
     date: Option<i64>,
+    headers: Vec<(String, String)>,
 }
 
 fn parse_head(data: &[u8]) -> Option<Head> {
@@ -414,12 +444,15 @@ fn parse_head(data: &[u8]) -> Option<Head> {
         cookies: Vec::new(),
         close: status_line.starts_with("HTTP/1.0"),
         date: None,
+        headers: Vec::new(),
     };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let value = value.trim();
+        head.headers
+            .push((name.trim().to_ascii_lowercase(), value.to_string()));
         match name.trim().to_ascii_lowercase().as_str() {
             "content-type" => head.content_type = value.to_ascii_lowercase(),
             "location" => head.location = Some(value.to_string()),
