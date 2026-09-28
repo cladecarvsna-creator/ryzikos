@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use ab_glyph::{point, Font as _, FontRef, PxScale, ScaleFont};
 
-use super::canvas::{Canvas, Color, Rect};
+use super::canvas::{Canvas, Color};
 use crate::sync::IrqMutex;
 
 /// A font face: bold, italic and monospace variants of DejaVu Sans.
@@ -179,17 +179,7 @@ pub fn draw(c: &mut Canvas, face: Face, size: f32, x: i32, baseline: i32, text: 
         let g = cache.glyph(face, size, ch);
         let gx = (pen + 8) / 16 + g.x as i32;
         let gy = baseline + g.y as i32;
-        let (w, h) = (g.w as i32, g.h as i32);
-        if w > 0 && c.visible(Rect::new(gx, gy, w, h)) {
-            for row in 0..h {
-                for col in 0..w {
-                    let a = g.coverage[(row * w + col) as usize] as i32;
-                    if a != 0 {
-                        c.blend_at(gx + col, gy + row, color, if a == 255 { 256 } else { a });
-                    }
-                }
-            }
-        }
+        c.draw_coverage(gx, gy, g.w as i32, g.h as i32, &g.coverage, color);
         pen += g.advance;
     }
     (pen + 8) / 16 - x
