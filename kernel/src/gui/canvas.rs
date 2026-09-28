@@ -226,11 +226,51 @@ impl<'a> Canvas<'a> {
             return;
         }
         let p = &mut self.pixels[y as usize * self.stride + x as usize];
-        *p = if a >= 256 {
-            c
-        } else {
-            mix(*p, c, (a * 255 / 256) as u32)
-        };
+        *p = blended(*p, c, a);
+    }
+
+    /// The columns `[x0, x1)` of buffer row `y` that may be drawn on, or
+    /// an empty range when the row is outside the clip. Loops find this
+    /// once per row instead of `blend` finding it for every pixel.
+    fn row_span(&self, y: i32) -> (i32, i32) {
+        if y < self.clip.y || y >= self.clip.bottom() {
+            return (0, 0);
+        }
+        self.span(y)
+    }
+
+    /// `blend` for the pixels of one row whose span is already known.
+    #[inline]
+    fn blend_in(&mut self, span: (i32, i32), x: i32, y: i32, c: Color, a: i32) {
+        if a > 0 && x >= span.0 && x < span.1 {
+            let p = &mut self.pixels[y as usize * self.stride + x as usize];
+            *p = blended(*p, c, a);
+        }
+    }
+
+    /// Blend `c` with coverage `a` over buffer columns `[x0, x1)` of row `y`.
+    fn blend_run(&mut self, x0: i32, x1: i32, y: i32, c: Color, a: i32) {
+        let (s0, s1) = self.row_span(y);
+        let (x0, x1) = (x0.max(s0), x1.min(s1));
+        if a <= 0 || x0 >= x1 {
+            return;
+        }
+        let row = y as usize * self.stride;
+        let run = &mut self.pixels[row + x0 as usize..row + x1 as usize];
+        if a >= 256 {
+            run.fill(c);
+            return;
+        }
+        // mix(p, c, t) with c's share worked out once for the whole run
+        let t = (a * 255 / 256) as u32;
+        let (cr, cg, cb) = ((c >> 16 & 0xff) * t, (c >> 8 & 0xff) * t, (c & 0xff) * t);
+        let s = 255 - t;
+        for p in run {
+            let q = *p;
+            *p = ((q >> 16 & 0xff) * s + cr) / 255 << 16
+                | ((q >> 8 & 0xff) * s + cg) / 255 << 8
+                | ((q & 0xff) * s + cb) / 255;
+        }
     }
 
     /// Mix `c` into the pixel at (`x`, `y`) with coverage `a` (0 to 256).
@@ -343,26 +383,44 @@ impl<'a> Canvas<'a> {
         if w == 0 || !self.visible(Rect::new(gx, gy, w, h)) {
             return true;
         }
-        let coverage = f.coverage(g);
+        self.draw_coverage(gx, gy, w, h, f.coverage(g), c);
+        true
+    }
+
+    /// Blend `c` through a `w` x `h` coverage map (0 to 255 per pixel)
+    /// with its corner at (`x`, `y`): how text is drawn.
+    pub fn draw_coverage(&mut self, x: i32, y: i32, w: i32, h: i32, coverage: &[u8], c: Color) {
+        if w <= 0 || !self.visible(Rect::new(x, y, w, h)) {
+            return;
+        }
         for row in 0..h {
+            let by = y + row + self.oy;
+            let span = self.row_span(by);
+            if span.0 >= span.1 {
+                continue;
+            }
             for col in 0..w {
                 let a = coverage[(row * w + col) as usize] as i32;
                 if a != 0 {
                     let a = if a == 255 { 256 } else { a };
-                    self.blend(gx + col + self.ox, gy + row + self.oy, c, a);
+                    self.blend_in(span, x + col + self.ox, by, c, a);
                 }
             }
         }
-        true
     }
 
     /// Draw text in a font and return its width in pixels.
     pub fn draw_text_in(&mut self, f: &Font, x: i32, y: i32, s: &str, c: Color) -> i32 {
         let mut pen = x * 16;
         for ch in s.chars() {
-            let fallback = if f.glyph(ch).is_some() { ch } else { '?' };
-            self.draw_glyph(f, (pen + 8) / 16, y, fallback, c);
-            pen += f.advance16(ch) as i32;
+            // one lookup per character: its glyph, or '?' for both
+            // drawing and advancing, as draw_glyph and advance16 do
+            let Some(g) = f.glyph(ch).or_else(|| f.glyph('?')) else {
+                continue;
+            };
+            let (gx, gy) = ((pen + 8) / 16 + g.x as i32, y + g.y as i32);
+            self.draw_coverage(gx, gy, g.w as i32, g.h as i32, f.coverage(g), c);
+            pen += g.advance as i32;
         }
         (pen + 8) / 16 - x
     }
@@ -412,12 +470,17 @@ impl<'a> Canvas<'a> {
             return;
         }
         for row in 0..h {
+            let by = y + row + self.oy;
+            let span = self.row_span(by);
+            if span.0 >= span.1 {
+                continue;
+            }
             for col in 0..w {
                 let p = src[(row * w + col) as usize];
                 let a = (p >> 24) as i32;
                 if a != 0 {
                     let a = if a == 255 { 256 } else { a };
-                    self.blend(x + col + self.ox, y + row + self.oy, p & 0xff_ffff, a);
+                    self.blend_in(span, x + col + self.ox, by, p & 0xff_ffff, a);
                 }
             }
         }
@@ -442,27 +505,18 @@ impl<'a> Canvas<'a> {
                 None
             };
             let Some(cy) = corner_cy else {
-                if alpha >= 256 {
-                    self.fill_rect(area.x - self.ox, y - self.oy, area.w, 1, c);
-                } else {
-                    for x in area.x..area.right() {
-                        self.blend(x, y, c, alpha);
-                    }
-                }
+                self.blend_run(area.x, area.right(), y, c, alpha);
                 continue;
             };
-            for x in area.x..area.right() {
-                let cx = if x < b.x + radius {
-                    b.x + radius
-                } else if x >= b.right() - radius {
-                    b.right() - radius
-                } else {
-                    self.blend(x, y, c, alpha);
-                    continue;
-                };
+            // the straight middle of the row in one go, then the corners
+            let (left, right) = (b.x + radius, b.right() - radius);
+            self.blend_run(area.x.max(left), area.right().min(right), y, c, alpha);
+            let span = self.row_span(y);
+            for x in (area.x..area.right().min(left)).chain(area.x.max(right)..area.right()) {
+                let cx = if x < left { left } else { right };
                 let d = distance256(2 * x + 1 - 2 * cx, 2 * y + 1 - 2 * cy);
                 let cover = (radius * 256 - d + 128).clamp(0, 256);
-                self.blend(x, y, c, cover * alpha / 256);
+                self.blend_in(span, x, y, c, cover * alpha / 256);
             }
         }
     }
@@ -515,10 +569,16 @@ impl<'a> Canvas<'a> {
         let area = outer.intersect(&self.clip);
         let inner = r.offset(self.ox, self.oy).inset(radius);
         for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                if inner.contains(x, y) {
-                    continue;
-                }
+            let (x0, x1) = self.row_span(y);
+            let (x0, x1) = (x0.max(area.x), x1.min(area.right()));
+            // the window covers the middle of the shadow: skip over it
+            let (skip0, skip1) = if !inner.is_empty() && y >= inner.y && y < inner.bottom() {
+                let skip0 = inner.x.clamp(x0, x1.max(x0));
+                (skip0, inner.right().clamp(skip0, x1.max(skip0)))
+            } else {
+                (x1, x1)
+            };
+            for x in (x0..skip0).chain(skip1..x1) {
                 // distance from the rounded rectangle, in 1/256 pixels
                 let dx = (s.x + radius - x).max(x - (s.right() - 1 - radius)).max(0);
                 let dy = (s.y + radius - y).max(y - (s.bottom() - 1 - radius)).max(0);
@@ -530,11 +590,8 @@ impl<'a> Canvas<'a> {
                 let t = 256 - (d.max(0) / spread).min(256);
                 let a = strength * t * t / 65536;
                 if a > 0 {
-                    let (x0, x1) = self.span(y);
-                    if y >= self.clip.y && y < self.clip.bottom() && x >= x0 && x < x1 {
-                        let p = &mut self.pixels[y as usize * self.stride + x as usize];
-                        *p = mix(*p, 0, a as u32);
-                    }
+                    let p = &mut self.pixels[y as usize * self.stride + x as usize];
+                    *p = mix(*p, 0, a as u32);
                 }
             }
         }
@@ -676,6 +733,16 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// A pixel `p` with `c` blended over it at coverage `a` (1 to 256).
+#[inline]
+fn blended(p: Color, c: Color, a: i32) -> Color {
+    if a >= 256 {
+        c
+    } else {
+        mix(p, c, (a * 255 / 256) as u32)
+    }
+}
+
 /// `mix` for whole buffers: red and blue share one multiply. `t` goes
 /// from 0 (all `a`) to 256 (all `b`).
 #[inline]
@@ -707,8 +774,10 @@ pub fn isqrt(n: u64) -> u64 {
     if n < 2 {
         return n;
     }
-    let mut x = n;
-    let mut y = x.div_ceil(2);
+    // start from a power of two at or above the root: a handful of steps
+    // instead of halving down from `n` (the answer is the same)
+    let mut x = 1u64 << (64 - (n - 1).leading_zeros()).div_ceil(2);
+    let mut y = (x + n / x) / 2;
     while y < x {
         x = y;
         y = (x + n / x) / 2;

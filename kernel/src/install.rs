@@ -20,15 +20,15 @@ pub const WELCOME: &str = "/boot/welcome.txt";
 /// How much room GRUB needs at the start of a disk, in sectors (the
 /// first sector and core.img), if the live CD brought it.
 pub fn boot_sectors() -> Option<u64> {
-    multiboot::module("core.img").map(|c| 1 + c.len().div_ceil(512) as u64)
+    multiboot::module_len("core.img").map(|len| 1 + len.div_ceil(512) as u64)
 }
 
 /// Whether this RyzikOS can install itself: started from the live CD,
 /// which brought the files.
 pub fn available() -> bool {
     multiboot::live()
-        && multiboot::module("kernel.gz").is_some()
-        && multiboot::module("boot.img").is_some()
+        && multiboot::module_len("kernel.gz").is_some()
+        && multiboot::module_len("boot.img").is_some()
         && boot_sectors().is_some()
 }
 

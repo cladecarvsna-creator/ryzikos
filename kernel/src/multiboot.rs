@@ -34,6 +34,12 @@ pub fn module(name: &str) -> Option<Vec<u8>> {
     MODULES.lock().iter().find(|(n, _)| n == name).map(|(_, d)| d.clone())
 }
 
+/// The size of a file GRUB loaded, without copying it: the live CD's
+/// kernel.gz is megabytes, and the launcher asks on every frame.
+pub fn module_len(name: &str) -> Option<usize> {
+    MODULES.lock().iter().find(|(n, _)| n == name).map(|(_, d)| d.len())
+}
+
 /// Started from the live CD (or USB stick) rather than an installed disk.
 pub fn live() -> bool {
     LIVE.load(core::sync::atomic::Ordering::Relaxed)

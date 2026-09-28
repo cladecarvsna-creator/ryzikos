@@ -33,8 +33,10 @@ $(RUST_LIB): FORCE
 
 FORCE:
 
+# --strip-debug: the kernel never reads its debug info, and a smaller
+# kernel.gz loads faster from a CD and downloads faster as an update
 $(KERNEL): $(ASM_OBJ) $(RUST_LIB) linker.ld
-	ld -n --gc-sections -z noexecstack --no-warn-rwx-segments -T linker.ld -o $@ $(ASM_OBJ) $(RUST_LIB)
+	ld -n --gc-sections --strip-debug -z noexecstack --no-warn-rwx-segments -T linker.ld -o $@ $(ASM_OBJ) $(RUST_LIB)
 	grub-file --is-x86-multiboot2 $@
 
 # GRUB for a hard disk RyzikOS is installed on: core.img goes in the

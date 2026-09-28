@@ -13,6 +13,10 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+# Each crate as one optimisation unit, so the drawing code in the big
+# gui module gets inlined across files. (LTO across crates would need
+# the standard library built with the kernel's small code model.)
+codegen-units = 1
 
 [dependencies]
 linked_list_allocator = "0.10"
