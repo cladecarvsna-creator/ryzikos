@@ -124,6 +124,9 @@ pub struct Transport {
     buf: Vec<u8>,
     send_ctr: crypto::Ctr,
     recv_ctr: crypto::Ctr,
+    /// The VPN's state when connecting: when it goes on or off, this
+    /// connection leads the wrong way and is dropped.
+    route: u64,
 }
 
 /// How long to wait for an answer.
@@ -152,6 +155,7 @@ impl Transport {
             buf: Vec::new(),
             send_ctr,
             recv_ctr,
+            route: crate::vpn::generation(),
         })
     }
 
@@ -165,6 +169,9 @@ impl Transport {
 
     /// A whole packet if one has arrived, without waiting.
     pub fn poll(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.route != crate::vpn::generation() {
+            return Err(Error::Net(String::from("the VPN was switched; reconnecting")));
+        }
         let mut chunk = [0u8; 4096];
         loop {
             if let Some(packet) = self.take_packet()? {

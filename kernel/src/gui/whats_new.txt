@@ -1,6 +1,3 @@
-Telegram shows photos and files in the chat. Click one to download it to Downloads and open it.
-Emoji are drawn as pictures, and the smiley next to the message box opens an emoji picker.
-Links in messages can be clicked: web pages open in the browser, @names and t.me links open the chat.
-Search finds people and channels on Telegram too. Channels you are not in can be read and joined.
-Click the chat's name at the top for its profile: its @name and link to copy, its description, Join or Leave.
-Right-click a message to copy its text or link, or to save its file.
+VPN: a new app that works like Happ. Paste the subscription address your VPN service gave you, or a vless://, trojan:// or ss:// link, pick a server and press the big button.
+It speaks VLESS with REALITY or TLS (with XTLS Vision too), Trojan and Shadowsocks, and shows each server's delay, your traffic and when the subscription ends.
+While the VPN is on, every program goes through it, the menu bar shows a green shield, and Quick settings has a VPN tile.

@@ -18,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::anim::ONE;
-use super::canvas::{Canvas, Rect};
+use super::canvas::{rgb, Canvas, Rect};
 use super::icons::{Pic, LARGE, MEDIUM};
 use super::popup::{Builder, Cmd};
 use super::search::{self, Search};
@@ -133,7 +133,9 @@ impl Desktop<'_> {
     pub(super) fn tray_rect(&self, i: usize) -> Rect {
         let (y, h) = (0, MENUBAR_H);
         let clock = Rect::new(self.width - 8 - 156, y, 156, h);
-        let quick = Rect::new(clock.x - 4 - 60, y, 60, h);
+        // the VPN's shield joins the network and volume icons while on
+        let quick_w = if self.tray.vpn { 86 } else { 60 };
+        let quick = Rect::new(clock.x - 4 - quick_w, y, quick_w, h);
         let layout = Rect::new(quick.x - 4 - 46, y, 46, h);
         match i {
             0 => layout,
@@ -643,6 +645,9 @@ impl Desktop<'_> {
         let y = quick.y + (quick.h - 16) / 2;
         tray::network_icon(c, quick.x + 10, y, self.tray.net, theme::text(), bg);
         tray::volume_icon(c, quick.x + 36, y, self.tray.volume, theme::text());
+        if self.tray.vpn {
+            tray::shield_icon(c, quick.x + 62, y - 1, rgb(0x1e, 0xa0, 0x5a), bg);
+        }
         let clock = self.tray_rect(2);
         let date_w = UI.width(self.date.as_str());
         let time_w = UI_BOLD.width(self.clock.as_str());

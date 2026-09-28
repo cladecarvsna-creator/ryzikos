@@ -87,6 +87,7 @@ pub enum Slider {
 pub enum Target {
     NetworkTile,
     LayoutTile,
+    VpnTile,
     Slider(Slider),
 }
 
@@ -97,6 +98,8 @@ pub struct Tray {
     pub brightness: i32,
     pub net: Net,
     pub address: StackString<20>,
+    /// The VPN is on.
+    pub vpn: bool,
 }
 
 impl Tray {
@@ -106,6 +109,7 @@ impl Tray {
             brightness: 100,
             net: Net::NoCard,
             address: StackString::new(),
+            vpn: false,
         }
     }
 
@@ -116,9 +120,12 @@ impl Tray {
         if net == Net::Online {
             address.push_str(&net::address().unwrap_or_default());
         }
-        let changed = net != self.net || address.as_str() != self.address.as_str();
+        let vpn = crate::vpn::is_on();
+        let changed =
+            net != self.net || address.as_str() != self.address.as_str() || vpn != self.vpn;
         self.net = net;
         self.address = address;
+        self.vpn = vpn;
         changed
     }
 
@@ -144,6 +151,7 @@ impl Tray {
         let targets = [
             (Target::NetworkTile, Self::tile(p, 0)),
             (Target::LayoutTile, Self::tile(p, 1)),
+            (Target::VpnTile, Self::tile(p, 2)),
             (
                 Target::Slider(Slider::Brightness),
                 Self::track(p, Slider::Brightness).inset(-14),
@@ -190,6 +198,7 @@ impl Tray {
         let tiles = [
             (Target::NetworkTile, online, "Ethernet"),
             (Target::LayoutTile, true, "Keyboard"),
+            (Target::VpnTile, self.vpn, "VPN"),
         ];
         for (i, (t, on, label)) in tiles.into_iter().enumerate() {
             let r = Self::tile(p, i as i32);
@@ -216,6 +225,7 @@ impl Tray {
             let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
             match t {
                 Target::NetworkTile => network_icon(c, cx - 8, cy - 8, self.net, ink, face),
+                Target::VpnTile => shield_icon(c, cx - 8, cy - 9, ink, face),
                 _ => c.text_centered_in(&UI_BOLD, r, layout_label(layout), ink),
             }
             c.text_centered(
@@ -280,6 +290,9 @@ impl Tray {
         );
         let mut status = StackString::<48>::new();
         status.push_str(self.net.label());
+        if self.vpn {
+            status.push_str(" via VPN");
+        }
         if !self.address.as_str().is_empty() {
             let _ = write!(status, " - {}", self.address.as_str());
         }
@@ -403,6 +416,22 @@ pub fn network_icon(c: &mut Canvas, x: i32, y: i32, net: Net, ink: Color, bg: Co
 }
 
 /// A speaker with one to three sound waves, or a cross when muted.
+/// A shield, 16 by 18 pixels: the VPN.
+pub fn shield_icon(c: &mut Canvas, x: i32, y: i32, ink: Color, bg: Color) {
+    for row in 0..18 {
+        // straight sides for the top half, then narrowing to a point
+        let inset = if row < 8 { 0 } else { (row - 8) * 8 / 10 };
+        c.fill_rect(x + inset, y + row, 16 - 2 * inset, 1, ink);
+    }
+    c.fill_rect(x, y, 2, 1, bg);
+    c.fill_rect(x + 14, y, 2, 1, bg);
+    // a check mark cut out of it
+    for k in 0..2 {
+        c.line(x + 4, y + 8 + k, x + 7, y + 11 + k, bg);
+        c.line(x + 7, y + 11 + k, x + 12, y + 5 + k, bg);
+    }
+}
+
 pub fn volume_icon(c: &mut Canvas, x: i32, y: i32, volume: i32, ink: Color) {
     c.fill_rect(x, y + 5, 4, 6, ink);
     c.fill_polygon(

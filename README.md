@@ -48,6 +48,34 @@ RyzikOS — любительская операционная система д�
   терминале, браузере, Telegram, настройках, калькуляторе и App Store
   открывает меню Cut, Copy, Paste, Select all.
 
+## VPN
+
+Приложение **VPN** (в лаунчере и в быстрых настройках, плитка VPN)
+работает как Happ или v2rayNG: вставьте адрес подписки, который дал ваш
+VPN-сервис (`https://...`, можно и `happ://add/https://...`), или ссылку
+`vless://`, `trojan://`, `ss://` и нажмите Add. RyzikOS скачает список
+серверов, покажет трафик и срок подписки и проверит задержку до каждого
+сервера. Выберите сервер и нажмите большую кнопку.
+
+Пока VPN включён, все программы (браузер, Telegram, App Store, обновления)
+ходят в интернет через сервер, а имена сайтов тоже узнаёт сервер, так что
+DNS-запросы не уходят в обычную сеть. Если сервер перестал отвечать,
+соединения не идут в обход него. В строке меню горит зелёный щит.
+
+- **Протоколы:** VLESS с REALITY или TLS, в том числе с flow
+  `xtls-rprx-vision` (так настроено большинство платных подписок), Trojan и
+  Shadowsocks (`aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`).
+  Для REALITY и Vision RyzikOS сам говорит TLS 1.3 и притворяется Chrome.
+- **Пока нет:** транспорты WebSocket, gRPC, XHTTP, VMess и Shadowsocks 2022.
+  Такие серверы видны в списке с пометкой «not supported».
+- **Клавиши:** Enter включает и выключает, стрелки выбирают сервер, Ctrl+V
+  добавляет ссылку из буфера, Ctrl+T проверяет задержки, F5 обновляет
+  подписки.
+- **Терминал:** `vpn add <адрес>`, `vpn list`, `vpn on [n]`, `vpn off`,
+  `vpn test [n]`, `vpn status`, `vpn log`.
+
+Подписки хранятся у каждого пользователя в `~/AppData/vpn.txt`.
+
 ## Live CD и установка
 
 ISO — это live CD: RyzikOS запускается прямо с диска или флешки, всё
@@ -254,6 +282,12 @@ make test   # загрузить без экрана и проверить ра�
 make clean  # удалить сборку (диск build/disk.img остаётся)
 ```
 
+Чтобы проверить VPN, запустите `python3 scripts/vpn-test-server.py путь/к/xray`
+и в терминале RyzikOS наберите `vpn probe 127.0.0.1:8124/probe` и
+`vpn add http://10.0.2.2:8124/sub`: появятся серверы VLESS REALITY, VLESS
+TLS, Trojan и Shadowsocks, а страница `http://127.0.0.1:8124/page.html`
+открывается только через VPN.
+
 Чтобы проверить App Store со своим каталогом, соберите с
 `RYZIKOS_CATALOG=http://10.0.2.2:8000/ make` и раздайте папку с
 `catalog.txt` и программами на порту 8000.
@@ -266,6 +300,7 @@ make clean  # удалить сборку (диск build/disk.img остаёт�
 | `kernel/src/gui/` | рабочий стол и программы: `mod.rs` (окна), `taskbar.rs` (док и строка меню), `start.rs` (лаунчер), `deskicons.rs` (значки), `explorer.rs`, `store.rs`, `browser.rs`, `photos.rs`, `video.rs`, `notepad.rs` и другие |
 | `kernel/src/fs/` | диски и файлы: `ata.rs` (IDE), `ahci.rs` (SATA), `drive.rs`, `fat.rs` (FAT32), `iso9660.rs` (CD), `mod.rs` (пути и монтирование) |
 | `kernel/src/net/`, `kernel/src/pci.rs` | сетевая карта e1000, TCP/IP, DHCP, DNS, шина PCI |
+| `kernel/src/vpn/` | VPN: подписки и ссылки (`link.rs`), TLS 1.3 с REALITY (`tls.rs`), XTLS Vision (`vision.rs`), Shadowsocks (`ss.rs`), VLESS и Trojan (`mod.rs`) |
 | `kernel/src/web/` | движок браузера: HTTP и HTTPS, DOM, CSS, раскладка, картинки, мост к JavaScript, каталог программ |
 | `kernel/src/js/`, `kernel/quickjs/` | движок JavaScript QuickJS |
 | `kernel/src/sound.rs` | звуковая карта ES1370 и сигнал громкости |
@@ -273,6 +308,7 @@ make clean  # удалить сборку (диск build/disk.img остаёт�
 | `programs/` | программы `.rzapp` и `catalog.txt` для App Store |
 | `iso/media/`, `scripts/gen-media.py` | фото и видео для CD |
 | `scripts/boot-test.sh` | автоматическая проверка загрузки в QEMU |
+| `scripts/vpn-test-server.py` | настоящий Xray с серверами всех протоколов для проверки VPN в QEMU |
 
 ## Лицензия
 

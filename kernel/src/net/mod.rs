@@ -380,7 +380,7 @@ fn lookup(host: &str) -> Result<Ipv4Address, String> {
     })
 }
 
-fn parse_ipv4(s: &str) -> Option<Ipv4Address> {
+pub fn parse_ipv4(s: &str) -> Option<Ipv4Address> {
     let mut parts = [0u8; 4];
     let mut n = 0;
     for part in s.split('.') {
@@ -393,13 +393,14 @@ fn parse_ipv4(s: &str) -> Option<Ipv4Address> {
     (n == 4).then(|| Ipv4Address::new(parts[0], parts[1], parts[2], parts[3]))
 }
 
-/// A TCP connection. Reads and writes block (polling the stack) with a
-/// timeout. Dropping it closes the connection.
-pub struct TcpStream {
+/// A TCP connection on the network card itself. Reads and writes block
+/// (polling the stack) with a timeout. Dropping it closes the connection.
+/// Programs use [`TcpStream`], which goes through the VPN when it is on.
+pub struct Socket {
     handle: SocketHandle,
 }
 
-impl TcpStream {
+impl Socket {
     pub fn connect(ip: Ipv4Address, port: u16) -> Result<Self, String> {
         wait_configured()?;
         let handle = {
@@ -425,7 +426,7 @@ impl TcpStream {
             }
             handle
         };
-        let stream = TcpStream { handle };
+        let stream = Socket { handle };
         wait("connecting", |s| {
             let socket = s.sockets.get_mut::<tcp::Socket>(handle);
             if socket.may_send() {
@@ -500,13 +501,80 @@ impl TcpStream {
     }
 }
 
-impl Drop for TcpStream {
+impl Drop for Socket {
     fn drop(&mut self) {
         let mut guard = STACK.lock();
         if let Some(s) = guard.as_mut() {
             s.sockets.get_mut::<tcp::Socket>(self.handle).abort();
             s.poll();
             s.sockets.remove(self.handle);
+        }
+    }
+}
+
+/// Where a connection goes: an address, or a name the VPN server looks up.
+#[derive(Clone)]
+pub enum Host {
+    Ip(Ipv4Address),
+    Name(String),
+}
+
+/// A TCP connection for programs: straight from the network card, or
+/// through the VPN server while the VPN is on. Dropping it closes it.
+pub struct TcpStream(Conn);
+
+enum Conn {
+    Direct(Socket),
+    Vpn(Box<crate::vpn::Tunnel>),
+}
+
+impl TcpStream {
+    pub fn connect(ip: Ipv4Address, port: u16) -> Result<Self, String> {
+        Self::open(Host::Ip(ip), port)
+    }
+
+    /// Connect to a host by name. With the VPN on, the VPN server looks
+    /// the name up, so nothing about it goes out on this network.
+    pub fn connect_host(host: &str, port: u16) -> Result<Self, String> {
+        match parse_ipv4(host) {
+            Some(ip) => Self::open(Host::Ip(ip), port),
+            None => Self::open(Host::Name(String::from(host)), port),
+        }
+    }
+
+    fn open(host: Host, port: u16) -> Result<Self, String> {
+        if let Some(server) = crate::vpn::route() {
+            let tunnel = crate::vpn::Tunnel::open(&server, &host, port)?;
+            return Ok(TcpStream(Conn::Vpn(Box::new(tunnel))));
+        }
+        let ip = match host {
+            Host::Ip(ip) => ip,
+            Host::Name(name) => resolve(&name)?,
+        };
+        Ok(TcpStream(Conn::Direct(Socket::connect(ip, port)?)))
+    }
+
+    /// Read some bytes; 0 means the other side closed the connection.
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        match &mut self.0 {
+            Conn::Direct(s) => s.read(buf),
+            Conn::Vpn(t) => t.read(buf),
+        }
+    }
+
+    /// Read what has arrived without waiting: `Ok(None)` if nothing has
+    /// yet, `Ok(Some(0))` if the other side closed the connection.
+    pub fn try_read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, String> {
+        match &mut self.0 {
+            Conn::Direct(s) => s.try_read(buf),
+            Conn::Vpn(t) => t.try_read(buf),
+        }
+    }
+
+    pub fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
+        match &mut self.0 {
+            Conn::Direct(s) => s.write_all(data),
+            Conn::Vpn(t) => t.write_all(data),
         }
     }
 }

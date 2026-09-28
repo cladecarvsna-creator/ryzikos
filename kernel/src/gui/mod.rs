@@ -53,6 +53,7 @@ mod text;
 mod theme;
 mod tray;
 mod video;
+mod vpn;
 mod wallpaper;
 #[rustfmt::skip]
 pub mod webfont;
@@ -143,9 +144,10 @@ pub enum App {
     Installer,
     Welcome,
     Telegram,
+    Vpn,
 }
 
-const APPS: [App; 16] = [
+const APPS: [App; 17] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -162,6 +164,7 @@ const APPS: [App; 16] = [
     App::Installer,
     App::Welcome,
     App::Telegram,
+    App::Vpn,
 ];
 
 impl App {
@@ -188,6 +191,7 @@ impl App {
             App::Welcome if welcome::news() => "What's new",
             App::Welcome => "Welcome",
             App::Telegram => "Telegram",
+            App::Vpn => "VPN",
         }
     }
 
@@ -209,6 +213,7 @@ impl App {
             App::Installer => (installer::CLIENT_W, installer::CLIENT_H),
             App::Welcome => (welcome::CLIENT_W, welcome::CLIENT_H),
             App::Telegram => (telegram::CLIENT_W, telegram::CLIENT_H),
+            App::Vpn => (vpn::CLIENT_W, vpn::CLIENT_H),
         }
     }
 
@@ -231,6 +236,7 @@ impl App {
             App::Installer => "installer",
             App::Welcome => "welcome",
             App::Telegram => "telegram",
+            App::Vpn => "vpn",
         }
     }
 
@@ -257,6 +263,7 @@ impl App {
             App::Installer => "install setup disk live установить установка диск",
             App::Welcome => "welcome start tips get started добро пожаловать приветствие",
             App::Telegram => "messenger chat телеграм телеграмм мессенджер чат",
+            App::Vpn => "vpn proxy vless reality trojan shadowsocks happ впн прокси хапп обход",
         }
     }
 
@@ -278,6 +285,7 @@ impl App {
             App::Installer => (560, 120),
             App::Welcome => (580, 130),
             App::Telegram => (380, 90),
+            App::Vpn => (460, 100),
         }
     }
 
@@ -302,6 +310,7 @@ fn has_edit_menu(app: App) -> bool {
             | App::Browser
             | App::Program
             | App::Telegram
+            | App::Vpn
             | App::Settings
             | App::Calculator
             | App::Store
@@ -599,6 +608,7 @@ pub struct Desktop<'a> {
     about: about::About,
     installer: Box<installer::Installer>,
     telegram: Box<telegram::Telegram>,
+    vpn: Box<vpn::Vpn>,
     welcome: welcome::Welcome,
     /// The window the mouse was last over, for hover highlights.
     hover_app: Option<App>,
@@ -734,6 +744,7 @@ impl<'a> Desktop<'a> {
             about: about::About::new(),
             installer: Box::new(installer::Installer::new()),
             telegram: Box::new(telegram::Telegram::new()),
+            vpn: Box::new(vpn::Vpn::new()),
             welcome: welcome::Welcome::new(),
             hover_app: None,
             pins: taskbar::DEFAULT_PINS.to_vec(),
@@ -1264,6 +1275,9 @@ impl<'a> Desktop<'a> {
         if app == App::Telegram {
             self.telegram.start();
         }
+        if app == App::Vpn {
+            self.vpn.start();
+        }
         if app == App::Explorer {
             self.explorer.start();
             self.stale[app.index()] = true;
@@ -1614,6 +1628,7 @@ impl<'a> Desktop<'a> {
             App::Program => self.program.on_key(key),
             App::Installer => self.installer.on_key(key),
             App::Telegram => self.telegram.on_key(key),
+            App::Vpn => self.vpn.on_key(key),
             App::Welcome => self.welcome.on_key(key),
             App::About | App::TaskManager => false,
         };
@@ -1710,6 +1725,7 @@ impl<'a> Desktop<'a> {
                 Some(App::Store) => self.store.on_wheel(clicks),
                 Some(App::Program) => self.program.on_wheel(clicks),
                 Some(App::Telegram) => self.telegram.on_wheel(clicks),
+                Some(App::Vpn) => self.vpn.on_wheel(clicks),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -1816,6 +1832,7 @@ impl<'a> Desktop<'a> {
             App::Store => self.store.on_hover(x, y),
             App::Program => self.program.on_hover(x, y),
             App::Telegram => self.telegram.on_hover(x, y),
+            App::Vpn => self.vpn.on_hover(x, y),
             _ => false,
         }
     }
@@ -2137,6 +2154,7 @@ impl<'a> Desktop<'a> {
             App::Program => self.program.on_mouse(ev),
             App::Installer => self.installer.on_mouse(ev),
             App::Telegram => self.telegram.on_mouse(ev),
+            App::Vpn => self.vpn.on_mouse(ev),
             App::Welcome => self.welcome.on_mouse(ev),
             App::Terminal => false,
         };
@@ -2206,6 +2224,10 @@ impl<'a> Desktop<'a> {
     fn quick_click(&mut self, r: Rect, x: i32, y: i32) {
         match self.tray.target_at(r, x, y) {
             Some(tray::Target::LayoutTile) => self.toggle_layout = true,
+            Some(tray::Target::VpnTile) => {
+                self.close_panel();
+                self.open(App::Vpn);
+            }
             Some(tray::Target::NetworkTile) => {
                 // start the network if nothing has yet
                 crate::net::init();
@@ -2389,6 +2411,7 @@ impl<'a> Desktop<'a> {
                         self.telegram.draw(&mut c, focused, self.cursor_on)
                     }
                     App::Welcome => self.welcome.draw(&mut c),
+                    App::Vpn => self.vpn.draw(&mut c, focused && self.cursor_on),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
@@ -3086,6 +3109,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if desk.telegram.tick() {
             desk.damage_client(App::Telegram);
         }
+        if (desk.vpn.busy() || desk.windows[App::Vpn.index()].open) && desk.vpn.tick() {
+            desk.damage_client(App::Vpn);
+        }
         if desk.windows[App::TaskManager.index()].open && desk.taskmgr.tick() {
             desk.damage_client(App::TaskManager);
         }
@@ -3120,7 +3146,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
                 let r = desk.icon_rect(*i).inset(-8);
                 desk.damage(r);
             } else if let Some(
-                app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram),
+                app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram | App::Vpn),
             ) = desk.focused
             {
                 // the text caret blinks
