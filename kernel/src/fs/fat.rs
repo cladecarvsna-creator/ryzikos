@@ -832,6 +832,49 @@ impl Volume {
         Ok((self.chain(e.cluster), e.size as u64))
     }
 
+    /// The disk sectors that hold the first `count` sectors of a file, in
+    /// order, for writing it later without the file system: the crash
+    /// report is written this way while the system is stopping.
+    pub fn file_sectors(&mut self, path: &str, count: usize) -> Result<Vec<u64>, Error> {
+        let (chain, size) = self.locate(path)?;
+        if (size as usize) < count * SECTOR {
+            return Err(Error::Io);
+        }
+        let per = self.cluster_bytes / SECTOR;
+        (0..count)
+            .map(|i| {
+                let c = *chain.get(i / per).ok_or(Error::Io)?;
+                Ok(self.cluster_lba(c) + (i % per) as u64)
+            })
+            .collect()
+    }
+
+    /// Read single sectors straight from the disk. Only for the panic path.
+    pub fn read_raw(&mut self, lbas: &[u64], buf: &mut [u8]) -> Result<(), Error> {
+        if let Device::Disk(d) = &mut self.dev {
+            d.recover();
+        }
+        for (lba, sector) in lbas.iter().zip(buf.chunks_mut(SECTOR)) {
+            self.dev.read(*lba, sector)?;
+        }
+        Ok(())
+    }
+
+    /// Write single sectors straight to the disk, after stopping whatever
+    /// command the disk was left in the middle of. Only for the panic path.
+    pub fn write_raw(&mut self, lbas: &[u64], data: &[u8]) -> Result<(), Error> {
+        if let Device::Disk(d) = &mut self.dev {
+            d.recover();
+        }
+        for (lba, sector) in lbas.iter().zip(data.chunks(SECTOR)) {
+            if sector.len() != SECTOR {
+                break;
+            }
+            self.dev.write(*lba, sector)?;
+        }
+        self.dev.flush()
+    }
+
     /// Read `buf.len()` bytes from `offset` into a file that `open` found.
     /// Clusters that follow each other on the disk are read in one go.
     pub fn read_at(&mut self, chain: &[u32], offset: u64, buf: &mut [u8]) -> Result<(), Error> {

@@ -19,6 +19,7 @@
 mod about;
 mod anim;
 mod archiver;
+mod crashinfo;
 mod browser;
 mod calc;
 mod canvas;
@@ -51,7 +52,7 @@ mod store;
 mod taskbar;
 mod taskmgr;
 mod terminal;
-mod text;
+pub(crate) mod text;
 mod theme;
 mod tray;
 mod video;
@@ -171,9 +172,11 @@ pub enum App {
     Telegram,
     Vpn,
     Archiver,
+    /// "Why did my computer restart?" after a crash.
+    Crash,
 }
 
-const APPS: [App; 18] = [
+const APPS: [App; 19] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -192,6 +195,7 @@ const APPS: [App; 18] = [
     App::Telegram,
     App::Vpn,
     App::Archiver,
+    App::Crash,
 ];
 
 impl App {
@@ -220,6 +224,7 @@ impl App {
             App::Telegram => "Telegram",
             App::Vpn => "VPN",
             App::Archiver => "Archiver",
+            App::Crash => "Отчёт о сбое",
         }
     }
 
@@ -244,6 +249,7 @@ impl App {
             App::Telegram => (telegram::CLIENT_W, telegram::CLIENT_H),
             App::Vpn => (vpn::CLIENT_W, vpn::CLIENT_H),
             App::Archiver => (archiver::CLIENT_W, archiver::CLIENT_H),
+            App::Crash => (crashinfo::CLIENT_W, crashinfo::CLIENT_H),
         }
     }
 
@@ -252,7 +258,12 @@ impl App {
     fn resizable(self) -> bool {
         !matches!(
             self,
-            App::Calculator | App::About | App::Installer | App::Welcome | App::Paint
+            App::Calculator
+                | App::About
+                | App::Installer
+                | App::Welcome
+                | App::Paint
+                | App::Crash
         )
     }
 
@@ -297,6 +308,7 @@ impl App {
             App::Telegram => "telegram",
             App::Vpn => "vpn",
             App::Archiver => "archiver",
+            App::Crash => "crash",
         }
     }
 
@@ -325,6 +337,7 @@ impl App {
             App::Telegram => "messenger chat телеграм телеграмм мессенджер чат",
             App::Vpn => "vpn proxy vless reality trojan shadowsocks happ впн прокси хапп обход",
             App::Archiver => "archive zip unzip rar 7zip winrar tar gz compress extract pack архив архиватор зип распаковать сжать упаковать",
+            App::Crash => "crash report restart blue screen bsod error panic why сбой отчёт ошибка синий экран смерти почему перезагрузился перезагрузка",
         }
     }
 
@@ -348,6 +361,7 @@ impl App {
             App::Telegram => (380, 90),
             App::Vpn => (460, 100),
             App::Archiver => (400, 120),
+            App::Crash => (560, 150),
         }
     }
 
@@ -682,6 +696,7 @@ pub struct Desktop<'a> {
     store: Box<store::Store>,
     taskmgr: Box<taskmgr::TaskManager>,
     archiver: Box<archiver::Archiver>,
+    crash: crashinfo::CrashInfo,
     /// The window a program runs in.
     program: Box<browser::Browser>,
     /// Its title when last drawn, to notice when the title bar changes.
@@ -830,6 +845,7 @@ impl<'a> Desktop<'a> {
             store: Box::new(store::Store::new()),
             taskmgr: Box::new(taskmgr::TaskManager::new()),
             archiver: Box::new(archiver::Archiver::new()),
+            crash: crashinfo::CrashInfo::new(),
             program: Box::new(browser::Browser::program()),
             program_title: String::new(),
             video: Box::new(video::Video::new()),
@@ -1113,6 +1129,10 @@ impl<'a> Desktop<'a> {
             // the first sign-in after an update: what changed
             welcome::show_news(true);
             self.open(App::Welcome);
+        }
+        // the last run ended in a blue screen: say why
+        if crate::crash::take_pending() {
+            self.open(App::Crash);
         }
     }
 
@@ -1398,6 +1418,9 @@ impl<'a> Desktop<'a> {
         }
         if app == App::Store {
             self.store.start();
+        }
+        if app == App::Crash {
+            self.crash.start();
         }
         if app == App::Archiver {
             self.archiver.start();
@@ -1928,6 +1951,7 @@ impl<'a> Desktop<'a> {
             App::Vpn => self.vpn.on_key(key),
             App::Archiver => self.archiver.on_key(key),
             App::Welcome => self.welcome.on_key(key),
+            App::Crash => self.crash.on_key(key),
             App::About | App::TaskManager => false,
         };
         if changed {
@@ -2523,6 +2547,7 @@ impl<'a> Desktop<'a> {
             App::Vpn => self.vpn.on_mouse(ev),
             App::Archiver => self.archiver.on_mouse(ev),
             App::Welcome => self.welcome.on_mouse(ev),
+            App::Crash => self.crash.on_mouse(ev),
             App::Terminal => false,
         };
         if core::mem::take(&mut self.settings.switch_layout) {
@@ -2783,6 +2808,7 @@ impl<'a> Desktop<'a> {
                         self.telegram.draw(&mut c, focused, self.cursor_on)
                     }
                     App::Welcome => self.welcome.draw(&mut c),
+                    App::Crash => self.crash.draw(&mut c),
                     App::Vpn => self.vpn.draw(&mut c, focused && self.cursor_on),
                     App::Archiver => self.archiver.draw(&mut c, focused && self.cursor_on),
                     App::Browser => self.browser.draw(&mut c),
@@ -3597,6 +3623,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             desk.damage_client(App::Terminal);
         }
         desk.login.layout = desk.layout.name();
+        crate::crash::set_app(desk.focused.map_or("", App::title));
         desk.tick();
         let on_desktop = matches!(desk.phase, Phase::Desktop);
         let now = interrupts::ticks();

@@ -568,6 +568,43 @@ impl File {
     }
 }
 
+/// The disk sectors holding the first `count` sectors of a file on the
+/// system disk, for [`panic_write`]. Only a real disk has them.
+pub fn file_sectors(path: &str, count: usize) -> Result<Vec<u64>, Error> {
+    if storage() != Storage::Disk {
+        return Err(Error::NoDisk);
+    }
+    with(|v| v.file_sectors(path, count))
+}
+
+/// Read sectors that [`file_sectors`] found, from the panic handler.
+///
+/// # Safety
+/// As for [`panic_write`].
+pub unsafe fn panic_read(lbas: &[u64], buf: &mut [u8]) -> bool {
+    VOLUME.force_unlock();
+    let mut volume = VOLUME.lock();
+    match volume.as_mut() {
+        Some(v) => v.read_raw(lbas, buf).is_ok(),
+        None => false,
+    }
+}
+
+/// Write sectors that [`file_sectors`] found, from the panic handler.
+/// Whoever held the system disk has stopped for good, so its lock is
+/// taken over; the file system's tables are not touched, only the data.
+///
+/// # Safety
+/// Only while the system is stopping: nothing else may use the disk.
+pub unsafe fn panic_write(lbas: &[u64], data: &[u8]) -> bool {
+    VOLUME.force_unlock();
+    let mut volume = VOLUME.lock();
+    match volume.as_mut() {
+        Some(v) => v.write_raw(lbas, data).is_ok(),
+        None => false,
+    }
+}
+
 /// Create or replace a file.
 pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     changed(on_volume(path, |v, p| v.write(p, data)))

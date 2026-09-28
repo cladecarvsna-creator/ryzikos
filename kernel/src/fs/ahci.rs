@@ -295,6 +295,14 @@ impl Drive {
         self.set(P_CMD, self.reg(P_CMD) | CMD_ST);
     }
 
+    /// A command still in flight was cut off: stop and restart the port
+    /// so slot 0 is free again.
+    pub fn recover(&mut self) {
+        if self.reg(P_CI) & 1 != 0 || self.reg(P_TFD) & 0x88 != 0 {
+            self.restart();
+        }
+    }
+
     pub fn sectors(&self) -> u64 {
         self.sectors
     }

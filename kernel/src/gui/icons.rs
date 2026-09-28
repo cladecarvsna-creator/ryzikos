@@ -81,6 +81,8 @@ fn file(app: App) -> Option<&'static [u8]> {
         App::Telegram => include_bytes!("../../assets/icons/telegram.png"),
         App::Vpn => include_bytes!("../../assets/icons/vpn.bmp"),
         App::Archiver => include_bytes!("../../assets/icons/archiver.bmp"),
+        // drawn: see draw_icon
+        App::Crash => return None,
     })
 }
 
@@ -675,6 +677,16 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.fill_rect(cx - 11, cy - 7, 22, 1, line);
             c.fill_rect(cx - 11, cy + 7, 22, 1, line);
             c.outline_round(tile, 8, rgb(0x0c, 0x40, 0xa0));
+        }
+        App::Crash => {
+            // a sad face on the blue of the blue screen
+            {
+                let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
+                s.clip_round(tile, 8);
+                s.vertical_gradient(tile, rgb(0x2a, 0x6c, 0xe8), rgb(0x0c, 0x3c, 0xa8));
+            }
+            c.draw_text_in(&super::text::TITLE, x + 13, y + 12, ":(", rgb(0xff, 0xff, 0xff));
+            c.outline_round(tile, 8, rgb(0x08, 0x2c, 0x80));
         }
         // these have pictures, so they are never drawn
         App::Settings | App::About => c.fill_round(tile, 8, rgb(0x80, 0x80, 0x88)),

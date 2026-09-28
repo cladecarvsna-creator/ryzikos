@@ -154,7 +154,8 @@ impl Shell {
                 println!("  wallpaper <picture> or 'wallpaper next' changes the background");
                 println!("  restart restart the computer; 'shutdown' turns it off");
                 println!("  colors  show the text colours");
-                println!("  panic   test the kernel panic screen");
+                println!("  panic   show the blue screen and restart; 'panic memory' makes a CPU fault");
+                println!("  crash   why the computer restarted: the last crash report");
                 println!("Keys: Alt+Shift switches EN/RU, Up recalls the last command.");
             }
             "clear" => CONSOLE.lock().clear(),
@@ -399,7 +400,25 @@ impl Shell {
                     println!("Shut down works on the desktop.");
                 }
             }
-            "panic" => panic!("panic requested from the shell"),
+            "panic" => match args.trim() {
+                "memory" => {
+                    // above the 4 GiB the boot code maps: a page fault
+                    let bad = 0x0000_1000_0000_0000 as *const u64;
+                    let v = unsafe { bad.read_volatile() };
+                    println!("{}", v);
+                }
+                _ => {
+                    crate::crash::manual();
+                    panic!("panic requested from the shell");
+                }
+            },
+            "crash" => match crate::crash::Report::last() {
+                Some(r) => {
+                    print!("{}", r.text());
+                    open(App::Crash);
+                }
+                None => println!("No crash report: RyzikOS has not crashed on this disk."),
+            },
             _ => console::print_colored(
                 Color::LightRed,
                 format_args!("unknown command: {} (try 'help')\n", command),

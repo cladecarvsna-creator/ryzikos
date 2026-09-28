@@ -242,6 +242,14 @@ impl Console {
         self.changed = true;
     }
 
+    /// The framebuffer, whether the console or the desktop draws on it.
+    pub fn framebuffer(&self) -> Option<Framebuffer> {
+        match self.surface {
+            Surface::Graphics(fb) | Surface::Offscreen(fb) => Some(fb),
+            _ => None,
+        }
+    }
+
     /// Take the screen back from the desktop, for the panic screen.
     pub fn reattach(&mut self) {
         if let Surface::Offscreen(fb) = self.surface {

@@ -41,6 +41,15 @@ impl Disk {
         }
     }
 
+    /// Get the disk ready for a new command even if the last one was cut
+    /// off halfway, as when the kernel stopped in the middle of it.
+    pub fn recover(&mut self) {
+        match self {
+            Disk::Ide(a) => a.recover(),
+            Disk::Sata(s) => s.recover(),
+        }
+    }
+
     pub fn model(&self) -> &str {
         match self {
             Disk::Ide(a) => &a.model,

@@ -223,6 +223,21 @@ impl Ata {
         Ok(())
     }
 
+    /// A drive that is busy or still wants data was cut off in the middle
+    /// of a command: reset the channel so it takes a new one.
+    pub fn recover(&mut self) {
+        if self.status() & (BSY | DRQ) == 0 {
+            return;
+        }
+        unsafe {
+            outb(self.control, 0x04); // software reset
+            self.delay();
+            outb(self.control, 0x00);
+        }
+        self.delay();
+        let _ = self.wait_not_busy();
+    }
+
     /// Ask the drive to put its write cache on the disk.
     pub fn flush(&mut self) -> Result<(), IoError> {
         self.wait_not_busy()?;
