@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod archive;
 mod console;
+mod crash;
 mod fiber;
 mod font;
 mod framebuffer;
@@ -64,6 +65,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     interrupts::enable();
     fs::init();
     update::clean_up();
+    crash::init();
     let sound = sound::init();
 
     match &boot.framebuffer {
@@ -87,7 +89,6 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
         Some(label) => println!("Disc:      {} in the drive, its files are at /Disc", label),
         None => println!("Disc:      none"),
     }
-    println!("Привет! Кириллица тоже работает.");
     println!();
     println!("EverOS: kernel started");
     println!("Type 'help' for a list of commands.");
@@ -219,30 +220,8 @@ impl<const N: usize> Write for StackString<N> {
     }
 }
 
-fn halt() -> ! {
-    loop {
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
-    }
-}
-
+/// The blue screen: see crash.rs.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    interrupts::disable();
-    // Whoever held the console will never run again.
-    unsafe { CONSOLE.force_unlock() };
-    let mut con = CONSOLE.lock();
-    con.reattach();
-    // start a fresh line before switching colours, so a scroll does not
-    // fill the new line with the panic background
-    con.set_color(Color::LightRed, Color::Black);
-    let _ = writeln!(con);
-    con.set_color(Color::White, Color::Red);
-    let _ = write!(con, " KERNEL PANIC ");
-    con.set_color(Color::LightRed, Color::Black);
-    let _ = writeln!(con, " {}", info.message());
-    if let Some(location) = info.location() {
-        let _ = writeln!(con, " at {}:{}", location.file(), location.line());
-    }
-    let _ = writeln!(con, " The system is halted.");
-    halt()
+    crash::on_panic(info)
 }

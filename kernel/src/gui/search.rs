@@ -561,7 +561,7 @@ impl Search {
             theme::text(),
         );
         let lines = [
-            "Type a name. Russian names of apps work too, like \"блокнот\".",
+            "Type the name of an app, file or setting.",
             "Tab switches between All, Apps, Documents and Folders.",
         ];
         for (k, l) in lines.into_iter().enumerate() {

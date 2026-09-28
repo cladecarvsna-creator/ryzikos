@@ -250,4 +250,24 @@ wait_for "desktops: switched to Desktop 1" || fail "Win+Ctrl+Left did not switch
 type_keys meta_l-tab
 wait_for "desktops: task view" || fail "Win+Tab did not open Task View"
 echo "virtual desktops and Task View work"
+
+# the blue screen: a panic saves a report on the disk and restarts (QEMU
+# quits on the restart), and the next sign-in says why it restarted
+type_keys esc
+sleep 1
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
+type_keys p a n i c ret
+wait_for "bsod: PANIC_REQUESTED" || fail "panic did not show the blue screen"
+wait_for "crash: report saved to the disk" || fail "the blue screen did not save the crash report"
+type_keys ret
+wait_for "crash: restarting" || fail "a key did not restart from the blue screen"
+wait "$qemu" 2> /dev/null
+echo "panic shows the blue screen and saves a report"
+boot disk
+wait_for "crash: the last run stopped with PANIC_REQUESTED" || fail "the crash report was not found after restarting"
+sign_in
+wait_for "crash: showing the report, PANIC_REQUESTED" || fail "the crash report window did not open"
+echo "after the restart, the crash report explains what happened"
 echo "boot test passed"

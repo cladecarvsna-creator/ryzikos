@@ -270,9 +270,12 @@ extern "C" fn interrupt_dispatch(frame: &mut InterruptFrame) {
 
 fn exception(frame: &InterruptFrame) -> ! {
     let name = EXCEPTION_NAMES[frame.vector as usize];
+    let mut cr2 = 0;
     if frame.vector == 14 {
-        let cr2: u64;
         unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
+    }
+    crate::crash::exception(frame.vector, frame.rip, cr2, frame.error_code);
+    if frame.vector == 14 {
         panic!(
             "CPU exception: {} at rip={:#x}, address={:#x}, error={:#x}",
             name, frame.rip, cr2, frame.error_code
