@@ -83,6 +83,35 @@ pub fn now_ms() -> i64 {
     BASE.load(Ordering::Relaxed) + elapsed * 1000 / interrupts::TIMER_HZ as i64
 }
 
+/// Seconds to add to [`now_ms`] for the real (UTC) time. A PC's clock
+/// usually holds local time, hours off, and Telegram ignores messages
+/// whose time is more than half a minute ahead or five minutes behind,
+/// so before its first message we ask a web server what time it is.
+pub fn clock_offset() -> i64 {
+    use core::sync::atomic::{AtomicI64, Ordering};
+    static OFFSET: AtomicI64 = AtomicI64::new(i64::MIN);
+    let known = OFFSET.load(Ordering::Relaxed);
+    if known != i64::MIN {
+        return known;
+    }
+    super::client::log("checking the time");
+    for url in [
+        "http://www.google.com/generate_204",
+        "https://api.github.com/zen",
+    ] {
+        let Some(u) = crate::web::url::Url::parse(url) else {
+            continue;
+        };
+        if let Ok(Some(utc)) = crate::web::http::get(&u, None).map(|r| r.date) {
+            let offset = utc - now_ms() / 1000;
+            super::client::log(&alloc::format!("this PC's clock is {} s off", -offset));
+            OFFSET.store(offset, Ordering::Relaxed);
+            return offset;
+        }
+    }
+    0
+}
+
 // ---- transport ---------------------------------------------------------------------
 
 /// TCP with the "intermediate" framing (a 4-byte length before every
@@ -257,7 +286,7 @@ pub struct NewKey {
 /// are RSA keys to trust besides Telegram's own.
 pub fn create_key(t: &mut Transport, dc: i32, extra_keys: &[(u64, Vec<u8>)]) -> Result<NewKey> {
     let mut msg_id = MsgIds::default();
-    let offset = 0;
+    let offset = clock_offset();
 
     // 1. ask for pq
     let nonce: [u8; 16] = crypto::random_array();

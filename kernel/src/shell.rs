@@ -240,6 +240,14 @@ impl Shell {
                             crate::serial::write_str("\ntelegram: self-test FAILED\n");
                         }
                     }
+                } else if args.trim() == "log" {
+                    let lines = crate::tg::client::recent_log();
+                    if lines.is_empty() {
+                        println!("Telegram has not done anything yet.");
+                    }
+                    for l in lines {
+                        println!("{}", l);
+                    }
                 } else {
                     open(App::Telegram);
                 }

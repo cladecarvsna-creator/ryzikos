@@ -33,6 +33,8 @@ pub struct Response {
     pub content_type: String,
     /// The Content-Disposition header: "attachment" asks for a download.
     pub disposition: String,
+    /// The server's clock (the Date header), in Unix seconds.
+    pub date: Option<i64>,
     pub body: Vec<u8>,
 }
 
@@ -87,6 +89,7 @@ pub fn request(
             status: head.status,
             content_type: head.content_type,
             disposition: head.disposition,
+            date: head.date,
             body: data,
         });
     }
@@ -391,6 +394,7 @@ struct Head {
     cookies: Vec<String>,
     /// The server will close the connection after this reply.
     close: bool,
+    date: Option<i64>,
 }
 
 fn parse_head(data: &[u8]) -> Option<Head> {
@@ -409,6 +413,7 @@ fn parse_head(data: &[u8]) -> Option<Head> {
         body_start: end + 4,
         cookies: Vec::new(),
         close: status_line.starts_with("HTTP/1.0"),
+        date: None,
     };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -423,6 +428,7 @@ fn parse_head(data: &[u8]) -> Option<Head> {
             "transfer-encoding" => head.chunked = value.to_ascii_lowercase().contains("chunked"),
             "set-cookie" => head.cookies.push(value.to_string()),
             "connection" => head.close = value.to_ascii_lowercase().contains("close"),
+            "date" => head.date = parse_date(value),
             _ => {}
         }
     }
@@ -512,3 +518,20 @@ impl RngCore for Rng {
 }
 
 impl CryptoRng for Rng {}
+
+/// An HTTP date such as "Sun, 28 Sep 2026 05:20:24 GMT", in Unix seconds.
+pub fn parse_date(text: &str) -> Option<i64> {
+    let mut parts = text.split_whitespace().skip(1);
+    let day: i64 = parts.next()?.parse().ok()?;
+    let month = parts.next()?;
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .position(|m| m.eq_ignore_ascii_case(month))? as i64
+        + 1;
+    let year: i64 = parts.next()?.parse().ok()?;
+    let mut hms = parts.next()?.split(':').map(|v| v.parse::<i64>().ok());
+    let (h, m, s) = (hms.next()??, hms.next()??, hms.next()??);
+    Some(crate::rtc::days_from_civil(year, month, day) * 86400 + h * 3600 + m * 60 + s)
+}

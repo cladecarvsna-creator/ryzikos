@@ -1,0 +1,5 @@
+Telegram connects even when this computer's clock is set to local time: it checks the real time on the internet first. Before, it could stay on "Connecting..." forever.
+While connecting, Telegram shows the step it is on. Type "telegram log" in the Terminal to see the last steps.
+The chat list says why Telegram can't connect, not only "Connecting...".
+Telegram connects the way the official app does, so networks that block it are less likely to get in the way. If port 443 doesn't answer, it tries ports 80 and 5222.
+This window: after an update, it shows what changed.

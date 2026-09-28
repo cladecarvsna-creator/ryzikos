@@ -989,7 +989,14 @@ impl Telegram {
         let cx = CLIENT_W / 2;
         draw_logo(c, cx, card.y + 70, 56);
         let (title, lines): (&str, Vec<String>) = match stage {
-            Stage::Starting => ("Telegram", alloc::vec![String::from("Connecting...")]),
+            Stage::Starting => {
+                // the step it is on, so a stuck connection says where
+                let mut l = alloc::vec![String::from("Connecting...")];
+                if let Some(step) = tg::client::last_step() {
+                    l.push(fit(&UI, &step, card.w - 40));
+                }
+                ("Telegram", l)
+            }
             Stage::Config => (
                 "Your Telegram app",
                 alloc::vec![
