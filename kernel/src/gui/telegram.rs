@@ -5,6 +5,12 @@
 //! in, it shows the chat list on the left and the open chat on the right,
 //! with a box to write in and a paper clip to send files.
 //!
+//! Messages show their photos and files (a click downloads and opens
+//! them), emoji as pictures and clickable links; @names and t.me links
+//! open the chat, even channels we are not in, with a Join button. The
+//! name at the top opens the chat's profile with its @name to copy, and
+//! the search box also looks on Telegram for people and channels.
+//!
 //! The client itself (crate::tg) runs in a fiber; this file only draws
 //! what it shares and passes on what the user does.
 
@@ -14,13 +20,15 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use super::canvas::{mix, rgb, Canvas, Color, Rect};
+use super::emoji::{self, GROUPS};
 use super::filedialog::{self, FileDialog, Mode};
+use super::rich;
 use super::text::{Font, HEADING, TITLE, UI, UI_BOLD};
 use super::widgets::{self, FieldEvent, TextField};
-use super::{theme, MouseEvent, MouseKind};
+use super::{theme, App, MouseEvent, MouseKind};
 use crate::fiber::Fiber;
 use crate::keyboard::Key;
-use crate::tg::{self, ChatKind, Cmd, History, Message, Peer, Shared, Stage};
+use crate::tg::{self, Chat, ChatKind, Cmd, History, Message, Peer, Preview, Shared, Stage};
 use crate::{fs, users};
 
 pub const CLIENT_W: i32 = 1100;
@@ -35,6 +43,23 @@ const LINE_H: i32 = 20;
 const BUBBLE_MAX: i32 = 470;
 const PAD_X: i32 = 12;
 const PAD_Y: i32 = 7;
+/// The tallest a picture in a message is drawn.
+const PIC_MAX_H: i32 = 320;
+/// A file's row in a message, and a link preview.
+const FILE_H: i32 = 48;
+const WEB_H: i32 = 2 * LINE_H + 8;
+/// The profile on the right of the chat.
+const PROFILE_W: i32 = 320;
+/// The emoji picker: cells, columns, and the tabs under them.
+const EMOJI_CELL: i32 = 34;
+const EMOJI_COLS: i32 = 9;
+const EMOJI_TABS_H: i32 = 38;
+/// A section title in the chat list.
+const SECTION_H: i32 = 30;
+/// Look on Telegram after the search box has been still this long.
+const SEARCH_WAIT_MS: i64 = 600;
+/// How long a note over the chat stays.
+const NOTE_MS: i64 = 4000;
 
 /// Telegram's colours for avatars and names in groups.
 const PALETTE: [Color; 7] = [
@@ -294,6 +319,85 @@ enum Button {
     /// QR code or phone number.
     Switch,
     Attach,
+    /// The smiley that opens the emoji picker.
+    Emoji,
+    /// Join a channel we are looking at from outside.
+    Join,
+}
+
+/// Something that can be clicked in the chat, found again from where it
+/// was last drawn.
+#[derive(Clone, Debug, PartialEq)]
+enum Hit {
+    Link(String),
+    /// A message's photo or file: download and open it.
+    Media(i64),
+    /// A message, for the right-click menu.
+    Bubble(i64),
+    /// The chat's name at the top: its profile.
+    Header,
+    CloseProfile,
+    Copy(String),
+    /// Join (true) or leave the open channel.
+    Membership(bool),
+    Emoji(u16),
+    EmojiTab(u8),
+    /// A panel (the emoji picker, the profile) where clicks do nothing.
+    Blank,
+}
+
+/// What the right-click menu of a message can do.
+#[derive(Clone, Debug)]
+enum Action {
+    Copy(String),
+    Open(String),
+    Save(i64),
+}
+
+struct Context {
+    x: i32,
+    y: i32,
+    items: Vec<(&'static str, Action)>,
+    hover: Option<usize>,
+}
+
+impl Context {
+    fn list(&self) -> Vec<widgets::Item<'static>> {
+        self.items.iter().map(|(l, _)| (*l, "", true)).collect()
+    }
+
+    fn rect(&self) -> Rect {
+        let r = widgets::menu_rect(self.x, self.y, &self.list());
+        // keep it in the window
+        let x = r.x.min(CLIENT_W - r.w - 4);
+        let y = if r.bottom() > CLIENT_H - 4 {
+            self.y - r.h
+        } else {
+            r.y
+        };
+        Rect::new(x, y, r.w, r.h)
+    }
+}
+
+/// A row of the chat list.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Row {
+    /// A chat of ours, by its place in the chats.
+    Chat(usize),
+    /// "Global search".
+    Section,
+    /// A chat the search found on Telegram, by its place in what it found.
+    Found(usize),
+}
+
+impl Row {
+    fn height(self) -> i32 {
+        if self == Row::Section {
+            SECTION_H
+        } else {
+            ROW_H
+        }
+    }
 }
 
 /// A message laid out for drawing.
@@ -307,15 +411,28 @@ struct Laid {
 enum LaidKind {
     Date(String),
     Service(String),
-    Bubble {
-        index: usize,
-        lines: Vec<String>,
-        w: i32,
-        /// The name above the text, in groups.
-        name: Option<String>,
-        /// The time sits on its own line under the text.
-        time_below: bool,
-    },
+    Bubble(Bubble),
+}
+
+struct Bubble {
+    index: usize,
+    w: i32,
+    /// The name above the text, in groups.
+    name: Option<String>,
+    /// A picture on top (a photo, or the first frame of a video): its
+    /// size as drawn.
+    pic: Option<(i32, i32)>,
+    /// A row with the file's name and size.
+    file_row: bool,
+    /// The first line is "[Sticker]" or the like.
+    label: bool,
+    lines: Vec<rich::Line>,
+    /// Where the links in the lines go.
+    links: Vec<String>,
+    /// A link preview: the site and the title.
+    web: Option<(String, String)>,
+    /// The time sits on its own line under the text.
+    time_below: bool,
 }
 
 pub struct Telegram {
@@ -341,14 +458,30 @@ pub struct Telegram {
     /// when messages arrive.
     content_h: i32,
     newest: i64,
+    /// The row under the mouse, by its place in the rows shown.
     hover_row: Option<usize>,
     hover_button: Option<Button>,
     pressed: Option<Button>,
     menu: Option<Option<usize>>,
     /// Choosing a file to send.
     dialog: Option<FileDialog>,
-    /// A note over the chat, like a file that could not be sent.
-    note: Option<String>,
+    /// A note over the chat, like a file that could not be sent, and
+    /// when it goes.
+    note: Option<(String, i64)>,
+    /// Where things that can be clicked were drawn.
+    hits: Vec<(Rect, Hit)>,
+    hover_hit: Option<Hit>,
+    /// The right-click menu of a message.
+    context: Option<Context>,
+    /// The profile of the open chat is shown.
+    profile: bool,
+    /// The emoji picker is open: its tab and how far it is scrolled.
+    picker: bool,
+    picker_tab: u8,
+    picker_scroll: i32,
+    /// What was last looked for on Telegram, and when the box changed.
+    searched: String,
+    search_changed: i64,
 }
 
 impl Telegram {
@@ -376,6 +509,15 @@ impl Telegram {
             menu: None,
             dialog: None,
             note: None,
+            hits: Vec::new(),
+            hover_hit: None,
+            context: None,
+            profile: false,
+            picker: false,
+            picker_tab: 0,
+            picker_scroll: 0,
+            searched: String::new(),
+            search_changed: 0,
         }
     }
 
@@ -408,8 +550,49 @@ impl Telegram {
                 self.fiber = None;
             }
         }
+        let mut redraw = false;
+        let (goto, to_open, notice) = {
+            let mut s = self.shared.borrow_mut();
+            (
+                s.goto.take(),
+                core::mem::take(&mut s.to_open),
+                s.notice.take(),
+            )
+        };
+        if let Some(peer) = goto {
+            self.search.set("");
+            self.list_top = 0;
+            self.open_chat(peer);
+            redraw = true;
+        }
+        for path in to_open {
+            open_file(&path);
+        }
+        if let Some(n) = notice {
+            self.say(n);
+            redraw = true;
+        }
+        let now = tg::mtproto::now_ms();
+        if self.note.as_ref().is_some_and(|n| now >= n.1) {
+            self.note = None;
+            redraw = true;
+        }
+        // look on Telegram once the search box is still
+        let q = String::from(self.search.string().trim());
+        if q.chars().count() >= 2
+            && q != self.searched
+            && now - self.search_changed >= SEARCH_WAIT_MS
+        {
+            self.searched = q.clone();
+            self.command(Cmd::Search(q));
+        }
         let version = self.shared.borrow().version;
-        version != self.drawn
+        redraw || version != self.drawn
+    }
+
+    /// Show a note over the chat for a few seconds.
+    fn say(&mut self, text: impl Into<String>) {
+        self.note = Some((text.into(), tg::mtproto::now_ms() + NOTE_MS));
     }
 
     /// Whether the client waits for an answer the user is waiting for.
@@ -490,7 +673,7 @@ impl Telegram {
         Rect::new(
             LIST_W + 56,
             CLIENT_H - INPUT_H + 10,
-            CLIENT_W - LIST_W - 120,
+            CLIENT_W - LIST_W - 160,
             36,
         )
     }
@@ -499,29 +682,116 @@ impl Telegram {
         Rect::new(CLIENT_W - 52, CLIENT_H - INPUT_H + 8, 40, 40)
     }
 
+    fn emoji_rect() -> Rect {
+        Rect::new(CLIENT_W - 94, CLIENT_H - INPUT_H + 8, 40, 40)
+    }
+
+    fn join_rect(&self) -> Rect {
+        let mut w = CLIENT_W - LIST_W - 1;
+        if self.profile {
+            w -= PROFILE_W;
+        }
+        Rect::new(LIST_W + 1 + w / 2 - 110, CLIENT_H - INPUT_H + 9, 220, 38)
+    }
+
+    fn picker_rect() -> Rect {
+        let w = EMOJI_COLS * EMOJI_CELL + 16;
+        let h = 7 * EMOJI_CELL + EMOJI_TABS_H + 16;
+        Rect::new(CLIENT_W - w - 8, CLIENT_H - INPUT_H - h - 6, w, h)
+    }
+
+    fn profile_rect() -> Rect {
+        Rect::new(CLIENT_W - PROFILE_W, TOP_H, PROFILE_W, CLIENT_H - TOP_H)
+    }
+
     fn list_rows() -> i32 {
         (CLIENT_H - TOP_H + ROW_H - 1) / ROW_H
     }
 
-    /// The chats the search box lets through, as indices.
-    fn visible_chats(&self) -> Vec<usize> {
+    /// The rows of the chat list: our chats the search box lets through,
+    /// then what the search found on Telegram.
+    fn rows(&self) -> Vec<Row> {
         let s = self.shared.borrow();
-        let q = self.search.string().to_lowercase();
-        s.chats
+        let q = self.search.string();
+        let q = q.trim().trim_start_matches('@').to_lowercase();
+        let mut rows: Vec<Row> = s
+            .chats
             .iter()
             .enumerate()
-            .filter(|(_, c)| q.is_empty() || c.title.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect()
+            .filter(|(_, c)| {
+                q.is_empty()
+                    || c.title.to_lowercase().contains(&q)
+                    || c.username.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| Row::Chat(i))
+            .collect();
+        if let Some((fq, found)) = &s.found {
+            if !q.is_empty() && fq.trim().trim_start_matches('@').to_lowercase() == q {
+                let new: Vec<Row> = found
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| s.chat(c.peer).is_none())
+                    .map(|(i, _)| Row::Found(i))
+                    .collect();
+                if !new.is_empty() {
+                    rows.push(Row::Section);
+                    rows.extend(new);
+                }
+            }
+        }
+        rows
     }
 
+    /// The top of the chat list, under the connection banner.
+    fn list_y(&self) -> i32 {
+        let s = self.shared.borrow();
+        if s.error.is_some() || !s.online {
+            TOP_H + 30
+        } else {
+            TOP_H
+        }
+    }
+
+    /// The row under (x, y), by its place in `rows`.
     fn row_at(&self, x: i32, y: i32) -> Option<usize> {
-        if x >= LIST_W || y < TOP_H {
+        let top = self.list_y();
+        if x >= LIST_W || y < top {
             return None;
         }
-        let i = (y - TOP_H) / ROW_H + self.list_top;
-        let chats = self.visible_chats();
-        chats.get(i as usize).copied()
+        let rows = self.rows();
+        let mut ry = top;
+        for (i, r) in rows.iter().enumerate().skip(self.list_top as usize) {
+            if y < ry + r.height() {
+                return (*r != Row::Section).then_some(i);
+            }
+            ry += r.height();
+            if ry > CLIENT_H {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Open what a row is.
+    fn click_row(&mut self, row: Row) {
+        let peer = {
+            let s = self.shared.borrow();
+            match row {
+                Row::Chat(i) => s.chats.get(i).map(|c| (c.peer, false)),
+                Row::Found(i) => s
+                    .found
+                    .as_ref()
+                    .and_then(|f| f.1.get(i))
+                    .map(|c| (c.peer, true)),
+                Row::Section => None,
+            }
+        };
+        match peer {
+            Some((peer, false)) => self.open_chat(peer),
+            // into the list first, then the client says to open it
+            Some((peer, true)) => self.command(Cmd::Show(peer)),
+            None => {}
+        }
     }
 
     // ---- input ------------------------------------------------------------------------
@@ -578,11 +848,20 @@ impl Telegram {
     }
 
     fn ready_key(&mut self, key: Key) -> bool {
-        if self.menu.is_some() {
+        if self.menu.is_some() || self.context.is_some() {
             self.menu = None;
+            self.context = None;
             return true;
         }
         match key {
+            Key::Escape if self.picker => {
+                self.picker = false;
+                return true;
+            }
+            Key::Escape if self.profile => {
+                self.profile = false;
+                return true;
+            }
             Key::Escape if self.focus == Focus::Search && !self.search.text.is_empty() => {
                 self.search.set("");
                 self.list_top = 0;
@@ -598,15 +877,22 @@ impl Telegram {
             _ => {}
         }
         if self.focus == Focus::Search {
+            let before = self.search.text.clone();
             let event = self.search.on_key(key);
             if event == FieldEvent::Enter {
-                // open the first chat found
-                if let Some(&i) = self.visible_chats().first() {
-                    let peer = self.shared.borrow().chats[i].peer;
-                    self.open_chat(peer);
+                let q = self.search.string();
+                let q = q.trim();
+                if q.starts_with('@') || q.contains("t.me/") {
+                    // an @name or a link: straight there
+                    self.command(Cmd::Resolve(String::from(q)));
+                } else if let Some(&row) = self.rows().first() {
+                    self.click_row(row);
                 }
             }
-            self.list_top = 0;
+            if self.search.text != before {
+                self.search_changed = tg::mtproto::now_ms();
+                self.list_top = 0;
+            }
             return event != FieldEvent::None;
         }
         if self.open.is_none() {
@@ -705,19 +991,219 @@ impl Telegram {
         let png = super::picture::encode_png(&img.pixels, img.w, img.h);
         match fs::write(&path, &png) {
             Ok(()) => self.send_file(path),
-            Err(e) => self.note = Some(alloc::format!("Can't paste the picture: {}", e.message())),
+            Err(e) => self.say(alloc::format!("Can't paste the picture: {}", e.message())),
         }
     }
 
     fn open_chat(&mut self, peer: Peer) {
+        if self.open != Some(peer) {
+            self.profile = false;
+            self.input.set("");
+        }
         self.open = Some(peer);
         self.shared.borrow_mut().open = Some(peer);
         self.scroll = 0;
         self.content_h = 0;
         self.newest = 0;
         self.focus = Focus::Input;
-        self.input.set("");
+        self.context = None;
+        // pictures of other chats make room
+        self.shared.borrow_mut().previews.retain(|k, _| k.0 == peer);
         self.command(Cmd::Open(peer));
+    }
+
+    /// Put text where the caret is in the message box.
+    fn insert(&mut self, text: &str) {
+        let f = &mut self.input;
+        let (a, b) = (f.anchor.min(f.cursor), f.anchor.max(f.cursor));
+        f.text.drain(a..b.min(f.text.len()));
+        let mut at = a.min(f.text.len());
+        for c in text.chars() {
+            f.text.insert(at, c);
+            at += 1;
+        }
+        f.cursor = at;
+        f.anchor = at;
+        self.focus = Focus::Input;
+    }
+
+    /// Go where a link in a message points: chats in this window, web
+    /// pages in the browser.
+    fn follow(&mut self, url: &str) {
+        let l = url.trim();
+        let lower = l.to_ascii_lowercase();
+        let bare = lower
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_start_matches("www.");
+        if l.starts_with('@')
+            || lower.starts_with("tg:")
+            || bare.starts_with("t.me/")
+            || bare.starts_with("telegram.me/")
+            || bare.starts_with("telegram.dog/")
+        {
+            self.command(Cmd::Resolve(String::from(l)));
+            return;
+        }
+        if lower.starts_with("mailto:") || lower.starts_with("tel:") {
+            widgets::copy(l.split_once(':').map_or(l, |p| p.1));
+            self.say("Copied");
+            return;
+        }
+        let address = if lower.starts_with("http://") || lower.starts_with("https://") {
+            String::from(l)
+        } else {
+            alloc::format!("https://{}", l)
+        };
+        super::request_address(&address);
+        super::request_open(App::Browser);
+    }
+
+    /// Download a message's photo or file and open it.
+    fn open_media(&mut self, id: i64) {
+        let Some(peer) = self.open else {
+            return;
+        };
+        let busy = self
+            .shared
+            .borrow()
+            .downloads
+            .get(&(peer, id))
+            .is_some_and(|d| d.path.is_none() && d.failed.is_none());
+        if !busy {
+            self.command(Cmd::Download(peer, id, true));
+        }
+    }
+
+    fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
+        // drawn last is on top
+        self.hits
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains(x, y))
+            .map(|(_, h)| h.clone())
+    }
+
+    fn click_hit(&mut self, hit: Hit) {
+        match hit {
+            Hit::Link(url) => self.follow(&url),
+            Hit::Media(id) => self.open_media(id),
+            Hit::Bubble(_) | Hit::Blank => {}
+            Hit::Header => {
+                self.profile = !self.profile;
+                if let (true, Some(peer)) = (self.profile, self.open) {
+                    self.command(Cmd::Info(peer));
+                }
+            }
+            Hit::CloseProfile => self.profile = false,
+            Hit::Copy(text) => {
+                widgets::copy(&text);
+                self.say(alloc::format!("Copied {}", text));
+            }
+            Hit::Membership(join) => {
+                if let Some(peer) = self.open {
+                    self.command(if join {
+                        Cmd::Join(peer)
+                    } else {
+                        Cmd::Leave(peer)
+                    });
+                }
+            }
+            Hit::Emoji(e) => {
+                let t = emoji::get().text(e);
+                self.insert(&t);
+            }
+            Hit::EmojiTab(t) => {
+                self.picker_tab = t;
+                self.picker_scroll = 0;
+            }
+        }
+    }
+
+    /// Whether a right-click at (x, y) opens this window's own menu (on
+    /// the messages) rather than the desktop's Cut, Copy, Paste.
+    pub fn own_menu(&self, x: i32, y: i32) -> bool {
+        self.stage() == Stage::Ready
+            && self.open.is_some()
+            && Self::chat_area().contains(x, y)
+            && self.hits.iter().any(|(r, h)| {
+                r.contains(x, y) && matches!(h, Hit::Bubble(_) | Hit::Media(_) | Hit::Link(_))
+            })
+    }
+
+    /// The right-click menu of a message.
+    fn context_menu(&mut self, x: i32, y: i32) -> bool {
+        let Some(peer) = self.open else {
+            return false;
+        };
+        let mut link = None;
+        let mut id = None;
+        for (r, h) in self.hits.iter().rev() {
+            if !r.contains(x, y) {
+                continue;
+            }
+            match h {
+                Hit::Link(u) if link.is_none() => link = Some(u.clone()),
+                Hit::Media(i) | Hit::Bubble(i) if id.is_none() => id = Some(*i),
+                _ => {}
+            }
+        }
+        let Some(id) = id else {
+            return false;
+        };
+        let s = self.shared.borrow();
+        let Some(m) = s
+            .history
+            .get(&peer)
+            .and_then(|h| h.messages.iter().find(|m| m.id == id))
+        else {
+            return false;
+        };
+        let mut items: Vec<(&'static str, Action)> = Vec::new();
+        if let Some(l) = link {
+            items.push(("Open link", Action::Open(l.clone())));
+            items.push(("Copy link", Action::Copy(l)));
+        }
+        if !m.text.is_empty() {
+            items.push(("Copy text", Action::Copy(m.text.clone())));
+        }
+        if (m.photo.is_some() || m.file.is_some()) && id != 0 {
+            items.push(("Save to Downloads", Action::Save(id)));
+        }
+        drop(s);
+        if items.is_empty() {
+            return false;
+        }
+        self.context = Some(Context {
+            x,
+            y,
+            items,
+            hover: None,
+        });
+        true
+    }
+
+    fn context_click(&mut self, x: i32, y: i32) {
+        let Some(ctx) = self.context.take() else {
+            return;
+        };
+        let i = widgets::menu_item_at(ctx.rect(), &ctx.list(), x, y).or(ctx.hover);
+        let Some((_, action)) = i.and_then(|i| ctx.items.get(i)) else {
+            return;
+        };
+        match action.clone() {
+            Action::Copy(t) => {
+                widgets::copy(&t);
+                self.say("Copied");
+            }
+            Action::Open(l) => self.follow(&l),
+            Action::Save(id) => {
+                if let Some(peer) = self.open {
+                    self.command(Cmd::Download(peer, id, false));
+                    self.say("Saving to Downloads...");
+                }
+            }
+        }
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) -> bool {
@@ -731,6 +1217,14 @@ impl Telegram {
         }
         match ev.kind {
             MouseKind::Down { right: false } => {}
+            MouseKind::Down { right: true } => {
+                self.menu = None;
+                let had = self.context.take().is_some();
+                if self.stage() == Stage::Ready && x > LIST_W {
+                    return self.context_menu(x, y) || had;
+                }
+                return had;
+            }
             MouseKind::Up => {
                 let pressed = self.pressed.take();
                 if pressed.is_some() && pressed == self.button_at(x, y) {
@@ -747,12 +1241,21 @@ impl Telegram {
                             self.command(cmd);
                         }
                         Some(Button::Attach) => self.attach(),
+                        Some(Button::Emoji) => {
+                            self.picker = !self.picker;
+                            self.focus = Focus::Input;
+                        }
+                        Some(Button::Join) => self.click_hit(Hit::Membership(true)),
                         _ => {}
                     }
                 }
                 return pressed.is_some();
             }
             _ => return false,
+        }
+        if self.context.is_some() {
+            self.context_click(x, y);
+            return true;
         }
         if let Some(hover) = self.menu {
             self.menu = None;
@@ -792,6 +1295,22 @@ impl Telegram {
                 }
             }
             Stage::Ready => {
+                if self.note.is_some() {
+                    self.note = None;
+                }
+                if let Some(b) = self.button_at(x, y) {
+                    self.pressed = Some(b);
+                    return true;
+                }
+                if let Some(hit) = self.hit_at(x, y) {
+                    let keep = matches!(hit, Hit::Emoji(_) | Hit::EmojiTab(_) | Hit::Blank);
+                    if !keep {
+                        self.picker = false;
+                    }
+                    self.click_hit(hit);
+                    return true;
+                }
+                self.picker = false;
                 if Self::menu_button().contains(x, y) {
                     self.menu = Some(None);
                     return true;
@@ -802,13 +1321,16 @@ impl Telegram {
                     return true;
                 }
                 if let Some(i) = self.row_at(x, y) {
-                    let peer = self.shared.borrow().chats[i].peer;
-                    self.open_chat(peer);
+                    if let Some(&row) = self.rows().get(i) {
+                        self.click_row(row);
+                    }
                     return true;
                 }
                 if Self::input_rect().contains(x, y) && self.open.is_some() {
                     self.focus = Focus::Input;
-                    self.input.click(Self::input_rect(), x);
+                    let ir = Self::input_rect();
+                    self.input.cursor = self.input_place(ir, x);
+                    self.input.anchor = self.input.cursor;
                     return true;
                 }
                 if self.open.is_some() && x > LIST_W {
@@ -822,6 +1344,31 @@ impl Telegram {
             return true;
         }
         true
+    }
+
+    /// Where the input box is scrolled to, so the caret stays in view.
+    fn input_shift(&self, ir: Rect) -> i32 {
+        let before: String = self.input.text[..self.input.cursor.min(self.input.text.len())]
+            .iter()
+            .collect();
+        let cw = rich::width(&UI, &before);
+        (cw - (ir.w - 12)).max(0)
+    }
+
+    /// The place in the input text nearest to `x`.
+    fn input_place(&self, ir: Rect, x: i32) -> usize {
+        let x0 = ir.x + 4 - self.input_shift(ir);
+        let mut s = String::new();
+        let mut prev = 0;
+        for (i, &c) in self.input.text.iter().enumerate() {
+            s.push(c);
+            let w = rich::width(&UI, &s);
+            if x < x0 + (prev + w) / 2 {
+                return i;
+            }
+            prev = w;
+        }
+        self.input.text.len()
     }
 
     fn button_at(&self, x: i32, y: i32) -> Option<Button> {
@@ -843,10 +1390,22 @@ impl Telegram {
                 .contains(x, y)
                 .then_some(Button::Switch),
             Stage::Ready => {
-                if self.open.is_some() && Self::send_rect().contains(x, y) {
+                let outside = self.outside();
+                if self.profile && self.open.is_some() && Self::profile_rect().contains(x, y) {
+                    return None;
+                }
+                if self.picker && Self::picker_rect().contains(x, y) {
+                    None
+                } else if outside && self.join_rect().contains(x, y) {
+                    Some(Button::Join)
+                } else if outside {
+                    Self::menu_button().contains(x, y).then_some(Button::Menu)
+                } else if self.open.is_some() && Self::send_rect().contains(x, y) {
                     Some(Button::Send)
                 } else if self.open.is_some() && Self::attach_rect().contains(x, y) {
                     Some(Button::Attach)
+                } else if self.open.is_some() && Self::emoji_rect().contains(x, y) {
+                    Some(Button::Emoji)
                 } else if Self::menu_button().contains(x, y) {
                     Some(Button::Menu)
                 } else {
@@ -857,6 +1416,15 @@ impl Telegram {
         }
     }
 
+    /// The open chat is a channel or group we are not in: it shows a
+    /// Join button instead of the box to write in.
+    fn outside(&self) -> bool {
+        let Some(peer) = self.open else {
+            return false;
+        };
+        self.shared.borrow().chat(peer).is_some_and(|c| c.left)
+    }
+
     pub fn on_wheel(&mut self, delta: i32) -> bool {
         if let Some(d) = &mut self.dialog {
             return d.on_wheel(delta, full());
@@ -864,8 +1432,24 @@ impl Telegram {
         if self.stage() != Stage::Ready {
             return false;
         }
+        if self.picker
+            && self
+                .hover_hit
+                .as_ref()
+                .is_some_and(|h| matches!(h, Hit::Emoji(_) | Hit::EmojiTab(_) | Hit::Blank))
+        {
+            let n = emoji::get()
+                .list
+                .iter()
+                .filter(|e| e.1 == self.picker_tab)
+                .count() as i32;
+            let rows = (n + EMOJI_COLS - 1) / EMOJI_COLS;
+            let max = ((rows - 7) * EMOJI_CELL).max(0);
+            self.picker_scroll = (self.picker_scroll + delta * 2 * EMOJI_CELL).clamp(0, max);
+            return true;
+        }
         if self.hover_row.is_some() || self.open.is_none() {
-            let n = self.visible_chats().len() as i32;
+            let n = self.rows().len() as i32;
             let top =
                 (self.list_top + delta.signum() * 2).clamp(0, (n - Self::list_rows() + 1).max(0));
             let changed = top != self.list_top;
@@ -884,10 +1468,16 @@ impl Telegram {
             None
         };
         let button = self.button_at(x, y);
-        let mut changed = row != self.hover_row || button != self.hover_button;
+        let hit = if self.stage() == Stage::Ready {
+            self.hit_at(x, y)
+        } else {
+            None
+        };
+        let mut changed =
+            row != self.hover_row || button != self.hover_button || hit != self.hover_hit;
         // keep the list scrollable by the wheel when the mouse is on it
         if row.is_none() && x < LIST_W && y > TOP_H && self.hover_row.is_none() {
-            changed = false;
+            changed = hit != self.hover_hit;
         }
         self.hover_row = row.or(if x < LIST_W && y > TOP_H {
             Some(usize::MAX)
@@ -895,11 +1485,19 @@ impl Telegram {
             None
         });
         self.hover_button = button;
+        self.hover_hit = hit;
         if let Some(menu) = self.menu {
             let items = Self::menu_items();
             let h = widgets::menu_item_at(Self::menu_rect(), &items, x, y);
             if h != menu {
                 self.menu = Some(h);
+                changed = true;
+            }
+        }
+        if let Some(ctx) = &mut self.context {
+            let h = widgets::menu_item_at(ctx.rect(), &ctx.list(), x, y);
+            if h != ctx.hover {
+                ctx.hover = h;
                 changed = true;
             }
         }
@@ -910,6 +1508,7 @@ impl Telegram {
 
     pub fn draw(&mut self, c: &mut Canvas, focused: bool, caret: bool) {
         self.drawn = self.shared.borrow().version;
+        self.hits.clear();
         let stage = self.stage();
         if stage != self.form_stage {
             // a new step: an empty box, ready to type in
@@ -1110,7 +1709,15 @@ impl Telegram {
         self.draw_list(c, caret);
         c.fill_rect(LIST_W, 0, 1, CLIENT_H, line());
         match self.open {
-            Some(peer) => self.draw_chat(c, peer, caret),
+            Some(peer) => {
+                self.draw_chat(c, peer, caret);
+                if self.profile {
+                    self.draw_profile(c, peer);
+                }
+                if self.picker && !self.outside() {
+                    self.draw_picker(c);
+                }
+            }
             None => {
                 let area = Rect::new(LIST_W + 1, 0, CLIENT_W - LIST_W - 1, CLIENT_H);
                 c.vertical_gradient(area, wall_top(), wall_bottom());
@@ -1121,9 +1728,17 @@ impl Telegram {
                 c.text_centered(r, msg, rgb(0xff, 0xff, 0xff));
             }
         }
+        if let Some((n, _)) = &self.note {
+            let area = Self::chat_area();
+            let n = fit(&UI, n, area.w - 60);
+            draw_pill(c, area.x + area.w / 2, area.bottom() - 22, &n);
+        }
         if let Some(hover) = self.menu {
             let items = Self::menu_items();
             widgets::draw_menu(c, Self::menu_rect(), &items, hover);
+        }
+        if let Some(ctx) = &self.context {
+            widgets::draw_menu(c, ctx.rect(), &ctx.list(), ctx.hover);
         }
     }
 
@@ -1143,17 +1758,20 @@ impl Telegram {
             c.outline_round(sr, 17, BLUE);
         }
         if self.search.text.is_empty() {
-            c.draw_text(sr.x + 14, sr.y + 9, "Search", dim());
+            c.draw_text(sr.x + 14, sr.y + 9, "Search or @name", dim());
             if search_focused && caret {
                 c.fill_rect(sr.x + 14, sr.y + 8, 1, 18, text());
             }
         } else {
             let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
             sub.clip_to(sr.inset(4));
-            let s = clean(&self.search.string());
-            let w = sub.draw_text(sr.x + 14, sr.y + 9, &s, text());
+            let s = self.search.string();
+            let w = rich::width(&UI, &s);
+            let x = sr.x + 14 - (w - (sr.w - 30)).max(0);
+            rich::draw(&mut sub, &UI, x, sr.y + 9, &s, text());
             if search_focused && caret {
-                sub.fill_rect(sr.x + 15 + w, sr.y + 8, 1, 18, text());
+                let before: String = self.search.text[..self.search.cursor].iter().collect();
+                sub.fill_rect(x + 1 + rich::width(&UI, &before), sr.y + 8, 1, 18, text());
             }
         }
 
@@ -1167,7 +1785,7 @@ impl Telegram {
             )
         };
         let now = now + tz;
-        let visible = self.visible_chats();
+        let rows = self.rows();
         let s = self.shared.borrow();
         let mut y = TOP_H;
         // a failed connection says why, not just "Connecting..."
@@ -1185,121 +1803,97 @@ impl Telegram {
         let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
         sub.clip_to(Rect::new(0, y, LIST_W, CLIENT_H - y));
         let c = &mut sub;
-        for &i in visible.iter().skip(self.list_top as usize) {
+        let empty_found = Vec::new();
+        let found = s.found.as_ref().map_or(&empty_found, |f| &f.1);
+        for (pos, row) in rows.iter().enumerate().skip(self.list_top as usize) {
             if y >= CLIENT_H {
                 break;
             }
-            let chat = &s.chats[i];
+            let chat = match *row {
+                Row::Section => {
+                    c.fill(
+                        Rect::new(0, y, LIST_W, SECTION_H),
+                        pick(rgb(0xf4, 0xf4, 0xf5), rgb(0x1e, 0x28, 0x33)),
+                    );
+                    c.draw_text(14, y + 7, "Global search", dim());
+                    y += SECTION_H;
+                    continue;
+                }
+                Row::Chat(i) => &s.chats[i],
+                Row::Found(i) => &found[i],
+            };
             let is_open = self.open == Some(chat.peer);
             let r = Rect::new(0, y, LIST_W, ROW_H);
             if is_open {
                 c.fill(r, selected());
-            } else if self.hover_row == Some(i) {
+            } else if self.hover_row == Some(pos) {
                 c.fill(r, hover());
             }
-            let (fg, sub_fg) = if is_open {
-                (rgb(0xff, 0xff, 0xff), rgb(0xe8, 0xf2, 0xfa))
-            } else {
-                (text(), dim())
-            };
-            let id = match chat.peer {
-                Peer::User(id) | Peer::Chat(id) | Peer::Channel(id) => id,
-            };
-            draw_avatar(
-                c,
-                10 + AVATAR / 2,
-                y + ROW_H / 2,
-                AVATAR / 2,
-                &chat.title,
-                id,
-                chat.kind,
-            );
-            let tx = 10 + AVATAR + 12;
-            let date = short_date(chat.date + tz, now);
-            let dw = UI.width(&date);
-            c.draw_text(LIST_W - 12 - dw, y + 13, &date, sub_fg);
-            let mut name_x = tx;
-            if chat.kind == ChatKind::Channel || chat.kind == ChatKind::Group {
-                draw_group_mark(c, tx, y + 14, fg, chat.kind == ChatKind::Channel);
-                name_x += 20;
-            }
-            let title = fit(&UI_BOLD, &clean(&chat.title), LIST_W - 12 - dw - 8 - name_x);
-            c.draw_text_in(&UI_BOLD, name_x, y + 12, &title, fg);
-            // the last message and the unread count
-            let mut right = LIST_W - 12;
-            if chat.unread > 0 {
-                let n = if chat.unread > 999 {
-                    String::from("999+")
-                } else {
-                    alloc::format!("{}", chat.unread)
-                };
-                let w = (UI_BOLD.width(&n) + 14).max(22);
-                let badge = Rect::new(right - w, y + 36, w, 22);
-                let color = if is_open {
-                    rgb(0xff, 0xff, 0xff)
-                } else {
-                    pick(rgb(0x4f, 0xae, 0x4e), rgb(0x3e, 0x88, 0xc7))
-                };
-                c.fill_round(badge, 11, color);
-                c.text_centered_in(
-                    &UI_BOLD,
-                    badge,
-                    &n,
-                    if is_open { BLUE } else { rgb(0xff, 0xff, 0xff) },
-                );
-                right -= w + 6;
-            }
-            let mut px = tx;
-            if chat.last_out && chat.kind != ChatKind::Saved {
-                let you = "You: ";
-                px += c.draw_text(px, y + 38, you, if is_open { fg } else { BLUE });
-            }
-            let last = fit(&UI, &clean(&chat.last), right - px);
-            c.draw_text(px, y + 38, &last, sub_fg);
+            draw_row(c, chat, y, is_open, matches!(row, Row::Found(_)), now, tz);
             y += ROW_H;
         }
-        if visible.is_empty() {
+        if rows.is_empty() {
             let msg = if s.chats.is_empty() {
                 "Loading chats..."
-            } else {
+            } else if s.found.as_ref().is_some_and(|f| f.0 == self.searched)
+                || self.search.text.len() < 2
+            {
                 "No chats found"
+            } else {
+                "Searching..."
             };
             let w = UI.width(msg);
-            c.draw_text((LIST_W - w) / 2, TOP_H + 40, msg, dim());
+            c.draw_text((LIST_W - w) / 2, y + 40, msg, dim());
         }
     }
 
     fn draw_chat(&mut self, c: &mut Canvas, peer: Peer, caret: bool) {
         let s = self.shared.borrow();
-        let (title, kind) = s
-            .chat(peer)
-            .map(|c| (c.title.clone(), c.kind))
-            .unwrap_or((String::new(), ChatKind::Private));
-        let read_out = s.chat(peer).map_or(0, |c| c.read_out);
+        let chat = s.chat(peer).cloned();
+        let (title, kind, username, left) = chat.as_ref().map_or(
+            (String::new(), ChatKind::Private, String::new(), false),
+            |c| (c.title.clone(), c.kind, c.username.clone(), c.left),
+        );
+        let read_out = chat.as_ref().map_or(0, |c| c.read_out);
         let tz = s.tz;
 
-        // the header
+        // the header: a click opens the profile
         let head = Rect::new(LIST_W + 1, 0, CLIENT_W - LIST_W - 1, TOP_H);
         c.fill(head, panel());
-        c.draw_text_in(
-            &UI_BOLD,
-            head.x + 20,
-            10,
-            &fit(&UI_BOLD, &clean(&title), head.w - 40),
-            text(),
-        );
-        let subtitle = match kind {
+        if self.hover_hit == Some(Hit::Header) {
+            c.fill(head, hover());
+        }
+        rich::draw_fit(c, &UI_BOLD, head.x + 20, 10, &title, head.w - 40, text());
+        let members = s.info.get(&peer).map_or(0, |i| i.members);
+        let mut subtitle = String::from(match kind {
             ChatKind::Saved => "your cloud storage",
             ChatKind::Bot => "bot",
             ChatKind::Group => "group",
             ChatKind::Channel => "channel",
             ChatKind::Private => "private chat",
-        };
-        c.draw_text(head.x + 20, 30, subtitle, dim());
+        });
+        if members > 0 {
+            let what = if kind == ChatKind::Channel {
+                "subscribers"
+            } else {
+                "members"
+            };
+            subtitle = alloc::format!("{} {}", group_digits(members), what);
+        }
+        let mut sx = head.x + 20;
+        if !username.is_empty() && kind != ChatKind::Saved {
+            sx += c.draw_text(sx, 30, &alloc::format!("@{}", username), BLUE);
+            sx += c.draw_text(sx, 30, "  \u{2022}  ", dim());
+        }
+        c.draw_text(sx, 30, &subtitle, dim());
         c.fill_rect(head.x, TOP_H - 1, head.w, 1, line());
+        self.hits.push((head, Hit::Header));
 
         // the messages
-        let area = Self::chat_area();
+        let mut area = Self::chat_area();
+        if self.profile {
+            area.w -= PROFILE_W;
+        }
         c.vertical_gradient(area, wall_top(), wall_bottom());
         let empty = History::default();
         let h = s.history.get(&peer).unwrap_or(&empty);
@@ -1321,6 +1915,7 @@ impl Telegram {
         // everything is laid out top down; the bottom of it sits at the
         // bottom of the area, moved down by the scroll
         let base = area.bottom() - total + self.scroll;
+        let mut want = Vec::new();
         {
             let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
             sub.clip_to(area);
@@ -1335,6 +1930,15 @@ impl Telegram {
                     "No messages here yet",
                 );
             }
+            let mut ctx = Draw {
+                s: &s,
+                peer,
+                read_out,
+                tz,
+                hits: &mut self.hits,
+                want: &mut want,
+                hover: &self.hover_hit,
+            };
             for l in &laid {
                 let y = base + l.y;
                 if y + l.h < area.y || y > area.bottom() {
@@ -1343,32 +1947,14 @@ impl Telegram {
                 match &l.kind {
                     LaidKind::Date(d) => draw_pill(c, area.x + area.w / 2, y + 14, d),
                     LaidKind::Service(t) => draw_pill(c, area.x + area.w / 2, y + 14, t),
-                    LaidKind::Bubble {
-                        index,
-                        lines,
-                        w,
-                        name,
-                        time_below,
-                    } => {
-                        let m = &h.messages[*index];
+                    LaidKind::Bubble(b) => {
+                        let m = &h.messages[b.index];
                         let x = if m.out {
-                            area.right() - 16 - w
+                            area.right() - 16 - b.w
                         } else {
                             area.x + 16
                         };
-                        draw_bubble(
-                            c,
-                            m,
-                            x,
-                            y,
-                            *w,
-                            l.h,
-                            lines,
-                            name.as_deref(),
-                            *time_below,
-                            read_out,
-                            tz,
-                        );
+                        draw_bubble(c, &mut ctx, m, b, x, y, l.h);
                     }
                 }
             }
@@ -1380,8 +1966,19 @@ impl Telegram {
         if wants_older {
             self.command(Cmd::Older(peer));
         }
+        if !want.is_empty() {
+            let mut s = self.shared.borrow_mut();
+            for id in want {
+                if let alloc::collections::btree_map::Entry::Vacant(e) =
+                    s.previews.entry((peer, id))
+                {
+                    e.insert(Preview::Loading);
+                    s.commands.push_back(Cmd::Preview(peer, id));
+                }
+            }
+        }
 
-        // the box to write in
+        // the box to write in, or a Join button
         let bar = Rect::new(
             LIST_W + 1,
             CLIENT_H - INPUT_H,
@@ -1390,6 +1987,19 @@ impl Telegram {
         );
         c.fill(bar, panel());
         c.fill_rect(bar.x, bar.y, bar.w, 1, line());
+        if left {
+            let jr = self.join_rect();
+            if self.hover_button == Some(Button::Join) {
+                c.fill_round(jr, 8, hover());
+            }
+            let label = if kind == ChatKind::Channel {
+                "JOIN CHANNEL"
+            } else {
+                "JOIN GROUP"
+            };
+            c.text_centered_in(&UI_BOLD, jr, label, BLUE);
+            return;
+        }
         let ir = Self::input_rect();
         let focused = self.focus == Focus::Input;
         {
@@ -1401,17 +2011,12 @@ impl Telegram {
                     sub.fill_rect(ir.x + 4, ir.y + 8, 1, 18, text());
                 }
             } else {
-                // the end of long text stays in view
-                let shown = clean(&self.input.string());
-                let w = UI.width(&shown);
-                let x = ir.x + 4 - (w - (ir.w - 12)).max(0);
-                sub.draw_text(x, ir.y + 9, &shown, text());
+                // the caret stays in view
+                let x = ir.x + 4 - self.input_shift(ir);
+                rich::draw(&mut sub, &UI, x, ir.y + 9, &self.input.string(), text());
                 if focused && caret {
-                    let cw = UI.width(&clean(
-                        &self.input.text[..self.input.cursor]
-                            .iter()
-                            .collect::<String>(),
-                    ));
+                    let before: String = self.input.text[..self.input.cursor].iter().collect();
+                    let cw = rich::width(&UI, &before);
                     sub.fill_rect(x + cw, ir.y + 8, 1, 18, text());
                 }
             }
@@ -1421,9 +2026,12 @@ impl Telegram {
             c.fill_round(ar, 20, hover());
         }
         draw_clip(c, ar.x + 12, ar.y + 8, dim());
-        if let Some(n) = self.note.clone() {
-            let area = Self::chat_area();
-            draw_pill(c, area.x + area.w / 2, area.bottom() - 22, &n);
+        let er = Self::emoji_rect();
+        if self.hover_button == Some(Button::Emoji) || self.picker {
+            c.fill_round(er, 20, hover());
+        }
+        if let Some((e, _)) = emoji::get().at(&['\u{1f642}']) {
+            emoji::get().draw_in(c, e, er);
         }
         let sr = Self::send_rect();
         let active = !self.input.text.is_empty();
@@ -1433,6 +2041,367 @@ impl Telegram {
         }
         draw_plane(c, sr.x + 8, sr.y + 10, 24, color);
     }
+
+    /// The profile of the open chat, on the right: its @name and link to
+    /// copy, what it is about, and Join or Leave.
+    fn draw_profile(&mut self, c: &mut Canvas, peer: Peer) {
+        let pr = Self::profile_rect();
+        c.fill(pr, panel());
+        c.fill_rect(pr.x, pr.y, 1, pr.h, line());
+        self.hits.push((pr, Hit::Blank));
+        let s = self.shared.borrow();
+        let Some(chat) = s.chat(peer).cloned() else {
+            return;
+        };
+        let info = s.info.get(&peer).cloned();
+        drop(s);
+        c.draw_text_in(&UI_BOLD, pr.x + 20, pr.y + 14, "Info", text());
+        let close = Rect::new(pr.right() - 42, pr.y + 8, 32, 32);
+        if self.hover_hit == Some(Hit::CloseProfile) {
+            c.fill_round(close, 16, hover());
+        }
+        for d in 0..2 {
+            c.line(
+                close.x + 10 + d,
+                close.y + 10,
+                close.x + 21 + d,
+                close.y + 21,
+                dim(),
+            );
+            c.line(
+                close.x + 21 + d,
+                close.y + 10,
+                close.x + 10 + d,
+                close.y + 21,
+                dim(),
+            );
+        }
+        self.hits.push((close, Hit::CloseProfile));
+        let cx = pr.x + pr.w / 2;
+        let id = match peer {
+            Peer::User(id) | Peer::Chat(id) | Peer::Channel(id) => id,
+        };
+        draw_avatar(c, cx, pr.y + 96, 44, &chat.title, id, chat.kind);
+        let tw = rich::width(&UI_BOLD, &chat.title).min(pr.w - 40);
+        rich::draw_fit(
+            c,
+            &UI_BOLD,
+            cx - tw / 2,
+            pr.y + 150,
+            &chat.title,
+            pr.w - 40,
+            text(),
+        );
+        let members = info.as_ref().map_or(0, |i| i.members);
+        let what = match chat.kind {
+            ChatKind::Channel if members > 0 => {
+                alloc::format!("{} subscribers", group_digits(members))
+            }
+            ChatKind::Group if members > 0 => alloc::format!("{} members", group_digits(members)),
+            ChatKind::Channel => String::from("channel"),
+            ChatKind::Group => String::from("group"),
+            ChatKind::Bot => String::from("bot"),
+            ChatKind::Saved => String::from("your cloud storage"),
+            ChatKind::Private => String::from("user"),
+        };
+        let ww = UI.width(&what);
+        c.draw_text(cx - ww / 2, pr.y + 172, &what, dim());
+
+        let mut y = pr.y + 206;
+        c.fill_rect(pr.x, y - 10, pr.w, 1, line());
+        let mut rows: Vec<(&str, String, String)> = Vec::new();
+        if !chat.username.is_empty() && chat.kind != ChatKind::Saved {
+            let name = alloc::format!("@{}", chat.username);
+            rows.push(("Username", name.clone(), name));
+            let link = alloc::format!("t.me/{}", chat.username);
+            rows.push(("Link", link.clone(), alloc::format!("https://{}", link)));
+        }
+        if let Some(i) = &info {
+            if !i.phone.is_empty() {
+                let phone = alloc::format!("+{}", i.phone.trim_start_matches('+'));
+                rows.push(("Mobile", phone.clone(), phone));
+            }
+        }
+        for (label, value, copy) in rows {
+            let r = Rect::new(pr.x, y - 4, pr.w, 46);
+            let hit = Hit::Copy(copy);
+            if self.hover_hit.as_ref() == Some(&hit) {
+                c.fill(r, hover());
+                let cw = UI.width("Copy");
+                c.draw_text(pr.right() - 20 - cw, y + 10, "Copy", BLUE);
+            }
+            c.draw_text(pr.x + 20, y, &fit(&UI, &value, pr.w - 90), text());
+            c.draw_text(pr.x + 20, y + 19, label, dim());
+            self.hits.push((r, hit));
+            y += 50;
+        }
+        if let Some(about) = info
+            .as_ref()
+            .map(|i| i.about.clone())
+            .filter(|a| !a.is_empty())
+        {
+            let lines = rich::wrap(&UI, &rich::pieces(&UI, &about, &[]), pr.w - 40);
+            for l in lines.iter().take(8) {
+                rich::draw_line(c, &UI, pr.x + 20, y, l, text(), BLUE);
+                y += LINE_H;
+            }
+            let label = if chat.kind == ChatKind::Private || chat.kind == ChatKind::Bot {
+                "Bio"
+            } else {
+                "Description"
+            };
+            c.draw_text(pr.x + 20, y, label, dim());
+            y += 30;
+        } else if info.is_none() {
+            c.draw_text(pr.x + 20, y, "Loading...", dim());
+            y += 30;
+        }
+        // Join or Leave, for channels and supergroups
+        if matches!(peer, Peer::Channel(_)) {
+            let r = Rect::new(pr.x + 20, y.max(pr.bottom() - 60), pr.w - 40, 40);
+            let hit = Hit::Membership(chat.left);
+            if self.hover_hit.as_ref() == Some(&hit) {
+                c.fill_round(r, 8, hover());
+            }
+            let (label, color) = match (chat.left, chat.kind == ChatKind::Channel) {
+                (true, true) => ("Join channel", BLUE),
+                (true, false) => ("Join group", BLUE),
+                (false, true) => ("Leave channel", theme::error()),
+                (false, false) => ("Leave group", theme::error()),
+            };
+            c.text_centered_in(&UI_BOLD, r, label, color);
+            self.hits.push((r, hit));
+        }
+    }
+
+    /// The emoji picker over the chat, above the smiley button.
+    fn draw_picker(&mut self, c: &mut Canvas) {
+        let pr = Self::picker_rect();
+        c.shadow(pr, 12, 6, 2, 60);
+        c.fill_round(pr, 12, panel());
+        c.outline_round(pr, 12, line());
+        self.hits.push((pr, Hit::Blank));
+        let e = emoji::get();
+        let grid = Rect::new(pr.x + 8, pr.y + 8, EMOJI_COLS * EMOJI_CELL, 7 * EMOJI_CELL);
+        {
+            let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
+            sub.clip_to(grid);
+            let clip = sub.clip_rect();
+            let tab = self.picker_tab;
+            let ids = e
+                .list
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| x.1 == tab)
+                .map(|(i, _)| i as u16);
+            for (k, id) in ids.enumerate() {
+                let (col, row) = (k as i32 % EMOJI_COLS, k as i32 / EMOJI_COLS);
+                let r = Rect::new(
+                    grid.x + col * EMOJI_CELL,
+                    grid.y + row * EMOJI_CELL - self.picker_scroll,
+                    EMOJI_CELL,
+                    EMOJI_CELL,
+                );
+                if r.bottom() < grid.y {
+                    continue;
+                }
+                if r.y > grid.bottom() {
+                    break;
+                }
+                let hit = Hit::Emoji(id);
+                if self.hover_hit.as_ref() == Some(&hit) {
+                    sub.fill_round(r.inset(1), 6, hover());
+                }
+                e.draw_in(&mut sub, id, r);
+                let vis = r.intersect(&clip);
+                if !vis.is_empty() {
+                    self.hits.push((vis, hit));
+                }
+            }
+        }
+        // the groups' tabs
+        let ty = pr.bottom() - EMOJI_TABS_H;
+        c.fill_rect(pr.x, ty, pr.w, 1, line());
+        let tw = (pr.w - 16) / GROUPS.len() as i32;
+        for (i, (_, sample)) in GROUPS.iter().enumerate() {
+            let r = Rect::new(pr.x + 8 + i as i32 * tw, ty + 4, tw, EMOJI_TABS_H - 8);
+            let hit = Hit::EmojiTab(i as u8);
+            if i as u8 == self.picker_tab {
+                c.fill_round(r, 6, pick(rgb(0xe4, 0xee, 0xf6), rgb(0x2b, 0x52, 0x78)));
+            } else if self.hover_hit.as_ref() == Some(&hit) {
+                c.fill_round(r, 6, hover());
+            }
+            if let Some((id, _)) = e.at(&[*sample]) {
+                e.draw_in(c, id, r);
+            }
+            self.hits.push((r, hit));
+        }
+    }
+}
+
+/// A chat in the list: avatar, name, the last message or @name, the
+/// time and the unread count.
+fn draw_row(c: &mut Canvas, chat: &Chat, y: i32, is_open: bool, found: bool, now: i64, tz: i64) {
+    let (fg, sub_fg) = if is_open {
+        (rgb(0xff, 0xff, 0xff), rgb(0xe8, 0xf2, 0xfa))
+    } else {
+        (text(), dim())
+    };
+    let id = match chat.peer {
+        Peer::User(id) | Peer::Chat(id) | Peer::Channel(id) => id,
+    };
+    draw_avatar(
+        c,
+        10 + AVATAR / 2,
+        y + ROW_H / 2,
+        AVATAR / 2,
+        &chat.title,
+        id,
+        chat.kind,
+    );
+    let tx = 10 + AVATAR + 12;
+    let date = if found || chat.date == 0 {
+        String::new()
+    } else {
+        short_date(chat.date + tz, now)
+    };
+    let dw = UI.width(&date);
+    c.draw_text(LIST_W - 12 - dw, y + 13, &date, sub_fg);
+    let mut name_x = tx;
+    if chat.kind == ChatKind::Channel || chat.kind == ChatKind::Group {
+        draw_group_mark(c, tx, y + 14, fg, chat.kind == ChatKind::Channel);
+        name_x += 20;
+    }
+    rich::draw_fit(
+        c,
+        &UI_BOLD,
+        name_x,
+        y + 12,
+        &chat.title,
+        LIST_W - 12 - dw - 8 - name_x,
+        fg,
+    );
+    if found {
+        let what = if chat.username.is_empty() {
+            String::from(match chat.kind {
+                ChatKind::Channel => "channel",
+                ChatKind::Group => "group",
+                ChatKind::Bot => "bot",
+                _ => "user",
+            })
+        } else {
+            alloc::format!("@{}", chat.username)
+        };
+        c.draw_text(tx, y + 38, &fit(&UI, &what, LIST_W - 12 - tx), sub_fg);
+        return;
+    }
+    // the last message and the unread count
+    let mut right = LIST_W - 12;
+    if chat.unread > 0 {
+        let n = if chat.unread > 999 {
+            String::from("999+")
+        } else {
+            alloc::format!("{}", chat.unread)
+        };
+        let w = (UI_BOLD.width(&n) + 14).max(22);
+        let badge = Rect::new(right - w, y + 36, w, 22);
+        let color = if is_open {
+            rgb(0xff, 0xff, 0xff)
+        } else {
+            pick(rgb(0x4f, 0xae, 0x4e), rgb(0x3e, 0x88, 0xc7))
+        };
+        c.fill_round(badge, 11, color);
+        c.text_centered_in(
+            &UI_BOLD,
+            badge,
+            &n,
+            if is_open { BLUE } else { rgb(0xff, 0xff, 0xff) },
+        );
+        right -= w + 6;
+    }
+    let mut px = tx;
+    if chat.last_out && chat.kind != ChatKind::Saved {
+        let you = "You: ";
+        px += c.draw_text(px, y + 38, you, if is_open { fg } else { BLUE });
+    }
+    rich::draw_fit(c, &UI, px, y + 38, &chat.last, right - px, sub_fg);
+}
+
+/// Open a downloaded file with its app; files no app here reads are
+/// shown in their folder.
+fn open_file(path: &str) {
+    let lower = path.to_ascii_lowercase();
+    let readable = [
+        ".txt", ".md", ".json", ".csv", ".log", ".html", ".htm", ".xml", ".rs", ".py", ".js", ".c",
+        ".h", ".ini", ".cfg", ".conf",
+    ];
+    if super::picture::is_picture(path)
+        || super::video::is_video(path)
+        || readable.iter().any(|e| lower.ends_with(e))
+    {
+        super::request_file(path);
+    } else {
+        let dir = path.rsplit_once('/').map_or("/", |p| p.0);
+        super::request_folder(dir);
+    }
+}
+
+/// 12345 as "12 345".
+fn group_digits(n: i64) -> String {
+    let digits = alloc::format!("{}", n);
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A file's size for people: "816 B", "12.4 KB", "3.1 MB".
+fn size_text(n: i64) -> String {
+    if n < 1024 {
+        alloc::format!("{} B", n)
+    } else if n < 1024 * 1024 {
+        alloc::format!("{}.{} KB", n / 1024, n % 1024 * 10 / 1024)
+    } else {
+        let m = n * 10 / (1024 * 1024);
+        alloc::format!("{}.{} MB", m / 10, m % 10)
+    }
+}
+
+/// What a picture of `w` x `h` is drawn as in a message at most `max_w`
+/// wide.
+fn pic_size(w: i32, h: i32, max_w: i32) -> (i32, i32) {
+    let (w, h) = if w <= 0 || h <= 0 { (4, 3) } else { (w, h) };
+    let mut pw = max_w.min(w.max(220));
+    let mut ph = (h as i64 * pw as i64 / w as i64) as i32;
+    if ph > PIC_MAX_H {
+        ph = PIC_MAX_H;
+        pw = (w as i64 * ph as i64 / h as i64) as i32;
+    }
+    (pw.clamp(120, max_w), ph.max(60))
+}
+
+/// The picture a message shows (its size), whether it has a file row,
+/// and the "[Sticker]" kind of line for anything else.
+fn media_parts(m: &Message) -> (Option<(i32, i32)>, bool, Option<String>) {
+    if let Some(p) = &m.photo {
+        return (Some((p.w, p.h)), false, None);
+    }
+    if let Some(f) = &m.file {
+        let picture = matches!(f.kind.as_str(), "Video" | "GIF" | "Video message")
+            || (f.kind == "File" && f.mime.starts_with("image/") && f.mime != "image/webp");
+        if f.kind == "Sticker" {
+            return (None, false, Some(String::from("Sticker")));
+        }
+        if let (true, Some((_, w, h))) = (picture, &f.thumb) {
+            return (Some((*w, *h)), false, None);
+        }
+        return (None, true, None);
+    }
+    (None, false, m.media.clone())
 }
 
 /// Lay out the messages top down, with date lines between days.
@@ -1464,25 +2433,46 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
             last_from = i64::MIN;
             continue;
         }
+        let (pic, file_row, label) = media_parts(m);
         let mut text = String::new();
-        if let Some(media) = &m.media {
-            text.push('[');
-            text.push_str(media);
-            text.push(']');
+        let mut shift = 0;
+        if let Some(l) = &label {
+            text = alloc::format!("[{}]", l);
             if !m.text.is_empty() {
                 text.push('\n');
             }
+            shift = text.chars().count();
         }
         text.push_str(&m.text);
-        let text = clean(&text);
-        let inner = max_w - 2 * PAD_X;
-        let lines = wrap(&UI, &text, inner);
+        let mut links = Vec::new();
+        let mut ranges = Vec::new();
+        for (a, b, url) in &m.links {
+            ranges.push((a + shift, b + shift, links.len() as u16));
+            links.push(url.clone());
+        }
+        let pic = pic.map(|(w, h)| pic_size(w, h, max_w - 8));
+        let inner = match pic {
+            Some((pw, _)) => pw + 8 - 2 * PAD_X,
+            None => max_w - 2 * PAD_X,
+        };
+        let lines = if text.is_empty() {
+            Vec::new()
+        } else {
+            rich::wrap(&UI, &rich::pieces(&UI, &text, &ranges), inner)
+        };
         let name = (group && !m.out && m.from_id != last_from).then(|| clean(&m.from));
+        let web = m.web.clone();
+        let bare_pic = pic.is_some() && lines.is_empty() && web.is_none();
         let time_w = time_width(m);
-        let widest = lines.iter().map(|l| UI.width(l)).max().unwrap_or(0);
-        let last_w = lines.last().map_or(0, |l| UI.width(l));
-        let time_below = last_w + 12 + time_w > inner;
-        let mut w = widest.max(if time_below {
+        let widest = lines
+            .iter()
+            .map(|l| rich::line_width(&UI, l))
+            .max()
+            .unwrap_or(0);
+        let last_w = lines.last().map_or(0, |l| rich::line_width(&UI, l));
+        let time_below =
+            !bare_pic && (web.is_some() || lines.is_empty() || last_w + 12 + time_w > inner);
+        let mut w = widest.max(if time_below || bare_pic {
             time_w
         } else {
             last_w + 12 + time_w
@@ -1490,13 +2480,40 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
         if let Some(n) = &name {
             w = w.max(UI_BOLD.width(n).min(inner));
         }
-        let w = w + 2 * PAD_X;
-        let mut h = lines.len() as i32 * LINE_H + 2 * PAD_Y;
+        if let Some((site, title)) = &web {
+            let ww = rich::width(&UI_BOLD, site).max(rich::width(&UI, title)) + 12;
+            w = w.max(ww.min(inner));
+        }
+        if file_row {
+            w = w.max(260.min(inner));
+        }
+        let w = match pic {
+            Some((pw, _)) => pw + 8,
+            None => w + 2 * PAD_X,
+        };
+        let mut h = if pic.is_some() && name.is_none() {
+            4
+        } else {
+            PAD_Y
+        };
+        if name.is_some() {
+            h += LINE_H;
+        }
+        if let Some((_, ph)) = pic {
+            h += ph + if bare_pic { 4 } else { 6 };
+        }
+        if file_row {
+            h += FILE_H;
+        }
+        h += lines.len() as i32 * LINE_H;
+        if web.is_some() {
+            h += WEB_H + 4;
+        }
         if time_below {
             h += LINE_H - 4;
         }
-        if name.is_some() {
-            h += LINE_H;
+        if !bare_pic {
+            h += PAD_Y;
         }
         // messages in a row from the same person sit closer
         let gap = if m.from_id == last_from { 4 } else { 10 };
@@ -1504,13 +2521,18 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
         out.push(Laid {
             y,
             h,
-            kind: LaidKind::Bubble {
+            kind: LaidKind::Bubble(Bubble {
                 index: i,
-                lines,
                 w,
                 name,
+                pic,
+                file_row,
+                label: label.is_some(),
+                lines,
+                links,
+                web,
                 time_below,
-            },
+            }),
         });
         y += h + gap;
     }
@@ -1528,34 +2550,201 @@ fn time_width(m: &Message) -> i32 {
     w
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_bubble(
-    c: &mut Canvas,
-    m: &Message,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    lines: &[String],
-    name: Option<&str>,
-    time_below: bool,
+fn link_color(out: bool) -> Color {
+    if out {
+        pick(rgb(0x2e, 0x8b, 0xcc), rgb(0xa8, 0xd6, 0xff))
+    } else {
+        pick(rgb(0x16, 0x8a, 0xcd), rgb(0x71, 0xba, 0xfa))
+    }
+}
+
+/// What drawing the messages needs besides the message.
+struct Draw<'a> {
+    s: &'a Shared,
+    peer: Peer,
     read_out: i64,
     tz: i64,
-) {
+    hits: &'a mut Vec<(Rect, Hit)>,
+    /// Messages whose picture should be loaded.
+    want: &'a mut Vec<i64>,
+    hover: &'a Option<Hit>,
+}
+
+impl Draw<'_> {
+    /// Remember where something can be clicked, as far as it is seen.
+    fn hit(&mut self, c: &Canvas, r: Rect, hit: Hit) {
+        let r = r.intersect(&c.clip_rect());
+        if !r.is_empty() {
+            self.hits.push((r, hit));
+        }
+    }
+}
+
+/// How a download is going, for the picture's corner or the file's row.
+fn download_text(d: Option<&tg::Download>, size: i64) -> Option<String> {
+    let d = d?;
+    if let Some(e) = &d.failed {
+        return Some(alloc::format!("Failed: {}", e));
+    }
+    if d.path.is_some() {
+        return None;
+    }
+    let total = if d.total > 0 { d.total } else { size };
+    Some(if total > 0 {
+        alloc::format!(
+            "{}% of {}",
+            (d.done * 100 / total).clamp(0, 100),
+            size_text(total)
+        )
+    } else {
+        String::from("Downloading...")
+    })
+}
+
+fn draw_bubble(c: &mut Canvas, d: &mut Draw, m: &Message, b: &Bubble, x: i32, y: i32, h: i32) {
+    let w = b.w;
     let r = Rect::new(x, y, w, h);
     let face = if m.out { bubble_out() } else { bubble_in() };
     c.shadow(r, 10, 2, 1, 30);
     c.fill_round(r, 10, face);
-    let mut ty = y + PAD_Y;
-    if let Some(n) = name {
+    if m.id != 0 {
+        d.hit(c, r, Hit::Bubble(m.id));
+    }
+    let tcolor = if m.out { time_out() } else { time_in() };
+    let bare_pic = b.pic.is_some() && b.lines.is_empty() && b.web.is_none();
+    let mut ty = y + if b.pic.is_some() && b.name.is_none() {
+        4
+    } else {
+        PAD_Y
+    };
+    if let Some(n) = &b.name {
         let n = fit(&UI_BOLD, n, w - 2 * PAD_X);
         c.draw_text_in(&UI_BOLD, x + PAD_X, ty, &n, palette(m.from_id));
         ty += LINE_H;
     }
+    let download = d.s.downloads.get(&(d.peer, m.id));
+    // the picture
+    if let Some((pw, ph)) = b.pic {
+        let pr = Rect::new(x + 4, ty, pw, ph);
+        let grey = pick(rgb(0xd8, 0xde, 0xe4), rgb(0x24, 0x31, 0x40));
+        {
+            let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
+            sub.clip_round(pr, 8);
+            match d.s.previews.get(&(d.peer, m.id)) {
+                Some(Preview::Ready(img)) => {
+                    let (iw, ih) = (img.width as i32, img.height as i32);
+                    if iw >= pw && ih >= ph {
+                        sub.blit_smooth(pr, &img.pixels, iw, ih);
+                    } else {
+                        sub.blit_scaled(pr, &img.pixels, iw, ih, 256);
+                    }
+                }
+                Some(Preview::Loading) => {
+                    sub.fill(pr, grey);
+                }
+                Some(Preview::Failed) => {
+                    sub.fill(pr, grey);
+                    let what = m.file.as_ref().map_or("Photo", |f| f.kind.as_str());
+                    sub.text_centered(pr, what, dim());
+                }
+                None => {
+                    sub.fill(pr, grey);
+                    if m.id != 0 {
+                        d.want.push(m.id);
+                    }
+                }
+            }
+        }
+        let video = m
+            .file
+            .as_ref()
+            .is_some_and(|f| matches!(f.kind.as_str(), "Video" | "GIF" | "Video message"));
+        if video {
+            // a play button in the middle
+            let (cx, cy) = (pr.x + pw / 2, pr.y + ph / 2);
+            c.fill_round_alpha(Rect::new(cx - 22, cy - 22, 44, 44), 22, rgb(0, 0, 0), 120);
+            c.fill_polygon(
+                &[(cx - 7, cy - 11), (cx + 12, cy), (cx - 7, cy + 11)],
+                rgb(0xff, 0xff, 0xff),
+            );
+        }
+        // what it is, or how its download goes, in the corner
+        let size = m
+            .file
+            .as_ref()
+            .map_or_else(|| m.photo.as_ref().map_or(0, |p| p.big_size), |f| f.size);
+        let corner = download_text(download, size).or_else(|| {
+            m.file
+                .as_ref()
+                .map(|f| alloc::format!("{} \u{2022} {}", f.kind, size_text(f.size)))
+        });
+        if let Some(t) = corner {
+            let t = fit(&UI, &t, pw - 24);
+            let cw = UI.width(&t) + 14;
+            let cr = Rect::new(pr.x + 6, pr.y + 6, cw, 22);
+            c.fill_round_alpha(cr, 11, rgb(0, 0, 0), 110);
+            c.text_centered(cr, &t, rgb(0xff, 0xff, 0xff));
+        }
+        if d.hover.as_ref() == Some(&Hit::Media(m.id)) {
+            c.fill_round_alpha(pr, 8, rgb(0xff, 0xff, 0xff), 30);
+        }
+        d.hit(c, pr, Hit::Media(m.id));
+        ty += ph + if bare_pic { 4 } else { 6 };
+    }
+    // a file: an icon, its name, its size or how its download goes
+    if let (true, Some(f)) = (b.file_row, &m.file) {
+        let row = Rect::new(x + PAD_X - 4, ty, w - 2 * PAD_X + 8, FILE_H);
+        let hovered = d.hover.as_ref() == Some(&Hit::Media(m.id));
+        let circle = Rect::new(x + PAD_X, ty + 4, 40, 40);
+        let blue = if m.out {
+            pick(rgb(0x78, 0xc2, 0x72), rgb(0x4a, 0x95, 0xd6))
+        } else {
+            BLUE
+        };
+        c.fill_round(
+            circle,
+            20,
+            if hovered {
+                mix(blue, rgb(0, 0, 0), 20)
+            } else {
+                blue
+            },
+        );
+        let white = rgb(0xff, 0xff, 0xff);
+        let (ax, ay) = (circle.x + 20, circle.y + 11);
+        let saved = download.is_some_and(|d| d.path.is_some());
+        if saved {
+            // a page with a folded corner
+            c.fill_rect(ax - 7, ay, 14, 18, white);
+            c.fill_polygon(&[(ax + 3, ay), (ax + 7, ay), (ax + 7, ay + 4)], blue);
+        } else {
+            // an arrow down
+            c.fill_rect(ax - 1, ay, 3, 12, white);
+            c.fill_polygon(
+                &[(ax - 7, ay + 10), (ax + 8, ay + 10), (ax, ay + 18)],
+                white,
+            );
+        }
+        let tx = circle.right() + 10;
+        let tw = row.right() - tx - 4;
+        rich::draw_fit(c, &UI_BOLD, tx, ty + 5, &f.name, tw, text());
+        let info = download_text(download, f.size).unwrap_or_else(|| {
+            if saved {
+                alloc::format!("{} \u{2022} saved, click to open", size_text(f.size))
+            } else {
+                alloc::format!("{} \u{2022} {}", size_text(f.size), f.kind)
+            }
+        });
+        c.draw_text(tx, ty + 25, &fit(&UI, &info, tw), tcolor);
+        d.hit(c, row, Hit::Media(m.id));
+        ty += FILE_H;
+    }
+    // the text
     let body = if m.failed { theme::error() } else { text() };
-    for (i, l) in lines.iter().enumerate() {
-        // the [Photo] line of a message with something attached
-        let color = if i == 0 && m.media.is_some() && l.starts_with('[') {
+    let lc = link_color(m.out);
+    for (i, l) in b.lines.iter().enumerate() {
+        // the [Sticker] line of a message with something attached
+        let color = if i == 0 && b.label {
             if m.out {
                 time_out()
             } else {
@@ -1564,19 +2753,45 @@ fn draw_bubble(
         } else {
             body
         };
-        c.draw_text(x + PAD_X, ty, l, color);
+        rich::draw_line(c, &UI, x + PAD_X, ty, l, color, lc);
+        for (px, p) in l {
+            if let Some(k) = p.link {
+                if let Some(url) = b.links.get(k as usize) {
+                    let hit = Hit::Link(url.clone());
+                    d.hit(c, Rect::new(x + PAD_X + px, ty, p.w, LINE_H), hit);
+                }
+            }
+        }
         ty += LINE_H;
     }
+    // the link preview: a bar, the site, the title
+    if let Some((site, title)) = &b.web {
+        let wy = ty + 2;
+        c.fill_round(Rect::new(x + PAD_X, wy, 3, WEB_H - 4), 1, lc);
+        let tw = w - 2 * PAD_X - 12;
+        rich::draw_fit(c, &UI_BOLD, x + PAD_X + 10, wy + 2, site, tw, lc);
+        rich::draw_fit(c, &UI, x + PAD_X + 10, wy + LINE_H + 2, title, tw, text());
+        ty += WEB_H + 4;
+    }
     // the time, and ticks for our messages
-    let tcolor = if m.out { time_out() } else { time_in() };
     let mut time = String::new();
     if m.edited {
         time.push_str("edited ");
     }
-    time.push_str(&clock(m.date + tz));
+    time.push_str(&clock(m.date + d.tz));
     let tw = UI.width(&time) + if m.out { 20 } else { 0 };
     let tx = x + w - PAD_X - tw;
-    let tyy = if time_below { ty - 2 } else { ty - LINE_H };
+    let (tyy, tcolor) = if bare_pic {
+        // over the picture, on a dark pill
+        let ty2 = ty - 4 - 26;
+        let pr = Rect::new(tx - 8, ty2 - 2, tw + 12, 22);
+        c.fill_round_alpha(pr, 11, rgb(0, 0, 0), 110);
+        (ty2, rgb(0xff, 0xff, 0xff))
+    } else if b.time_below {
+        (ty - 2, tcolor)
+    } else {
+        (ty - LINE_H, tcolor)
+    };
     c.draw_text(tx, tyy, &time, tcolor);
     if m.out {
         let cx = x + w - PAD_X - 16;
@@ -1590,7 +2805,7 @@ fn draw_bubble(
             c.fill_rect(cx + 7, cy + 5, 3, 1, tcolor);
         } else {
             draw_tick(c, cx, cy + 1, tcolor);
-            if m.id <= read_out {
+            if m.id <= d.read_out {
                 draw_tick(c, cx + 5, cy + 1, tcolor);
             }
         }

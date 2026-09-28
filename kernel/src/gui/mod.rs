@@ -17,19 +17,20 @@
 //! icons with a selection rectangle and the Recycle Bin (deskicons.rs).
 
 mod about;
-mod telegram;
-mod vpn;
-mod installer;
-mod welcome;
 mod anim;
 mod browser;
 mod calc;
 mod canvas;
 mod deskicons;
 mod desktops;
+mod emoji;
 mod explorer;
 mod filedialog;
+mod installer;
+mod rich;
 mod snip;
+mod telegram;
+mod welcome;
 #[rustfmt::skip]
 mod font_data;
 mod icons;
@@ -38,20 +39,21 @@ mod notepad;
 mod paint;
 mod personalize;
 mod photos;
-mod taskmgr;
-mod store;
 mod picture;
 mod popup;
 mod power;
 mod search;
 mod settings;
 mod start;
+mod store;
 mod taskbar;
+mod taskmgr;
 mod terminal;
 mod text;
 mod theme;
 mod tray;
 mod video;
+mod vpn;
 mod wallpaper;
 #[rustfmt::skip]
 pub mod webfont;
@@ -2038,7 +2040,12 @@ impl<'a> Desktop<'a> {
                 self.minimize(app);
             } else if !right && w.title_bar().contains(x, y) {
                 self.drag = Some((app, x - w.rect.x, y - w.rect.y));
-            } else if right && w.client().contains(x, y) && has_edit_menu(app) {
+            } else if right
+                && w.client().contains(x, y)
+                && has_edit_menu(app)
+                && !(app == App::Telegram
+                    && self.telegram.own_menu(x - w.client().x, y - w.client().y))
+            {
                 self.edit_menu(app, x, y);
             } else if w.client().contains(x, y) {
                 self.capture = Some(app);
@@ -3138,8 +3145,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             } else if let Some((i, _)) = &desk.desk_icons.renaming {
                 let r = desk.icon_rect(*i).inset(-8);
                 desk.damage(r);
-            } else if let Some(app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram | App::Vpn)) =
-                desk.focused
+            } else if let Some(
+                app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram | App::Vpn),
+            ) = desk.focused
             {
                 // the text caret blinks
                 desk.stale[app.index()] = true;

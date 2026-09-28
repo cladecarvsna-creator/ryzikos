@@ -17,7 +17,10 @@ use smoltcp::wire::Ipv4Address;
 use super::crypto;
 use super::mtproto::{self, now_ms, Error, Result, Session, Transport};
 use super::tl::{self, Kind, Obj, Reader, Value};
-use super::{Chat, ChatKind, Cmd, Message, Peer, Shared, Stage};
+use super::{
+    Chat, ChatKind, Cmd, Download, FileInfo, FileRef, Info, Message, Peer, Photo, Preview, Shared,
+    Stage,
+};
 use crate::{fs, serial};
 
 /// Telegram's data centres, and the test ones.
@@ -41,6 +44,11 @@ const HISTORY_PAGE: i32 = 40;
 /// Files go up in parts of this size (512 KB must be a multiple of it).
 const UPLOAD_PART: usize = 128 * 1024;
 const MAX_UPLOAD: usize = 64 << 20;
+/// Downloads come in parts of this size (Telegram wants a power of two).
+const DOWNLOAD_PART: usize = 512 * 1024;
+const MAX_DOWNLOAD: usize = 256 << 20;
+/// Pictures in the chat are at most this many pixels wide and high.
+const PREVIEW_MAX: usize = 320;
 
 /// The last things the client did: `telegram log` shows them, and the
 /// connecting screen shows the newest.
@@ -55,7 +63,13 @@ pub(super) fn log(s: &str) {
         recent.remove(0);
     }
     let t = now_ms() / 1000;
-    recent.push(format!("{:02}:{:02}:{:02} {}", t / 3600 % 24, t / 60 % 60, t % 60, s));
+    recent.push(format!(
+        "{:02}:{:02}:{:02} {}",
+        t / 3600 % 24,
+        t / 60 % 60,
+        t % 60,
+        s
+    ));
 }
 
 /// What the client did lately, oldest first.
@@ -67,7 +81,10 @@ pub fn recent_log() -> Vec<String> {
 pub fn last_step() -> Option<String> {
     let recent = RECENT.lock();
     let line = recent.last()?;
-    Some(line.split_once(' ').map_or(line.clone(), |(_, s)| s.to_string()))
+    Some(
+        line.split_once(' ')
+            .map_or(line.clone(), |(_, s)| s.to_string()),
+    )
 }
 
 // ---- settings ----------------------------------------------------------------------
@@ -513,6 +530,8 @@ struct UserInfo {
     access_hash: i64,
     name: String,
     bot: bool,
+    username: String,
+    phone: String,
 }
 
 #[derive(Clone)]
@@ -520,6 +539,9 @@ struct ChatInfo {
     access_hash: i64,
     title: String,
     broadcast: bool,
+    username: String,
+    /// We are not (or no longer) in it.
+    left: bool,
 }
 
 struct Client {
@@ -542,6 +564,8 @@ struct Client {
     login_token: bool,
     /// When to wake up with [`Cmd::Wake`], in ms; 0 for never.
     wake_at: i64,
+    /// Connections to other data centres, for their files.
+    media: BTreeMap<i32, Conn>,
 }
 
 /// How a way of logging in ended.
@@ -576,6 +600,7 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
         use_qr: true,
         login_token: false,
         wake_at: 0,
+        media: BTreeMap::new(),
     };
     let mut failures = 0;
     loop {
@@ -651,6 +676,16 @@ impl Client {
         let text = text.into();
         self.update(|s| {
             s.error = Some(text);
+            s.busy = false;
+        });
+    }
+
+    /// A note for the window that goes away by itself, for things that
+    /// went wrong once signed in (a link to nowhere, a failed join).
+    fn notice(&self, text: impl Into<String>) {
+        let text = text.into();
+        self.update(|s| {
+            s.notice = Some(text);
             s.busy = false;
         });
     }
@@ -845,7 +880,10 @@ impl Client {
                 ],
             );
             let answer = match self.call(&req) {
-                Ok(v) => v.as_obj().cloned().ok_or("bad answer to exportLoginToken")?,
+                Ok(v) => v
+                    .as_obj()
+                    .cloned()
+                    .ok_or("bad answer to exportLoginToken")?,
                 Err(e) if e.is("SESSION_PASSWORD_NEEDED") => {
                     return self.password().map(Next::Done)
                 }
@@ -885,7 +923,10 @@ impl Client {
                 );
                 match self.call(&req) {
                     Ok(v) => {
-                        let o = v.as_obj().cloned().ok_or("bad answer to importLoginToken")?;
+                        let o = v
+                            .as_obj()
+                            .cloned()
+                            .ok_or("bad answer to importLoginToken")?;
                         if o.is("auth.loginTokenMigrateTo") {
                             return Err(Error::Other(String::from("the QR login moved twice")));
                         }
@@ -979,7 +1020,9 @@ impl Client {
             let code = match self.next_command()? {
                 None => return Ok(Next::Done(Some(Stop::Cancelled))),
                 Some(Cmd::Code(c)) => c,
-                Some(Cmd::Phone(_)) | Some(Cmd::LogOut) => return Ok(Next::Done(Some(Stop::Restart))),
+                Some(Cmd::Phone(_)) | Some(Cmd::LogOut) => {
+                    return Ok(Next::Done(Some(Stop::Restart)))
+                }
                 Some(Cmd::UseQr) => return Ok(Next::Switch),
                 Some(_) => {
                     self.update(|s| s.busy = false);
@@ -1008,7 +1051,9 @@ impl Client {
                     self.signed_in(Some(&auth))?;
                     return Ok(Next::Done(None));
                 }
-                Err(e) if e.is("SESSION_PASSWORD_NEEDED") => return self.password().map(Next::Done),
+                Err(e) if e.is("SESSION_PASSWORD_NEEDED") => {
+                    return self.password().map(Next::Done)
+                }
                 Err(e) if e.is("PHONE_CODE_EXPIRED") => {
                     self.error("The code expired. Enter the phone number again.");
                     return Ok(Next::Done(Some(Stop::Restart)));
@@ -1149,9 +1194,17 @@ impl Client {
             Cmd::Send(peer, text) => self.send_message(peer, text)?,
             Cmd::SendFile(peer, path) => match self.send_file(peer, path) {
                 // a file that can't be read is no reason to reconnect
-                Err(Error::Other(e)) => self.error(e),
+                Err(Error::Other(e)) => self.notice(e),
                 other => other?,
             },
+            Cmd::Preview(peer, id) => self.preview(peer, id)?,
+            Cmd::Download(peer, id, open) => self.download(peer, id, open)?,
+            Cmd::Search(q) => self.search(q)?,
+            Cmd::Show(peer) => self.show(peer),
+            Cmd::Resolve(link) => self.resolve(&link)?,
+            Cmd::Join(peer) => self.join(peer, true)?,
+            Cmd::Leave(peer) => self.join(peer, false)?,
+            Cmd::Info(peer) => self.info(peer)?,
             Cmd::Reload => {
                 self.load_dialogs()?;
                 let open: Vec<Peer> = self.shared.borrow().history.keys().copied().collect();
@@ -1171,6 +1224,513 @@ impl Client {
             _ => {}
         }
         Ok(None)
+    }
+
+    // ---- files ------------------------------------------------------------------------
+
+    /// Call a method at data centre `dc`: through our main connection when
+    /// it is that one, otherwise through one we sign in to with an
+    /// exported authorization. Trouble there doesn't break the main one.
+    fn call_dc(&mut self, dc: i32, req: &Obj) -> Result<Value> {
+        if dc == 0 || dc == self.saved.dc {
+            return self.call(req);
+        }
+        if !self.media.contains_key(&dc) {
+            log(&format!("connecting to DC {} for its files", dc));
+            let (mut conn, _) =
+                Conn::open(&self.cfg, dc, None).map_err(|e| Error::Other(e.text()))?;
+            let exported = self.call(&Obj::new(
+                "auth.exportAuthorization",
+                &[("dc_id", Value::Int(dc))],
+            ))?;
+            let exported = exported
+                .as_obj()
+                .cloned()
+                .ok_or("bad exported authorization")?;
+            conn.invoke(
+                &self.cfg,
+                &Obj::new(
+                    "auth.importAuthorization",
+                    &[
+                        ("id", Value::Long(exported.int("id"))),
+                        ("bytes", Value::Bytes(exported.bytes("bytes").to_vec())),
+                    ],
+                ),
+            )
+            .map_err(|e| Error::Other(e.text()))?;
+            self.media.insert(dc, conn);
+        }
+        let conn = self.media.get_mut(&dc).ok_or("no connection")?;
+        let result = conn.invoke(&self.cfg, req);
+        conn.updates.clear();
+        match result {
+            Err(e @ Error::Rpc { .. }) => Err(e),
+            Err(e) => {
+                self.media.remove(&dc);
+                Err(Error::Other(e.text()))
+            }
+            ok => ok,
+        }
+    }
+
+    /// Serve the main connection while a long download runs elsewhere.
+    fn keep_alive(&mut self) -> Result<()> {
+        if let Some(conn) = &mut self.conn {
+            conn.poll()?;
+            let updates = core::mem::take(&mut conn.updates);
+            for u in updates {
+                self.apply(&u);
+            }
+        }
+        Ok(())
+    }
+
+    /// Download a file, or one size (`thumb`) of a photo or a file's
+    /// preview. With `progress`, the download of that message counts up.
+    fn get_file(
+        &mut self,
+        f: &FileRef,
+        thumb: &str,
+        progress: Option<(Peer, i64)>,
+    ) -> Result<Vec<u8>> {
+        let location = Obj::new(
+            if f.photo {
+                "inputPhotoFileLocation"
+            } else {
+                "inputDocumentFileLocation"
+            },
+            &[
+                ("id", Value::Long(f.id)),
+                ("access_hash", Value::Long(f.access_hash)),
+                ("file_reference", Value::Bytes(f.file_reference.clone())),
+                ("thumb_size", Value::str(thumb)),
+            ],
+        );
+        let mut dc = f.dc;
+        let mut data: Vec<u8> = Vec::new();
+        loop {
+            let req = Obj::new(
+                "upload.getFile",
+                &[
+                    ("location", location.clone().into()),
+                    ("offset", Value::Long(data.len() as i64)),
+                    ("limit", Value::Int(DOWNLOAD_PART as i32)),
+                ],
+            );
+            let v = match self.call_dc(dc, &req) {
+                Err(e) if e.number_after("FILE_MIGRATE_").is_some() => {
+                    dc = e.number_after("FILE_MIGRATE_").unwrap_or(2) as i32;
+                    continue;
+                }
+                other => other?,
+            };
+            let part = v
+                .as_obj()
+                .map(|o| o.bytes("bytes").to_vec())
+                .unwrap_or_default();
+            let last = part.len() < DOWNLOAD_PART;
+            data.extend_from_slice(&part);
+            if data.len() > MAX_DOWNLOAD {
+                return Err(Error::Other(String::from(
+                    "the file is too big (over 256 MB)",
+                )));
+            }
+            if let Some(key) = progress {
+                let done = data.len() as i64;
+                self.update(|s| {
+                    if let Some(d) = s.downloads.get_mut(&key) {
+                        d.done = done;
+                    }
+                });
+            }
+            if last {
+                return Ok(data);
+            }
+            self.keep_alive()?;
+        }
+    }
+
+    /// Get a message again, for a fresh file_reference (they expire).
+    fn refresh(&mut self, peer: Peer, id: i64) -> Result<Option<Message>> {
+        let ids = Value::Vector(alloc::vec![Obj::new(
+            "inputMessageID",
+            &[("id", Value::Int(id as i32))]
+        )
+        .into()]);
+        let req = match peer {
+            Peer::Channel(_) => Obj::new(
+                "channels.getMessages",
+                &[("channel", self.input_channel(peer).into()), ("id", ids)],
+            ),
+            _ => Obj::new("messages.getMessages", &[("id", ids)]),
+        };
+        let v = self.call(&req)?;
+        let o = v.as_obj().ok_or("bad messages")?;
+        self.remember_all(o);
+        let fresh = o
+            .vec("messages")
+            .iter()
+            .filter_map(|m| m.as_obj())
+            .find_map(|m| self.convert(m));
+        if let Some(m) = &fresh {
+            let m = m.clone();
+            self.update(|s| {
+                if let Some(h) = s.history.get_mut(&peer) {
+                    if let Some(old) = h.messages.iter_mut().find(|x| x.id == id) {
+                        *old = m;
+                    }
+                }
+            });
+        }
+        Ok(fresh)
+    }
+
+    fn message(&self, peer: Peer, id: i64) -> Option<Message> {
+        let s = self.shared.borrow();
+        s.history
+            .get(&peer)?
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+    }
+
+    /// What to download for a message: the file, the size, and a name.
+    fn what(m: &Message, preview: bool) -> Option<(FileRef, String, String, i64)> {
+        if let Some(p) = &m.photo {
+            let size = if preview { &p.small } else { &p.big };
+            return Some((
+                p.file.clone(),
+                size.clone(),
+                format!("photo_{}.jpg", p.file.id as u64 % 1_000_000),
+                p.big_size,
+            ));
+        }
+        let f = m.file.as_ref()?;
+        if preview {
+            let (t, _, _) = f.thumb.clone()?;
+            return Some((f.file.clone(), t, f.name.clone(), 0));
+        }
+        Some((f.file.clone(), String::new(), f.name.clone(), f.size))
+    }
+
+    /// Get a file, asking for the message again once if its reference
+    /// has run out.
+    fn fetch(
+        &mut self,
+        peer: Peer,
+        id: i64,
+        preview: bool,
+        progress: Option<(Peer, i64)>,
+    ) -> Result<Vec<u8>> {
+        let m = self.message(peer, id).ok_or("the message is gone")?;
+        let (file, thumb, _, _) = Self::what(&m, preview).ok_or("nothing to download")?;
+        match self.get_file(&file, &thumb, progress) {
+            Err(e) if matches!(&e, Error::Rpc { message, .. } if message.starts_with("FILE_REFERENCE_")) =>
+            {
+                let m = self.refresh(peer, id)?.ok_or("the message is gone")?;
+                let (file, thumb, _, _) = Self::what(&m, preview).ok_or("nothing to download")?;
+                self.get_file(&file, &thumb, progress)
+            }
+            other => other,
+        }
+    }
+
+    /// Load the picture of a message for the chat.
+    fn preview(&mut self, peer: Peer, id: i64) -> Result<()> {
+        let result = match self.fetch(peer, id, true, None) {
+            Ok(data) => crate::web::image::decode(&data)
+                .map(|img| shrink(img, PREVIEW_MAX, PREVIEW_MAX))
+                .ok_or(Error::Other(String::from("can't read the picture"))),
+            Err(e) => Err(e),
+        };
+        let state = match result {
+            Ok(img) => Preview::Ready(img),
+            Err(e @ Error::Net(_)) | Err(e @ Error::KeyUnknown) => {
+                self.update(|s| {
+                    s.previews.remove(&(peer, id));
+                });
+                return Err(e);
+            }
+            Err(e) => {
+                log(&format!("no preview for message {}: {}", id, e.text()));
+                Preview::Failed
+            }
+        };
+        self.update(|s| {
+            s.previews.insert((peer, id), state);
+        });
+        Ok(())
+    }
+
+    /// Download a message's photo or file to Downloads.
+    fn download(&mut self, peer: Peer, id: i64, open: bool) -> Result<()> {
+        let key = (peer, id);
+        let there = self
+            .shared
+            .borrow()
+            .downloads
+            .get(&key)
+            .and_then(|d| d.path.clone());
+        if let Some(path) = there {
+            if open && fs::exists(&path) {
+                self.update(|s| s.to_open.push(path));
+                return Ok(());
+            }
+        }
+        let Some(m) = self.message(peer, id) else {
+            return Ok(());
+        };
+        let Some((_, _, name, total)) = Self::what(&m, false) else {
+            return Ok(());
+        };
+        self.update(|s| {
+            s.downloads.insert(
+                key,
+                Download {
+                    total,
+                    ..Default::default()
+                },
+            );
+        });
+        log(&format!("downloading {}", name));
+        let result = self
+            .fetch(peer, id, false, Some(key))
+            .and_then(|data| save_download(&name, &data).map_err(Error::Other));
+        match result {
+            Ok(path) => {
+                log(&format!("saved {}", path));
+                self.update(|s| {
+                    if let Some(d) = s.downloads.get_mut(&key) {
+                        d.done = d.total.max(d.done);
+                        d.path = Some(path.clone());
+                    }
+                    if open {
+                        s.to_open.push(path);
+                    }
+                });
+                Ok(())
+            }
+            Err(e) => {
+                let text = e.text();
+                self.update(|s| {
+                    if let Some(d) = s.downloads.get_mut(&key) {
+                        d.failed = Some(text);
+                    }
+                });
+                match e {
+                    Error::Net(_) | Error::KeyUnknown => Err(e),
+                    _ => Ok(()),
+                }
+            }
+        }
+    }
+
+    // ---- finding chats ----------------------------------------------------------------
+
+    /// Look for people, groups and channels by name or @name.
+    fn search(&mut self, q: String) -> Result<()> {
+        let req = Obj::new(
+            "contacts.search",
+            &[("q", Value::str(&q)), ("limit", Value::Int(30))],
+        );
+        let found = match self.call(&req) {
+            Ok(v) => {
+                let o = v.as_obj().ok_or("bad search answer")?.clone();
+                self.remember_all(&o);
+                let mut peers: Vec<Peer> = Vec::new();
+                for p in o.vec("my_results").iter().chain(o.vec("results")) {
+                    if let Some(peer) = peer_of(p.as_obj()) {
+                        if !peers.contains(&peer) {
+                            peers.push(peer);
+                        }
+                    }
+                }
+                peers.into_iter().map(|p| self.new_chat(p)).collect()
+            }
+            Err(Error::Rpc { .. }) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        self.update(|s| s.found = Some((q, found)));
+        Ok(())
+    }
+
+    /// Put a chat in the list if it isn't there, and have the window open it.
+    fn show(&mut self, peer: Peer) {
+        let chat = self.new_chat(peer);
+        self.update(|s| {
+            if s.chat(peer).is_none() {
+                // after the pinned chats
+                let at = s.chats.iter().take_while(|c| c.pinned).count();
+                s.chats.insert(at, chat);
+            }
+            s.goto = Some(peer);
+        });
+    }
+
+    /// Open @name, t.me/name or tg://resolve?domain=name.
+    fn resolve(&mut self, link: &str) -> Result<()> {
+        let l = link.trim();
+        let l = l
+            .strip_prefix("https://")
+            .or_else(|| l.strip_prefix("http://"))
+            .unwrap_or(l);
+        let name = if let Some(rest) = l.strip_prefix("tg://resolve?domain=") {
+            rest.split('&').next().unwrap_or("")
+        } else if let Some(rest) = l
+            .strip_prefix("t.me/")
+            .or_else(|| l.strip_prefix("telegram.me/"))
+            .or_else(|| l.strip_prefix("telegram.dog/"))
+        {
+            rest.trim_start_matches("s/")
+                .split(['/', '?'])
+                .next()
+                .unwrap_or("")
+        } else {
+            l.trim_start_matches('@')
+        };
+        if name.is_empty() || name.starts_with('+') || name == "joinchat" {
+            self.notice("RyzikOS can't open invite links yet");
+            return Ok(());
+        }
+        if let Some(id) = link
+            .strip_prefix("tg://user?id=")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            self.show(Peer::User(id));
+            return Ok(());
+        }
+        log(&format!("looking up @{}", name));
+        let req = Obj::new(
+            "contacts.resolveUsername",
+            &[("username", Value::str(name))],
+        );
+        match self.call(&req) {
+            Ok(v) => {
+                let o = v.as_obj().ok_or("bad answer")?.clone();
+                self.remember_all(&o);
+                if let Some(peer) = peer_of(o.obj("peer")) {
+                    self.show(peer);
+                }
+            }
+            Err(e @ Error::Rpc { .. }) => {
+                self.notice(
+                    if e.is("USERNAME_NOT_OCCUPIED") || e.is("USERNAME_INVALID") {
+                        format!("Nobody on Telegram is called @{}", name)
+                    } else {
+                        friendly(&e)
+                    },
+                );
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    /// Join a channel or group we found, or leave one.
+    fn join(&mut self, peer: Peer, join: bool) -> Result<()> {
+        if !matches!(peer, Peer::Channel(_)) {
+            return Ok(());
+        }
+        let req = Obj::new(
+            if join {
+                "channels.joinChannel"
+            } else {
+                "channels.leaveChannel"
+            },
+            &[("channel", self.input_channel(peer).into())],
+        );
+        match self.call(&req) {
+            Ok(v) => {
+                if let Some(o) = v.as_obj() {
+                    let o = o.clone();
+                    self.apply(&o);
+                }
+                if let Peer::Channel(id) = peer {
+                    if let Some(c) = self.chats.get_mut(&id) {
+                        c.left = !join;
+                    }
+                }
+                self.update(|s| {
+                    if let Some(c) = s.chats.iter_mut().find(|c| c.peer == peer) {
+                        c.left = !join;
+                    }
+                });
+            }
+            Err(e @ Error::Rpc { .. }) => self.notice(friendly(&e)),
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    /// Load what the profile of a chat shows.
+    fn info(&mut self, peer: Peer) -> Result<()> {
+        let req = match peer {
+            Peer::User(id) => Obj::new(
+                "users.getFullUser",
+                &[(
+                    "id",
+                    if id == self.me {
+                        Obj::new("inputUserSelf", &[])
+                    } else {
+                        Obj::new(
+                            "inputUser",
+                            &[
+                                ("user_id", Value::Long(id)),
+                                (
+                                    "access_hash",
+                                    Value::Long(self.users.get(&id).map_or(0, |u| u.access_hash)),
+                                ),
+                            ],
+                        )
+                    }
+                    .into(),
+                )],
+            ),
+            Peer::Chat(id) => Obj::new("messages.getFullChat", &[("chat_id", Value::Long(id))]),
+            Peer::Channel(_) => Obj::new(
+                "channels.getFullChannel",
+                &[("channel", self.input_channel(peer).into())],
+            ),
+        };
+        let mut info = Info::default();
+        if let Peer::User(id) = peer {
+            info.phone = self
+                .users
+                .get(&id)
+                .map_or(String::new(), |u| u.phone.clone());
+        }
+        match self.call(&req) {
+            Ok(v) => {
+                let o = v.as_obj().ok_or("bad answer")?.clone();
+                self.remember_all(&o);
+                if let Some(u) = o.obj("full_user") {
+                    info.about = u.string("about");
+                }
+                if let Some(c) = o.obj("full_chat") {
+                    info.about = c.string("about");
+                    info.members = c.int("participants_count");
+                    if info.members == 0 {
+                        info.members = c
+                            .obj("participants")
+                            .map_or(0, |p| p.vec("participants").len() as i64);
+                    }
+                }
+            }
+            Err(Error::Rpc { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        // a name learned on the way
+        let chat = self.new_chat(peer);
+        self.update(|s| {
+            if let Some(c) = s.chats.iter_mut().find(|c| c.peer == peer) {
+                if c.username.is_empty() {
+                    c.username = chat.username.clone();
+                }
+            }
+            s.info.insert(peer, info);
+        });
+        Ok(())
     }
 
     fn input_peer(&self, peer: Peer) -> Obj {
@@ -1271,6 +1831,18 @@ impl Client {
                 None => (String::from("Unknown chat"), ChatKind::Group),
             },
         };
+        let (username, left) = match peer {
+            Peer::User(id) => (
+                self.users
+                    .get(&id)
+                    .map_or(String::new(), |u| u.username.clone()),
+                false,
+            ),
+            Peer::Chat(id) | Peer::Channel(id) => self
+                .chats
+                .get(&id)
+                .map_or((String::new(), false), |c| (c.username.clone(), c.left)),
+        };
         Chat {
             peer,
             title,
@@ -1281,6 +1853,8 @@ impl Client {
             pinned: false,
             read_out: 0,
             kind,
+            username,
+            left,
         }
     }
 
@@ -1326,6 +1900,15 @@ impl Client {
                 page.retain(|m| m.id < before);
                 page.append(&mut h.messages);
                 h.messages = page;
+            }
+            // a chat found by the search or a link: its last message
+            let newest = h.messages.iter().rev().find(|m| m.id != 0).cloned();
+            if let (Some(c), Some(m)) = (s.chats.iter_mut().find(|c| c.peer == peer), newest) {
+                if c.date == 0 {
+                    c.last = preview(&m);
+                    c.last_out = m.out;
+                    c.date = m.date;
+                }
             }
         });
         Ok(())
@@ -1400,6 +1983,7 @@ impl Client {
             edited: false,
             random_id,
             failed: false,
+            ..Default::default()
         };
         self.sending.insert(random_id, peer);
         self.update(|s| {
@@ -1449,7 +2033,11 @@ impl Client {
     /// everything else as a file.
     fn send_file(&mut self, peer: Peer, path: String) -> Result<()> {
         let data = fs::read(&path).map_err(|e| {
-            Error::Other(format!("Can't read {}: {}", fs::display(&path), e.message()))
+            Error::Other(format!(
+                "Can't read {}: {}",
+                fs::display(&path),
+                e.message()
+            ))
         })?;
         if data.len() > MAX_UPLOAD {
             return Err(Error::Other(String::from(
@@ -1481,10 +2069,15 @@ impl Client {
             edited: false,
             random_id,
             failed: false,
+            ..Default::default()
         };
         self.sending.insert(random_id, peer);
         self.update(|s| {
-            s.history.entry(peer).or_default().messages.push(local.clone());
+            s.history
+                .entry(peer)
+                .or_default()
+                .messages
+                .push(local.clone());
         });
         self.bump_chat(peer, &local);
         let result = self.upload_and_send(peer, &data, &name, mime, photo, random_id, &label);
@@ -1497,7 +2090,11 @@ impl Client {
             }
             Err(e) => {
                 self.sending.remove(&random_id);
-                let text = format!("{}: {} (not sent)", if photo { "Photo" } else { "File" }, name);
+                let text = format!(
+                    "{}: {} (not sent)",
+                    if photo { "Photo" } else { "File" },
+                    name
+                );
                 self.update(|s| {
                     if let Some(m) = s
                         .history
@@ -1588,7 +2185,10 @@ impl Client {
         let media = if photo {
             Obj::new("inputMediaUploadedPhoto", &[("file", file.into())])
         } else {
-            let attr = Obj::new("documentAttributeFilename", &[("file_name", Value::str(name))]);
+            let attr = Obj::new(
+                "documentAttributeFilename",
+                &[("file_name", Value::str(name))],
+            );
             Obj::new(
                 "inputMediaUploadedDocument",
                 &[
@@ -1655,18 +2255,22 @@ impl Client {
                 } else {
                     (Peer::Chat(u.int("chat_id")), u.int("from_id"))
                 };
+                let text = u.string("message");
+                let links = links_of(&text, u.vec("entities"));
                 let msg = Message {
                     id: u.int("id"),
                     out,
                     from: self.name_of(from),
                     from_id: from,
-                    text: u.string("message"),
+                    text,
                     media: None,
                     service: false,
                     date: u.int("date"),
                     edited: false,
                     random_id: 0,
                     failed: false,
+                    links,
+                    ..Default::default()
                 };
                 self.incoming(peer, msg);
             }
@@ -1835,6 +2439,8 @@ impl Client {
                     access_hash: 0,
                     title,
                     broadcast: false,
+                    username: String::new(),
+                    left: c.flag("left") || c.is("chatForbidden"),
                 },
                 "channel" | "channelForbidden" => {
                     let old = self.chats.get(&id);
@@ -1844,10 +2450,21 @@ impl Client {
                     } else {
                         c.int("access_hash")
                     };
+                    let min = c.flag("min");
                     ChatInfo {
                         access_hash: hash,
                         title,
                         broadcast: c.flag("broadcast"),
+                        username: match (username_of(c), old) {
+                            (u, Some(o)) if u.is_empty() && min => o.username.clone(),
+                            (u, _) => u,
+                        },
+                        // "min" channels don't say whether we are in them
+                        left: if min {
+                            old.is_none_or(|o| o.left)
+                        } else {
+                            c.flag("left") || c.is("channelForbidden")
+                        },
                     }
                 }
                 _ => continue,
@@ -1894,6 +2511,14 @@ impl Client {
                 access_hash: hash,
                 name,
                 bot: u.flag("bot"),
+                username: match (username_of(u), &old) {
+                    (n, Some(o)) if n.is_empty() && u.flag("min") => o.username.clone(),
+                    (n, _) => n,
+                },
+                phone: match (u.string("phone"), &old) {
+                    (p, Some(o)) if p.is_empty() => o.phone.clone(),
+                    (p, _) => p,
+                },
             },
         );
     }
@@ -1926,6 +2551,15 @@ impl Client {
         } else {
             (m.string("message"), m.obj("media").and_then(media_label))
         };
+        let (photo, file, web) = match m.obj("media") {
+            Some(md) if !service => parse_media(md),
+            _ => (None, None, None),
+        };
+        let links = if service {
+            Vec::new()
+        } else {
+            links_of(&text, m.vec("entities"))
+        };
         Some(Message {
             id: m.int("id"),
             out,
@@ -1938,6 +2572,10 @@ impl Client {
             edited: m.get("edit_date").is_some() && !m.flag("edit_hide"),
             random_id: 0,
             failed: false,
+            photo,
+            file,
+            links,
+            web,
         })
     }
 }
@@ -1968,6 +2606,319 @@ pub fn preview(m: &Message) -> String {
         }
     }
     s
+}
+
+/// Shrink a picture to fit `max_w` x `max_h`, averaging the pixels.
+fn shrink(img: crate::web::image::Image, max_w: usize, max_h: usize) -> crate::web::image::Image {
+    let (w, h) = (img.width, img.height);
+    if w <= max_w && h <= max_h {
+        return img;
+    }
+    let scale = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
+    let (nw, nh) = (
+        ((w as f32 * scale) as usize).max(1),
+        ((h as f32 * scale) as usize).max(1),
+    );
+    let mut pixels = Vec::with_capacity(nw * nh);
+    for y in 0..nh {
+        let (y0, y1) = (y * h / nh, ((y + 1) * h / nh).max(y * h / nh + 1));
+        for x in 0..nw {
+            let (x0, x1) = (x * w / nw, ((x + 1) * w / nw).max(x * w / nw + 1));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1.min(h) {
+                for sx in x0..x1.min(w) {
+                    let p = img.pixels[sy * w + sx];
+                    r += p >> 16 & 0xff;
+                    g += p >> 8 & 0xff;
+                    b += p & 0xff;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            pixels.push(0xff00_0000 | (r / n) << 16 | (g / n) << 8 | b / n);
+        }
+    }
+    crate::web::image::Image {
+        width: nw,
+        height: nh,
+        pixels,
+    }
+}
+
+/// Save a downloaded file in the user's Downloads, under a name not
+/// taken yet. Returns its path.
+fn save_download(name: &str, data: &[u8]) -> core::result::Result<String, String> {
+    let user = crate::users::current_name().unwrap_or_default();
+    let dir = fs::join(&fs::home(user.as_str()), "Downloads");
+    if !fs::is_dir(&dir) {
+        fs::create_dir(&dir).map_err(|e| String::from(e.message()))?;
+    }
+    // no slashes or other signs a file name can't have
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if "/\\:*?\"<>|".contains(c) || (c as u32) < 32 {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let (stem, ext) = match safe.rfind('.') {
+        Some(i) if i > 0 => (&safe[..i], &safe[i..]),
+        _ => (safe.as_str(), ""),
+    };
+    let path = fs::join(&dir, &fs::unique_name(&dir, stem, ext));
+    fs::write(&path, data).map_err(|e| String::from(e.message()))?;
+    Ok(path)
+}
+
+/// The public @name of a user or channel, without the @.
+fn username_of(o: &Obj) -> String {
+    let name = o.string("username");
+    if !name.is_empty() {
+        return name;
+    }
+    o.vec("usernames")
+        .iter()
+        .filter_map(|u| u.as_obj())
+        .find(|u| u.flag("active"))
+        .map(|u| u.string("username"))
+        .unwrap_or_default()
+}
+
+/// The links of a message: from its entities (whose places count UTF-16
+/// units) as (first char, end char, target), or found in the text when
+/// it has none.
+fn links_of(text: &str, entities: &[Value]) -> Vec<(usize, usize, String)> {
+    // the char at each UTF-16 place
+    let mut at16 = Vec::with_capacity(text.len() + 1);
+    let chars: Vec<char> = text.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        for _ in 0..c.len_utf16() {
+            at16.push(i);
+        }
+    }
+    at16.push(chars.len());
+    let char_at = |o: i64| at16.get(o.max(0) as usize).copied().unwrap_or(chars.len());
+    let mut out = Vec::new();
+    for e in entities.iter().filter_map(|e| e.as_obj()) {
+        let (a, b) = (
+            char_at(e.int("offset")),
+            char_at(e.int("offset") + e.int("length")),
+        );
+        if a >= b {
+            continue;
+        }
+        let inner: String = chars[a..b].iter().collect();
+        let target = match e.name() {
+            "messageEntityUrl" => inner,
+            "messageEntityTextUrl" => e.string("url"),
+            "messageEntityMention" => inner,
+            "messageEntityMentionName" => format!("tg://user?id={}", e.int("user_id")),
+            _ => continue,
+        };
+        out.push((a, b, target));
+    }
+    if entities.is_empty() {
+        // our own messages before the server has seen them
+        let mut i = 0;
+        while i < chars.len() {
+            let start_ok = i == 0 || chars[i - 1].is_whitespace();
+            let rest: String = chars[i..chars.len().min(i + 8)].iter().collect();
+            let looks = rest.starts_with("http://")
+                || rest.starts_with("https://")
+                || rest.starts_with("t.me/")
+                || (rest.starts_with('@') && rest.len() > 1);
+            if start_ok && looks {
+                let mut j = i;
+                while j < chars.len() && !chars[j].is_whitespace() {
+                    j += 1;
+                }
+                // a full stop or comma after a link is not part of it
+                while j > i && matches!(chars[j - 1], '.' | ',' | ')' | '!' | '?' | ':' | ';') {
+                    j -= 1;
+                }
+                if j - i > 1 {
+                    out.push((i, j, chars[i..j].iter().collect()));
+                }
+                i = j.max(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The photo, file and link preview of a message's media.
+fn parse_media(md: &Obj) -> (Option<Photo>, Option<FileInfo>, Option<(String, String)>) {
+    match md.name() {
+        "messageMediaPhoto" => (md.obj("photo").and_then(parse_photo), None, None),
+        "messageMediaDocument" => (
+            None,
+            md.obj("document").and_then(|d| parse_file(md, d)),
+            None,
+        ),
+        "messageMediaWebPage" => {
+            let web = md.obj("webpage").filter(|w| w.is("webPage")).map(|w| {
+                let site = w.string("site_name");
+                let title = w.string("title");
+                let title = if title.is_empty() {
+                    w.string("description")
+                } else {
+                    title
+                };
+                (site, title)
+            });
+            (
+                None,
+                None,
+                web.filter(|(s, t)| !s.is_empty() || !t.is_empty()),
+            )
+        }
+        _ => (None, None, None),
+    }
+}
+
+/// A size of a photo: its type letter, width, height and bytes.
+fn sizes(list: &[Value]) -> Vec<(String, i32, i32, i64)> {
+    list.iter()
+        .filter_map(|v| v.as_obj())
+        .filter_map(|p| match p.name() {
+            "photoSize" => Some((
+                p.string("type"),
+                p.int("w") as i32,
+                p.int("h") as i32,
+                p.int("size"),
+            )),
+            "photoSizeProgressive" => Some((
+                p.string("type"),
+                p.int("w") as i32,
+                p.int("h") as i32,
+                p.vec("sizes").last().map_or(0, |v| v.as_i64()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn parse_photo(p: &Obj) -> Option<Photo> {
+    if !p.is("photo") {
+        return None;
+    }
+    let all = sizes(p.vec("sizes"));
+    let big = all.iter().max_by_key(|s| s.1 as i64 * s.2 as i64)?.clone();
+    // about 320 pixels is plenty for the chat
+    let small = all
+        .iter()
+        .filter(|s| s.1.max(s.2) >= 300)
+        .min_by_key(|s| s.1 as i64 * s.2 as i64)
+        .unwrap_or(&big)
+        .clone();
+    Some(Photo {
+        file: FileRef {
+            id: p.int("id"),
+            access_hash: p.int("access_hash"),
+            file_reference: p.bytes("file_reference").to_vec(),
+            dc: p.int("dc_id") as i32,
+            photo: true,
+        },
+        w: big.1,
+        h: big.2,
+        small: small.0,
+        big: big.0,
+        big_size: big.3,
+    })
+}
+
+fn parse_file(md: &Obj, d: &Obj) -> Option<FileInfo> {
+    if !d.is("document") {
+        return None;
+    }
+    let mime = d.string("mime_type");
+    let mut name = String::new();
+    let mut kind = String::from("File");
+    let mut wh = (0, 0);
+    for a in d.vec("attributes").iter().filter_map(|a| a.as_obj()) {
+        match a.name() {
+            "documentAttributeFilename" => name = a.string("file_name"),
+            "documentAttributeSticker" => kind = String::from("Sticker"),
+            "documentAttributeAnimated" => kind = String::from("GIF"),
+            "documentAttributeVideo" if kind == "File" => {
+                kind = String::from(if md.flag("round") {
+                    "Video message"
+                } else {
+                    "Video"
+                });
+                wh = (a.int("w") as i32, a.int("h") as i32);
+            }
+            "documentAttributeAudio" => {
+                kind = String::from(if a.flag("voice") {
+                    "Voice message"
+                } else {
+                    "Music"
+                });
+                let title = a.string("title");
+                if name.is_empty() && !title.is_empty() {
+                    let performer = a.string("performer");
+                    name = if performer.is_empty() {
+                        title
+                    } else {
+                        format!("{} - {}", performer, title)
+                    };
+                }
+            }
+            "documentAttributeImageSize" => wh = (a.int("w") as i32, a.int("h") as i32),
+            _ => {}
+        }
+    }
+    if name.is_empty() || !name.contains('.') {
+        let ext = match mime.as_str() {
+            "video/mp4" => "mp4",
+            "audio/ogg" => "ogg",
+            "audio/mpeg" => "mp3",
+            "image/jpeg" => "jpg",
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "application/x-tgsticker" => "tgs",
+            "application/pdf" => "pdf",
+            _ => "bin",
+        };
+        let stem = if name.is_empty() {
+            kind.to_lowercase().replace(' ', "_")
+        } else {
+            name
+        };
+        name = format!("{}_{}.{}", stem, d.int("id") as u64 % 100000, ext);
+    }
+    // a preview picture (JPEG) of videos and pictures sent as files
+    let thumbs = sizes(d.vec("thumbs"));
+    let thumb = thumbs
+        .iter()
+        .filter(|t| t.1.max(t.2) >= 90)
+        .max_by_key(|t| t.1 as i64 * t.2 as i64)
+        .map(|t| (t.0.clone(), t.1, t.2));
+    let thumb = if mime == "image/jpeg" || mime == "image/png" {
+        // a picture sent as a file: the file itself when it is small
+        thumb.or((d.int("size") < 2 << 20).then(|| (String::new(), wh.0, wh.1)))
+    } else {
+        thumb
+    };
+    Some(FileInfo {
+        file: FileRef {
+            id: d.int("id"),
+            access_hash: d.int("access_hash"),
+            file_reference: d.bytes("file_reference").to_vec(),
+            dc: d.int("dc_id") as i32,
+            photo: false,
+        },
+        name,
+        mime,
+        size: d.int("size"),
+        kind,
+        thumb,
+    })
 }
 
 fn media_label(media: &Obj) -> Option<String> {
@@ -2076,7 +3027,10 @@ fn code_hint(kind: Option<&Obj>) -> String {
 
 /// The type Telegram is told a file has, from its name.
 fn mime_type(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map_or("", |(_, e)| e).to_ascii_lowercase();
+    let ext = name
+        .rsplit_once('.')
+        .map_or("", |(_, e)| e)
+        .to_ascii_lowercase();
     match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -2099,7 +3053,11 @@ fn base64url(data: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(data.len() * 4 / 3 + 3);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
         for i in 0..=chunk.len() {
             out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
