@@ -224,7 +224,7 @@ impl App {
             App::Telegram => "Telegram",
             App::Vpn => "VPN",
             App::Archiver => "Archiver",
-            App::Crash => "Отчёт о сбое",
+            App::Crash => "Crash Report",
         }
     }
 

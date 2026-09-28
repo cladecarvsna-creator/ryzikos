@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering}
 
 use crate::console::{Color, CONSOLE};
 use crate::framebuffer::{Framebuffer, Rgb};
-use crate::gui::text::{Font, HEADING, LARGE, UI, UI_BOLD};
+use crate::gui::text::{Font, HEADING, UI, UI_BOLD};
 use crate::port::{inb, outb};
 use crate::{fs, interrupts, rtc, serial};
 
@@ -212,55 +212,47 @@ impl Report {
 
 /// The report's fields in the order people read them, with their names.
 pub const DETAILS: [(&str, &str); 9] = [
-    ("code", "Код остановки"),
-    ("message", "Сообщение"),
-    ("where", "Где в коде"),
-    ("cpu", "Процессор"),
-    ("app", "Окно на экране"),
-    ("date", "Дата"),
-    ("time", "Время"),
-    ("uptime", "Работала до сбоя"),
-    ("version", "Версия RyzikOS"),
+    ("code", "Error code"),
+    ("message", "Message"),
+    ("where", "Source"),
+    ("cpu", "Processor"),
+    ("app", "Window in front"),
+    ("date", "Date"),
+    ("time", "Time"),
+    ("uptime", "Running for"),
+    ("version", "RyzikOS version"),
 ];
 
-/// What a stop code means, for people.
+/// What an error code means, for people.
 pub fn explain(code: &str) -> &'static str {
     match code {
-        "MANUALLY_INITIATED_CRASH" => {
-            "Сбой вызвали нарочно, командой panic в Терминале. С компьютером всё в порядке: так проверяют синий экран."
+        "PANIC_REQUESTED" => {
+            "The panic command in Terminal stopped the system on purpose, to try this screen. Nothing is wrong with the computer."
         }
-        "OUT_OF_MEMORY" => {
-            "Системе не хватило памяти. Какая-то программа или страница попросила больше, чем есть."
+        "OUT_OF_MEMORY" => "The system ran out of memory: something asked for more than the computer has.",
+        "BAD_MEMORY_ACCESS" => {
+            "The kernel reached for memory that isn't there. This is a bug in RyzikOS, not a broken computer."
         }
-        "PAGE_FAULT_IN_NONPAGED_AREA" => {
-            "Ядро обратилось к памяти, которой нет. Это ошибка в коде RyzikOS, а не поломка компьютера."
+        "DIVIDE_BY_ZERO" => "The kernel tried to divide by zero. This is a bug in RyzikOS.",
+        "BAD_INSTRUCTION" => {
+            "The processor met an instruction it doesn't know. This is a kernel bug, or a very old processor."
         }
-        "DIVIDE_BY_ZERO" => "Ядро попыталось разделить на ноль. Это ошибка в коде RyzikOS.",
-        "INVALID_OPCODE" => {
-            "Процессор встретил команду, которую не знает. Так бывает при ошибке в ядре или на очень старом процессоре."
-        }
-        "GENERAL_PROTECTION_FAULT" => {
-            "Ядро сделало то, что процессор запрещает. Это ошибка в коде RyzikOS."
-        }
-        "DOUBLE_FAULT" => {
-            "Во время обработки одной ошибки случилась вторая, и ядро не смогло продолжить."
-        }
-        "UNEXPECTED_CPU_EXCEPTION" => {
-            "Процессор сообщил об ошибке, которую ядро не умеет обрабатывать."
-        }
-        _ => "В ядре RyzikOS случилась непредвиденная ошибка. Оно остановилось, чтобы не испортить ваши файлы.",
+        "PROTECTION_FAULT" => "The kernel did something the processor doesn't allow. This is a bug in RyzikOS.",
+        "DOUBLE_FAULT" => "A second error happened while handling the first one, and the kernel couldn't go on.",
+        "CPU_EXCEPTION" => "The processor reported an error the kernel doesn't know how to handle.",
+        _ => "Something unexpected went wrong inside the RyzikOS kernel. It stopped to keep your files safe.",
     }
 }
 
 /// What to do about it.
 pub fn advice(code: &str) -> &'static str {
     match code {
-        "MANUALLY_INITIATED_CRASH" => "Ничего делать не нужно.",
+        "PANIC_REQUESTED" => "Nothing to do.",
         "OUT_OF_MEMORY" => {
-            "Закройте лишние окна и вкладки. В виртуальной машине дайте RyzikOS больше памяти (например, -m 1G в QEMU)."
+            "Close windows and tabs you don't need. In a virtual machine, give RyzikOS more memory (for example -m 1G in QEMU)."
         }
         _ => {
-            "Если сбой повторяется, нажмите «Скопировать» и отправьте отчёт разработчику: по нему видно, где ошибка. Ваши файлы на диске не пострадали."
+            "If it happens again, press Copy and send the report to the developer: it shows where the bug is. Your files on the disk are fine."
         }
     }
 }
@@ -302,21 +294,21 @@ impl Write for Fixed<'_> {
     }
 }
 
-/// The stop code, like Windows has, from what caused the panic.
+/// A short name for what caused the panic.
 fn stop_code(message: &str) -> &'static str {
     if MANUAL.load(Ordering::Relaxed) {
-        return "MANUALLY_INITIATED_CRASH";
+        return "PANIC_REQUESTED";
     }
     match EXC_VECTOR.load(Ordering::Relaxed) {
         0 => {}
         v => {
             return match v - 1 {
                 0 => "DIVIDE_BY_ZERO",
-                6 => "INVALID_OPCODE",
+                6 => "BAD_INSTRUCTION",
                 8 => "DOUBLE_FAULT",
-                13 => "GENERAL_PROTECTION_FAULT",
-                14 => "PAGE_FAULT_IN_NONPAGED_AREA",
-                _ => "UNEXPECTED_CPU_EXCEPTION",
+                13 => "PROTECTION_FAULT",
+                14 => "BAD_MEMORY_ACCESS",
+                _ => "CPU_EXCEPTION",
             }
         }
     }
@@ -509,9 +501,11 @@ fn wait_ms(ms: u32, key: bool) -> bool {
 
 // ---- the blue screen --------------------------------------------------------
 
-const BLUE: Rgb = Rgb::new(0x10, 0x4c, 0xc4);
+/// Deep blue page, a lighter panel for the details, white text.
+const PAGE: Rgb = Rgb::new(0x0d, 0x26, 0x63);
+const PANEL: Rgb = Rgb::new(0x17, 0x3a, 0x8a);
 const WHITE: Rgb = Rgb::new(0xff, 0xff, 0xff);
-const PALE: Rgb = Rgb::new(0xc8, 0xd8, 0xf6);
+const PALE: Rgb = Rgb::new(0xb8, 0xca, 0xf0);
 
 /// Where the blue screen is drawn: the framebuffer, or the text console
 /// without one.
@@ -525,11 +519,12 @@ struct Layout {
     fb: Framebuffer,
     /// Text size in 1/16: 16 is the fonts' own size.
     s: i32,
-    left: usize,
+    /// The centre of the column and its width.
+    cx: usize,
     width: usize,
-    /// Where the "saved" line and the countdown go.
+    /// Where the "saved" line and the restart bar go.
     status_y: usize,
-    countdown_y: usize,
+    bar_y: usize,
 }
 
 impl Screen {
@@ -541,14 +536,14 @@ impl Screen {
             Some(fb) => {
                 // 16 at 1280x720 and below, 24 at 1920x1080
                 let s = (fb.height.min(fb.width * 9 / 16) as i32 * 16 / 720).clamp(12, 40);
-                let left = fb.width / 9;
+                let width = (fb.width * 3 / 5).min(fb.width - 32);
                 Screen::Pixels(Layout {
                     fb,
                     s,
-                    left,
-                    width: fb.width - 2 * left,
+                    cx: fb.width / 2,
+                    width,
                     status_y: 0,
-                    countdown_y: 0,
+                    bar_y: 0,
                 })
             }
             None => Screen::Text,
@@ -557,21 +552,17 @@ impl Screen {
 
     fn draw(&mut self, code: &str, message: &str, place: &str, app: &str) {
         match self {
-            Screen::Pixels(l) => {
-                // the rows of the lines that change are found while drawing
-                (l.status_y, l.countdown_y) = l.draw(code, message, place, app);
-            }
+            Screen::Pixels(l) => (l.status_y, l.bar_y) = l.draw(code, message, place, app),
             Screen::Text => {
                 let mut con = CONSOLE.lock();
                 con.reattach();
                 con.set_color(Color::White, Color::Blue);
                 con.clear();
-                let _ = writeln!(con, "\n  :(\n");
                 let _ = writeln!(
                     con,
-                    "  RyzikOS stopped because of an error and will restart.\n"
+                    "\n  RyzikOS has stopped because of an error and will restart.\n"
                 );
-                let _ = writeln!(con, "  Stop code: {}", code);
+                let _ = writeln!(con, "  Error code: {}", code);
                 let _ = writeln!(con, "  {}", message);
                 if !place.is_empty() {
                     let _ = writeln!(con, "  at {}", place);
@@ -582,26 +573,19 @@ impl Screen {
 
     fn saved(&self, saved: bool) {
         let text = if saved {
-            "Сведения об ошибке сохранены. После перезагрузки вы увидите, что произошло."
+            "A report is saved. After the restart, RyzikOS will tell you what happened."
         } else {
-            "Сведения об ошибке не удалось сохранить на диск."
+            "The report could not be saved on a disk."
         };
         match self {
             Screen::Pixels(l) => {
-                l.clear_row(l.status_y, &UI);
-                l.text(l.left, l.status_y, text, &UI, l.s * 3 / 2, WHITE);
+                let scale = l.s * 5 / 4;
+                l.fb.fill_rect(0, l.status_y, l.fb.width, l.line_h(&UI, scale), PAGE);
+                l.centered(l.status_y, text, &UI, scale, PALE, PAGE);
             }
             Screen::Text => {
                 let mut con = CONSOLE.lock();
-                let _ = writeln!(
-                    con,
-                    "\n  {}",
-                    if saved {
-                        "The report is saved."
-                    } else {
-                        "The report could not be saved."
-                    }
-                );
+                let _ = writeln!(con, "\n  {}", text);
             }
         }
     }
@@ -609,8 +593,18 @@ impl Screen {
     fn countdown(&self, left: u32) {
         match self {
             Screen::Pixels(l) => {
-                let y = l.countdown_y;
-                let mut buf = [0u8; 200];
+                let fb = &l.fb;
+                let h = (6 * l.s / 16).max(3) as usize;
+                let x = l.cx - l.width / 2;
+                fb.fill_rect(x, l.bar_y, l.width, h, PANEL);
+                fb.fill_rect(
+                    x,
+                    l.bar_y,
+                    l.width * left as usize / RESTART_AFTER as usize,
+                    h,
+                    WHITE,
+                );
+                let mut buf = [0u8; 120];
                 let mut t = Fixed {
                     buf: &mut buf,
                     len: 0,
@@ -618,11 +612,13 @@ impl Screen {
                 };
                 let _ = write!(
                     t,
-                    "Перезагрузка через {} с. Нажмите любую клавишу, чтобы перезагрузить сейчас.",
+                    "Restarting in {} s  ·  press any key to restart now",
                     left
                 );
-                l.clear_row(y, &UI);
-                l.text(l.left, y, t.as_str(), &UI, l.s * 3 / 2, PALE);
+                let scale = l.s * 5 / 4;
+                let y = l.bar_y + h + (14 * l.s / 16) as usize;
+                fb.fill_rect(0, y, fb.width, l.line_h(&UI, scale), PAGE);
+                l.centered(y, t.as_str(), &UI, scale, PALE, PAGE);
             }
             Screen::Text => {
                 let mut con = CONSOLE.lock();
@@ -637,20 +633,16 @@ impl Layout {
         (font.line_height * scale / 16) as usize + 4 * self.s as usize / 16
     }
 
-    fn clear_row(&self, y: usize, font: &Font) {
-        self.fb
-            .fill_rect(0, y, self.fb.width, self.line_h(font, self.s * 3 / 2), BLUE);
-    }
-
     fn width_of(font: &Font, scale: i32, text: &str) -> usize {
         let sixteenths: i32 = text.chars().map(|c| font.advance16(c) as i32).sum();
         (sixteenths * scale / 256) as usize
     }
 
     /// Smooth text from the desktop's fonts, `scale`/16 of their size,
-    /// blended over the blue. The glyphs are static data, so this needs
-    /// no heap.
-    fn text(&self, x: usize, y: usize, text: &str, font: &Font, scale: i32, color: Rgb) {
+    /// blended over `bg`. The glyphs are static data, so this needs no
+    /// heap.
+    #[allow(clippy::too_many_arguments)]
+    fn text(&self, x: usize, y: usize, text: &str, font: &Font, scale: i32, color: Rgb, bg: Rgb) {
         let mut pen = x as i32 * 16;
         for ch in text.chars() {
             let Some(g) = font.glyph(ch).or_else(|| font.glyph('?')) else {
@@ -661,19 +653,41 @@ impl Layout {
             self.glyph(
                 gx,
                 gy,
-                g.w as i32,
-                g.h as i32,
+                (g.w as i32, g.h as i32),
                 font.coverage(g),
                 scale,
                 color,
+                bg,
             );
             pen += g.advance as i32 * scale / 16;
         }
     }
 
+    fn centered(&self, y: usize, text: &str, font: &Font, scale: i32, color: Rgb, bg: Rgb) {
+        let w = Self::width_of(font, scale, text);
+        self.text(
+            self.cx.saturating_sub(w / 2),
+            y,
+            text,
+            font,
+            scale,
+            color,
+            bg,
+        );
+    }
+
     /// One coverage map, resized with bilinear sampling.
     #[allow(clippy::too_many_arguments)]
-    fn glyph(&self, x: i32, y: i32, w: i32, h: i32, cov: &[u8], scale: i32, color: Rgb) {
+    fn glyph(
+        &self,
+        x: i32,
+        y: i32,
+        (w, h): (i32, i32),
+        cov: &[u8],
+        scale: i32,
+        color: Rgb,
+        bg: Rgb,
+    ) {
         let at = |cx: i32, cy: i32| -> i32 {
             if cx < 0 || cy < 0 || cx >= w || cy >= h {
                 0
@@ -693,7 +707,7 @@ impl Layout {
                 let bottom = at(x0, y0 + 1) * (256 - fx) + at(x0 + 1, y0 + 1) * fx;
                 let a = (top * (256 - fy) + bottom * fy) >> 16;
                 if a > 0 && x + tx >= 0 && y + ty >= 0 {
-                    let pixel = BLUE.mix(color, a.min(255) as u8);
+                    let pixel = bg.mix(color, a.min(255) as u8);
                     self.fb
                         .put_raw((x + tx) as usize, (y + ty) as usize, self.fb.encode(pixel));
                 }
@@ -701,28 +715,28 @@ impl Layout {
         }
     }
 
-    /// Word-wrapped text across the layout's width, at most `max_lines`
-    /// lines; returns the y below it.
+    /// Word-wrapped lines of `text` that fit `width`, at most `max`,
+    /// each drawn by `draw(y, line)`; returns the y below them.
     #[allow(clippy::too_many_arguments)]
-    fn para(
+    fn wrap(
         &self,
         mut y: usize,
         text: &str,
         font: &Font,
         scale: i32,
-        color: Rgb,
-        max_lines: usize,
+        width: usize,
+        max: usize,
+        mut draw: impl FnMut(usize, &str),
     ) -> usize {
         let mut rest = text.trim();
         let mut lines = 0;
-        while !rest.is_empty() && lines < max_lines {
-            // the most whole words that fit, or a hard cut in a long word
+        while !rest.is_empty() && lines < max {
             let mut cut = rest.len();
-            if Self::width_of(font, scale, rest) > self.width {
+            if Self::width_of(font, scale, rest) > width {
                 let mut fit = 0;
                 let mut last_space = None;
                 for (i, c) in rest.char_indices() {
-                    if Self::width_of(font, scale, &rest[..i + c.len_utf8()]) > self.width {
+                    if Self::width_of(font, scale, &rest[..i + c.len_utf8()]) > width {
                         break;
                     }
                     fit = i + c.len_utf8();
@@ -732,7 +746,7 @@ impl Layout {
                 }
                 cut = last_space.filter(|&i| i > 0).unwrap_or(fit.max(1));
             }
-            self.text(self.left, y, rest[..cut].trim_end(), font, scale, color);
+            draw(y, rest[..cut].trim_end());
             rest = rest[cut..].trim_start();
             y += self.line_h(font, scale);
             lines += 1;
@@ -741,61 +755,70 @@ impl Layout {
     }
 
     /// Paint the whole screen; returns the rows for the "saved" line and
-    /// the countdown.
+    /// the restart bar.
     fn draw(&self, code: &str, message: &str, place: &str, app: &str) -> (usize, usize) {
         let fb = &self.fb;
         let s = self.s;
-        fb.fill_rect(0, 0, fb.width, fb.height, BLUE);
-        let mut y = fb.height / 10;
-        // the sad face, big
-        self.text(self.left, y, ":(", &LARGE, s * 4, WHITE);
-        y += (LARGE.line_height * s * 4 / 16) as usize + (12 * s / 16) as usize;
-        y = self.para(
-            y,
-            "В RyzikOS произошла ошибка, и компьютер нужно перезагрузить.",
-            &HEADING,
-            s,
-            WHITE,
-            3,
-        );
-        y += (14 * s / 16) as usize;
-        y = self.para(y, explain(code), &UI, s * 3 / 2, WHITE, 3);
-        y += (10 * s / 16) as usize;
-        let saved_y = y;
-        self.text(
-            self.left,
-            y,
-            "Сохраняем сведения об ошибке...",
-            &UI,
-            s * 3 / 2,
-            WHITE,
-        );
-        y += self.line_h(&UI, s * 3 / 2) * 2 + (10 * s / 16) as usize;
+        let px = |n: i32| (n * s / 16) as usize;
+        fb.fill_rect(0, 0, fb.width, fb.height, PAGE);
 
-        let mut buf = [0u8; 700];
-        let mut t = Fixed {
-            buf: &mut buf,
-            len: 0,
-            one_line: true,
-        };
+        // a ring with an exclamation mark
+        let r = px(34) as isize;
+        let mut y = fb.height / 9;
+        let cy = y as isize + r;
+        fb.fill_circle(self.cx as isize, cy, r, WHITE);
+        fb.fill_circle(self.cx as isize, cy, r - px(5).max(2) as isize, PAGE);
+        let bar = px(7).max(3);
+        fb.fill_rect(self.cx - bar / 2, (cy - r / 2) as usize, bar, r as usize * 5 / 8, WHITE);
+        fb.fill_circle(self.cx as isize, cy + r / 2 - bar as isize / 2, bar as isize * 3 / 5, WHITE);
+        y += 2 * r as usize + px(28);
+
+        let title = s * 3 / 2;
+        self.centered(y, "RyzikOS has stopped", &HEADING, title, WHITE, PAGE);
+        y += self.line_h(&HEADING, title) + px(8);
+        let body = s * 3 / 2;
+        y = self.wrap(y, explain(code), &UI, body, self.width, 3, |y, line| {
+            self.centered(y, line, &UI, body, WHITE, PAGE)
+        });
+        y += px(26);
+
+        // the details, on a panel
         let small = s * 5 / 4;
-        let _ = write!(t, "Код остановки: {}", code);
-        y = self.para(y, t.as_str(), &UI_BOLD, small, WHITE, 1);
-        t.len = 0;
-        let _ = write!(t, "Что случилось: {}", message);
-        y = self.para(y, t.as_str(), &UI, small, PALE, 3);
-        if !place.is_empty() {
-            t.len = 0;
-            let _ = write!(t, "Где: {}", place);
-            y = self.para(y, t.as_str(), &UI, small, PALE, 1);
+        let pad = px(22);
+        let left = self.cx - self.width / 2;
+        let label_w = Self::width_of(&UI_BOLD, small, "Window in front") + px(24);
+        let value_w = self.width - 2 * pad - label_w;
+        let rows: [(&str, &str, usize); 4] = [
+            ("Error code", code, 1),
+            ("Message", message, 3),
+            ("Source", place, 1),
+            ("Window in front", app, 1),
+        ];
+        let mut h = 2 * pad;
+        for (_, value, max) in rows {
+            if !value.is_empty() {
+                h += self.wrap(0, value, &UI, small, value_w, max, |_, _| {}) + px(6);
+            }
         }
-        if !app.is_empty() {
-            t.len = 0;
-            let _ = write!(t, "Окно на экране: {}", app);
-            y = self.para(y, t.as_str(), &UI, small, PALE, 1);
+        fb.fill_rect(left, y, self.width, h, PANEL);
+        fb.fill_rect(left, y, px(4).max(2), h, WHITE);
+        let mut ry = y + pad;
+        for (label, value, max) in rows {
+            if value.is_empty() {
+                continue;
+            }
+            self.text(left + pad, ry, label, &UI_BOLD, small, PALE, PANEL);
+            let bold = label == "Error code";
+            ry = self.wrap(ry, value, &UI, small, value_w, max, |y, line| {
+                let font = if bold { &UI_BOLD } else { &UI };
+                self.text(left + pad + label_w, y, line, font, small, WHITE, PANEL)
+            }) + px(6);
         }
-        y += (24 * s / 16) as usize;
-        let bottom = fb.height.saturating_sub(self.line_h(&UI, s * 3 / 2) * 2);
-        (saved_y, y.min(bottom))
+        y += h + px(26);
+
+        let status_y = y;
+        self.centered(y, "Saving a report...", &UI, small, PALE, PAGE);
+        y += self.line_h(&UI, small) + px(22);
+        (status_y, y.min(fb.height.saturating_sub(px(60))))
     }
 }

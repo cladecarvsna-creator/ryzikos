@@ -89,7 +89,6 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
         Some(label) => println!("Disc:      {} in the drive, its files are at /Disc", label),
         None => println!("Disc:      none"),
     }
-    println!("Привет! Кириллица тоже работает.");
     println!();
     println!("EverOS: kernel started");
     println!("Type 'help' for a list of commands.");

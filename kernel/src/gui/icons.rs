@@ -679,13 +679,17 @@ pub fn draw_icon(c: &mut Canvas, app: App, x: i32, y: i32) {
             c.outline_round(tile, 8, rgb(0x0c, 0x40, 0xa0));
         }
         App::Crash => {
-            // a sad face on the blue of the blue screen
+            // a warning ring on the blue of the blue screen
             {
                 let mut s = c.sub(Rect::new(0, 0, c.width, c.height));
                 s.clip_round(tile, 8);
                 s.vertical_gradient(tile, rgb(0x2a, 0x6c, 0xe8), rgb(0x0c, 0x3c, 0xa8));
             }
-            c.draw_text_in(&super::text::TITLE, x + 13, y + 12, ":(", rgb(0xff, 0xff, 0xff));
+            let white = rgb(0xff, 0xff, 0xff);
+            c.fill_round(Rect::new(x + 10, y + 10, 28, 28), 14, white);
+            c.fill_round(Rect::new(x + 13, y + 13, 22, 22), 11, rgb(0x16, 0x4c, 0xb8));
+            c.fill_rect(x + 22, y + 16, 4, 10, white);
+            c.fill_rect(x + 22, y + 29, 4, 4, white);
             c.outline_round(tile, 8, rgb(0x08, 0x2c, 0x80));
         }
         // these have pictures, so they are never drawn

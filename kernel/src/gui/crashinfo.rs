@@ -17,7 +17,7 @@ pub const CLIENT_W: i32 = 760;
 pub const CLIENT_H: i32 = 560;
 
 /// The blue of the blue screen.
-const BLUE: u32 = 0x104cc4;
+const BLUE: u32 = 0x0d2663;
 const BAND_H: i32 = 136;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ impl CrashInfo {
             Button::Details => self.details = !self.details,
             Button::Copy => {
                 if let Some(r) = &self.report {
-                    let mut text = String::from("RyzikOS: отчёт о сбое\n");
+                    let mut text = String::from("RyzikOS crash report\n");
                     text.push_str(&r.text());
                     super::widgets::copy(&text);
                     self.copied = true;
@@ -125,27 +125,25 @@ impl CrashInfo {
         c.fill_rect(0, 0, CLIENT_W, CLIENT_H, theme::face());
         c.fill(Rect::new(0, 0, CLIENT_W, BAND_H), BLUE);
         let white = 0xffffff;
-        c.draw_text_in(&HEADING, 32, 30, ":(", white);
-        c.draw_text_in(
-            &HEADING,
-            84,
-            30,
-            "Почему мой компьютер перезагрузился?",
-            white,
-        );
+        // a ring with an exclamation mark, as on the blue screen
+        c.fill_round(Rect::new(30, 30, 40, 40), 20, white);
+        c.fill_round(Rect::new(34, 34, 32, 32), 16, BLUE);
+        let bang = HEADING.width("!");
+        c.draw_text_in(&HEADING, 50 - bang / 2, 32, "!", white);
+        c.draw_text_in(&HEADING, 84, 30, "Why did my computer restart?", white);
         let Some(r) = &self.report else {
             wrap(
                 c,
                 84,
                 78,
                 CLIENT_W - 84 - 32,
-                "Сбоев не было: RyzikOS на этом диске ещё ни разу не останавливалась из-за ошибки.",
+                "No crashes: RyzikOS on this disk has never stopped because of an error.",
                 white,
             );
             theme::accent_button(
                 c,
                 button_rect(Button::Close),
-                "Понятно",
+                "OK",
                 self.pressed == Some(Button::Close),
             );
             return;
@@ -154,10 +152,10 @@ impl CrashInfo {
         let when = if r.get("date").is_empty() {
             String::new()
         } else {
-            format!(" {} в {}", r.get("date"), r.get("time"))
+            format!(" on {} at {}", r.get("date"), r.get("time"))
         };
         let line = format!(
-            "RyzikOS остановилась из-за ошибки{} и перезапустила компьютер. Вот что произошло.",
+            "RyzikOS stopped because of an error{} and restarted the computer. Here is what happened.",
             when
         );
         wrap(c, 84, 78, CLIENT_W - 84 - 32, &line, white);
@@ -168,22 +166,14 @@ impl CrashInfo {
             self.draw_summary(c, code, r);
         }
 
-        let label = if self.details {
-            "Кратко"
-        } else {
-            "Подробности"
-        };
+        let label = if self.details { "Summary" } else { "Details" };
         theme::button(
             c,
             button_rect(Button::Details),
             label,
             self.pressed == Some(Button::Details),
         );
-        let copy = if self.copied {
-            "Скопировано"
-        } else {
-            "Скопировать"
-        };
+        let copy = if self.copied { "Copied" } else { "Copy" };
         theme::button(
             c,
             button_rect(Button::Copy),
@@ -193,7 +183,7 @@ impl CrashInfo {
         theme::accent_button(
             c,
             button_rect(Button::Close),
-            "Понятно",
+            "OK",
             self.pressed == Some(Button::Close),
         );
     }
@@ -201,7 +191,7 @@ impl CrashInfo {
     fn draw_summary(&self, c: &mut Canvas, code: &str, r: &Report) {
         let w = CLIENT_W - 64;
         let mut y = BAND_H + 24;
-        c.draw_text_in(&UI_BOLD, 32, y, "Что произошло", theme::text());
+        c.draw_text_in(&UI_BOLD, 32, y, "What happened", theme::text());
         y = wrap(
             c,
             32,
@@ -210,7 +200,7 @@ impl CrashInfo {
             crash::explain(code),
             theme::text(),
         ) + 14;
-        c.draw_text_in(&UI_BOLD, 32, y, "Что делать", theme::text());
+        c.draw_text_in(&UI_BOLD, 32, y, "What to do", theme::text());
         y = wrap(
             c,
             32,
@@ -219,13 +209,13 @@ impl CrashInfo {
             crash::advice(code),
             theme::text(),
         ) + 14;
-        c.draw_text_in(&UI_BOLD, 32, y, "Код остановки", theme::text());
+        c.draw_text_in(&UI_BOLD, 32, y, "Error code", theme::text());
         y += UI.line_height + 8;
         c.draw_text_in(&MONO, 32, y, code, theme::accent());
         y += MONO.line_height + 14;
         let app = r.get("app");
         if !app.is_empty() {
-            let line = format!("В это время на экране было окно «{}».", app);
+            let line = format!("The window in front was {}.", app);
             wrap(c, 32, y, w, &line, theme::text_dim());
         }
     }

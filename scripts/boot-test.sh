@@ -259,15 +259,15 @@ type_keys meta_l-s
 type_keys t e r m ret
 sleep 1
 type_keys p a n i c ret
-wait_for "bsod: MANUALLY_INITIATED_CRASH" || fail "panic did not show the blue screen"
+wait_for "bsod: PANIC_REQUESTED" || fail "panic did not show the blue screen"
 wait_for "crash: report saved to the disk" || fail "the blue screen did not save the crash report"
 type_keys ret
 wait_for "crash: restarting" || fail "a key did not restart from the blue screen"
 wait "$qemu" 2> /dev/null
 echo "panic shows the blue screen and saves a report"
 boot disk
-wait_for "crash: the last run stopped with MANUALLY_INITIATED_CRASH" || fail "the crash report was not found after restarting"
+wait_for "crash: the last run stopped with PANIC_REQUESTED" || fail "the crash report was not found after restarting"
 sign_in
-wait_for "crash: showing the report, MANUALLY_INITIATED_CRASH" || fail "the crash report window did not open"
+wait_for "crash: showing the report, PANIC_REQUESTED" || fail "the crash report window did not open"
 echo "after the restart, the crash report explains what happened"
 echo "boot test passed"
