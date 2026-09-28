@@ -317,6 +317,31 @@ pub fn to_bytes(n: &BigUint, len: usize) -> Vec<u8> {
     out
 }
 
+/// Telegram's older keys: used only when the server offers none of the
+/// others.
+const OLD_KEYS: [u64; 4] = [
+    0xc3b42b026ce86b21,
+    0x9a996a1db11c729b,
+    0xb05b2a6f70cdea78,
+    0x71e025b6c76033e3,
+];
+
+pub fn is_old_key(fingerprint: u64) -> bool {
+    OLD_KEYS.contains(&fingerprint)
+}
+
+/// The key exchange's encryption from before RSA_PAD: SHA-1 of `data`,
+/// `data`, random padding to 255 bytes, then RSA.
+pub fn rsa_old(data: &[u8], modulus: &[u8]) -> Vec<u8> {
+    let n = BigUint::from_bytes_be(modulus);
+    let mut block = sha1(&[data]).to_vec();
+    block.extend_from_slice(data);
+    let mut pad = alloc::vec![0u8; 255usize.saturating_sub(block.len())];
+    random(&mut pad);
+    block.extend_from_slice(&pad);
+    to_bytes(&BigUint::from_bytes_be(&block).modpow(&BigUint::from(65537u32), &n), 256)
+}
+
 /// RSA_PAD from the MTProto 2.0 key exchange: `data` (at most 144 bytes)
 /// gets random padding, a hash and a layer of AES under a random key,
 /// then the whole 256 bytes go through RSA.
