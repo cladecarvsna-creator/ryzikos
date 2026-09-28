@@ -821,6 +821,46 @@ impl Volume {
         Ok(data)
     }
 
+    /// Where a file's data is, for reading parts of it with `read_at`:
+    /// its clusters and its size.
+    pub fn locate(&mut self, path: &str) -> Result<(Vec<u32>, u64), Error> {
+        let (_, e) = self.resolve(path)?;
+        let e = e.ok_or(Error::IsADirectory)?;
+        if e.is_dir() {
+            return Err(Error::IsADirectory);
+        }
+        Ok((self.chain(e.cluster), e.size as u64))
+    }
+
+    /// Read `buf.len()` bytes from `offset` into a file that `open` found.
+    /// Clusters that follow each other on the disk are read in one go.
+    pub fn read_at(&mut self, chain: &[u32], offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        let cb = self.cluster_bytes;
+        let mut done = 0;
+        let mut tmp = Vec::new();
+        while done < buf.len() {
+            let at = offset as usize + done;
+            let first = at / cb;
+            let skip = at % cb;
+            let want = buf.len() - done;
+            // how many clusters in a row, up to 256 KiB
+            let need = (skip + want).div_ceil(cb).min((256 * 1024 / cb).max(1));
+            let mut run = 1;
+            while run < need
+                && chain.get(first + run).is_some_and(|&c| Some(c) == chain.get(first + run - 1).map(|p| p + 1))
+            {
+                run += 1;
+            }
+            let start = *chain.get(first).ok_or(Error::Io)?;
+            tmp.resize(run * cb, 0);
+            self.dev.read(self.cluster_lba(start), &mut tmp)?;
+            let n = (run * cb - skip).min(want);
+            buf[done..done + n].copy_from_slice(&tmp[skip..skip + n]);
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Create or replace a file.
     pub fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Error> {
         let (parent, name) = split(path);

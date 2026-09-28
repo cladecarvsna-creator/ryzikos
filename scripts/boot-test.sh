@@ -127,8 +127,16 @@ sleep 1
 
 # Video Player plays the demo video from the disc
 type_keys v i d e o spc slash shift-d i s c slash shift-v i d e o s slash shift-r y z i k shift-o shift-s spc shift-d e m o dot a v i ret
-wait_for "video: opened RyzikOS Demo.avi, 250 frames" || fail "Video Player could not open the video on the disc"
+wait_for "video: opened RyzikOS Demo.avi, Motion JPEG, 250 frames" || fail "Video Player could not open the video on the disc"
 echo "Video Player plays video from the disc"
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
+# and the same video as an H.264 MP4, read from the disc as it plays
+type_keys v i d e o spc slash shift-d i s c slash shift-v i d e o s slash shift-r y z i k shift-o shift-s spc shift-d e m o dot m p 4 ret
+wait_for "video: opened RyzikOS Demo.mp4, H.264, 250 pictures, 640x360" || fail "Video Player could not open the MP4 video on the disc"
+wait_for "video: finished RyzikOS Demo.mp4" || fail "the MP4 video did not play to its end"
+echo "Video Player plays H.264 MP4 video"
 type_keys meta_l-s
 type_keys t e r m ret
 sleep 1

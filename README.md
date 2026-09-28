@@ -142,7 +142,7 @@ ISO — это live CD: RyzikOS запускается прямо с диска 
 | App Store | Магазин программ: установка через интернет или с диска, удаление, ярлык на рабочем столе |
 | Browser | Веб-браузер со вкладками, HTTPS, CSS и JavaScript (подробнее ниже) |
 | Photos | Галерея картинок из домашних папок, дисков и CD, просмотр с масштабом и поворотом |
-| Video Player | Видео MJPEG AVI с перемоткой и повтором |
+| Video Player | Видео MP4, MOV, M4V и 3GP (H.264), а также MJPEG AVI, с перемоткой и повтором; пока без звука |
 | Text Editor | Блокнот: открыть, сохранить, отмена, буфер обмена, UTF-8 и Windows-1251 |
 | Draw | Рисование мышью: цвета, кисть, ластик, заливка |
 | Terminal | Командная строка (список команд ниже) |
@@ -326,11 +326,12 @@ TLS, Trojan и Shadowsocks, а страница `http://127.0.0.1:8124/page.html
 | `kernel/src/vpn/` | VPN: подписки и ссылки (`link.rs`), TLS 1.3 с REALITY (`tls.rs`), XTLS Vision (`vision.rs`), Shadowsocks (`ss.rs`), VLESS и Trojan (`mod.rs`) |
 | `kernel/src/web/` | движок браузера: HTTP и HTTPS, DOM, CSS, раскладка, картинки, мост к JavaScript, каталог программ |
 | `kernel/src/js/`, `kernel/quickjs/` | движок JavaScript QuickJS |
+| `kernel/src/gui/video.rs`, `kernel/src/gui/mp4.rs` | видеоплеер: чтение MP4/MOV, декодер H.264 [rusty_h264](https://crates.io/crates/rusty_h264-decoder) (`kernel/vendor/`), Motion JPEG |
 | `kernel/src/sound.rs` | звуковая карта ES1370 и сигнал громкости |
 | `kernel/src/archive.rs` | ZIP (Deflate через miniz_oxide), TAR и GZIP для архиватора и команд `zip`/`unzip` |
 | `kernel/src/shell.rs` | терминал |
 | `programs/` | программы `.rzapp` и `catalog.txt` для App Store |
-| `iso/media/`, `scripts/gen-media.py` | фото и видео для CD |
+| `iso/media/`, `scripts/gen-media.py` | фото и видео для CD (MP4-версия демо сделана из AVI через `ffmpeg -c:v libx264`) |
 | `scripts/boot-test.sh` | автоматическая проверка загрузки в QEMU |
 | `scripts/vpn-test-server.py` | настоящий Xray с серверами всех протоколов для проверки VPN в QEMU |
 
@@ -343,3 +344,5 @@ SIL Open Font License 1.1, см. [fonts/LICENSE.terminus](fonts/LICENSE.terminus
 Эмодзи в Telegram: [Twemoji](https://github.com/jdecked/twemoji) (c) Twitter, Inc
 и другие авторы, CC-BY 4.0; картинки собраны из пакета `emoji-datasource-twitter`
 скриптом `scripts/make-emoji.py`.
+Декодер H.264: [rusty_h264-decoder](https://github.com/remade-with-rust/rusty_h264)
+(c) Mata Network, BSD-2-Clause, см. [kernel/vendor/rusty_h264-decoder/LICENSE](kernel/vendor/rusty_h264-decoder/LICENSE).

@@ -36,6 +36,7 @@ mod welcome;
 mod font_data;
 mod icons;
 mod login;
+mod mp4;
 mod notepad;
 mod paint;
 mod personalize;
@@ -312,7 +313,7 @@ impl App {
             App::Paint => "paint draw picture рисование паинт рисовалка",
             App::Calculator => "calc калькулятор",
             App::Photos => "photo picture image viewer gallery фото фотографии просмотр картинки изображения галерея",
-            App::Video => "video movie player avi видео фильм плеер кино",
+            App::Video => "video movie player mp4 avi mov видео фильм плеер кино",
             App::Store => "app store programs install games download магазин программы приложения установить игры скачать",
             App::Browser => "web internet browser браузер интернет",
             App::Settings => "control panel options параметры настройки",

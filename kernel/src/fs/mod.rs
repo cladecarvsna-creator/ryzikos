@@ -513,6 +513,61 @@ pub fn read(path: &str) -> Result<Vec<u8>, Error> {
     }
 }
 
+/// A file opened for reading a part at a time, for files too big to
+/// read whole (videos). It remembers where the data is, so each read
+/// costs only the sectors it needs.
+pub struct File {
+    at: FileAt,
+    pub size: u64,
+}
+
+enum FileAt {
+    /// On the system disk (`None`) or another disk, and its clusters.
+    Fat(Option<usize>, Vec<u32>),
+    /// On disc `i`, from this sector.
+    Disc(usize, u32),
+}
+
+pub fn open(path: &str) -> Result<File, Error> {
+    let (at, size) = match route(path) {
+        Target::Disc(i, inner) => {
+            let (lba, size) = with_disc(i, |d, dev| d.open(dev, inner))?;
+            (FileAt::Disc(i, lba), size)
+        }
+        Target::System(p) => {
+            let (chain, size) = with(|v| v.locate(p))?;
+            (FileAt::Fat(None, chain), size)
+        }
+        Target::Other(i, p) => {
+            let (chain, size) = on_volume(path, |v, _| v.locate(p))?;
+            (FileAt::Fat(Some(i), chain), size)
+        }
+    };
+    Ok(File { at, size })
+}
+
+impl File {
+    /// Read `len` bytes from `offset`; fewer at the end of the file.
+    pub fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, Error> {
+        let len = len.min(self.size.saturating_sub(offset) as usize);
+        let mut buf = vec![0u8; len];
+        if len == 0 {
+            return Ok(buf);
+        }
+        match &self.at {
+            FileAt::Disc(i, lba) => {
+                with_disc(*i, |_, dev| iso9660::Disc::read_at(dev, *lba, offset, &mut buf))?
+            }
+            FileAt::Fat(None, chain) => with(|v| v.read_at(chain, offset, &mut buf))?,
+            FileAt::Fat(Some(i), chain) => match OTHERS.lock().get_mut(*i).and_then(|d| d.volume.as_mut()) {
+                Some(v) => v.read_at(chain, offset, &mut buf)?,
+                None => return Err(Error::NoDisk),
+            },
+        }
+        Ok(buf)
+    }
+}
+
 /// Create or replace a file.
 pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     changed(on_volume(path, |v, p| v.write(p, data)))

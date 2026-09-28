@@ -1,3 +1,3 @@
-New app: Archiver. Make ZIP archives that open in 7-Zip, WinRAR and Windows, and open ZIP, TAR, TAR.GZ and GZIP files.
-Your files are on the left and the archive on the right: tick files and press Add to pack them, or tick files in the archive and press Extract. Each file shows how much it was packed.
-In Files, double-click an archive to open it, or right-click for "Add to ZIP archive" and "Extract to folder". The Terminal has zip and unzip too.
+Video Player now plays MP4 videos: files from phones, Telegram and most sites (H.264 video in MP4, MOV, M4V or 3GP).
+Long videos play straight from the disk, and you can jump anywhere on the time bar. There is no sound yet.
+Videos in other formats (H.265, VP9, AV1) show how to turn them into a playable MP4.
