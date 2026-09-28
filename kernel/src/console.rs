@@ -214,6 +214,34 @@ impl Console {
         }
     }
 
+    /// Change the size of the text area kept for the desktop's terminal
+    /// window. The lines up to the cursor stay, the oldest go first.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let (cols, rows) = (cols.clamp(8, MAX_COLS), rows.clamp(2, MAX_ROWS));
+        if !matches!(self.surface, Surface::Offscreen(_)) || (cols, rows) == (self.cols, self.rows) {
+            return;
+        }
+        let old: alloc::vec::Vec<Cell> = self.cells[..self.cols * self.rows].to_vec();
+        let (old_cols, old_rows) = (self.cols, self.rows);
+        let skip = (self.row + 1).saturating_sub(rows);
+        let blank = self.blank();
+        for row in 0..rows {
+            for col in 0..cols {
+                let from = row + skip;
+                self.cells[row * cols + col] = if from < old_rows && col < old_cols {
+                    old[from * old_cols + col]
+                } else {
+                    blank
+                };
+            }
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.row -= skip;
+        self.col = self.col.min(cols);
+        self.changed = true;
+    }
+
     /// Take the screen back from the desktop, for the panic screen.
     pub fn reattach(&mut self) {
         if let Surface::Offscreen(fb) = self.surface {

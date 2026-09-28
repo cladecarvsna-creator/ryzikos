@@ -29,6 +29,14 @@ const TILE_W: i32 = 400;
 const TILE_H: i32 = 92;
 pub const CLIENT_H: i32 = 680;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Explorer)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Explorer)
+}
+
 const NAV_H: i32 = 48;
 const CMD_H: i32 = 44;
 const TOP: i32 = NAV_H + CMD_H;
@@ -174,8 +182,8 @@ fn content() -> Rect {
     Rect::new(
         SIDE_W + 1,
         TOP,
-        CLIENT_W - SIDE_W - 1 - SB,
-        CLIENT_H - TOP - STATUS_H,
+        cw() - SIDE_W - 1 - SB,
+        ch() - TOP - STATUS_H,
     )
 }
 
@@ -185,7 +193,7 @@ fn track() -> Rect {
 }
 
 fn client() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 fn nav_button(i: i32) -> Rect {
@@ -193,11 +201,11 @@ fn nav_button(i: i32) -> Rect {
 }
 
 fn address_rect() -> Rect {
-    Rect::new(176, 8, CLIENT_W - 176 - 262, 32)
+    Rect::new(176, 8, cw() - 176 - 262, 32)
 }
 
 fn search_rect() -> Rect {
-    Rect::new(CLIENT_W - 250, 8, 238, 32)
+    Rect::new(cw() - 250, 8, 238, 32)
 }
 
 /// Command bar buttons: what they do, their label and where they are.
@@ -226,7 +234,7 @@ fn commands(bin: bool) -> [(Cmd, &'static str, Rect); 6] {
         out[i] = (cmd, label, Rect::new(x, y, w, 32));
         x += w + if i == 1 { 20 } else { 6 };
     }
-    let right = CLIENT_W - 12;
+    let right = cw() - 12;
     out[4] = (Cmd::Details, "Details", Rect::new(right - 224, y, 104, 32));
     out[5] = (
         Cmd::Icons,
@@ -378,6 +386,11 @@ fn fit(text: &str, w: i32) -> String {
 }
 
 impl Explorer {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+        self.clamp_scroll();
+    }
+
     pub fn new() -> Self {
         Self {
             path: String::from("/"),
@@ -1391,8 +1404,8 @@ impl Explorer {
             }
             let items = self.menu_items(hit.is_some());
             let mut r = widgets::menu_rect(x, y, &items);
-            r.x = r.x.min(CLIENT_W - r.w - 4);
-            if r.bottom() > CLIENT_H - 4 {
+            r.x = r.x.min(cw() - r.w - 4);
+            if r.bottom() > ch() - 4 {
                 r.y = y - r.h;
             }
             self.menu = Some((hit.is_some(), r));
@@ -1565,7 +1578,7 @@ impl Explorer {
     }
 
     fn draw_nav(&mut self, c: &mut Canvas, caret: bool) {
-        c.fill(Rect::new(0, 0, CLIENT_W, NAV_H), theme::face());
+        c.fill(Rect::new(0, 0, cw(), NAV_H), theme::face());
         let enabled = [
             !self.back.is_empty(),
             !self.forward.is_empty(),
@@ -1642,9 +1655,9 @@ impl Explorer {
     }
 
     fn draw_commands(&self, c: &mut Canvas) {
-        let bar = Rect::new(0, NAV_H, CLIENT_W, CMD_H);
+        let bar = Rect::new(0, NAV_H, cw(), CMD_H);
         c.fill(bar, theme::face());
-        c.fill_rect(0, TOP - 1, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, TOP - 1, cw(), 1, theme::stroke());
         let has_sel = !self.chosen().is_empty();
         let bin = self.at_bin();
         // discs can only be read, and Computer only lists drives
@@ -1717,7 +1730,7 @@ impl Explorer {
     }
 
     fn draw_side(&self, c: &mut Canvas) {
-        let side = Rect::new(0, TOP, SIDE_W, CLIENT_H - TOP - STATUS_H);
+        let side = Rect::new(0, TOP, SIDE_W, ch() - TOP - STATUS_H);
         c.fill(side, theme::raised());
         c.fill_rect(SIDE_W, TOP, 1, side.h, theme::stroke());
         let places = places();
@@ -1927,9 +1940,9 @@ impl Explorer {
     }
 
     fn draw_status(&self, c: &mut Canvas) {
-        let r = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);
+        let r = Rect::new(0, ch() - STATUS_H, cw(), STATUS_H);
         c.fill(r, theme::face());
-        c.fill_rect(0, r.y, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, r.y, cw(), 1, theme::stroke());
         let ty = r.y + (STATUS_H - UI.line_height) / 2;
         let mut s = String::new();
         let n = self.items.len();

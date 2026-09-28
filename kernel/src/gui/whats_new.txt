@@ -1,3 +1,3 @@
-VPN: a new app that works like Happ. Paste the subscription address your VPN service gave you, or a vless://, trojan:// or ss:// link, pick a server and press the big button.
-It speaks VLESS with REALITY or TLS (with XTLS Vision too), Trojan and Shadowsocks, and shows each server's delay, your traffic and when the subscription ends.
-While the VPN is on, every program goes through it, the menu bar shows a green shield, and Quick settings has a VPN tile.
+Windows now have a green button next to close and minimise: it fills the screen with the window, and pressing it again puts the window back. A double-click on the title bar, Super+Up or dragging a window to the top of the screen does the same; Super+Down or pulling the title bar puts it back.
+Windows can be resized: hold the mouse on a corner or an edge (the pointer turns into arrows) and drag. Files, the Browser, Telegram, the Terminal and the other apps lay themselves out for the new size.
+Small windows like Calculator, About and Draw keep their size, so their green button is dim.

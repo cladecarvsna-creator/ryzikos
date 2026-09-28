@@ -20,6 +20,14 @@ use crate::keyboard::Key;
 pub const CLIENT_W: i32 = 1100;
 pub const CLIENT_H: i32 = 720;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Photos)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Photos)
+}
+
 const BAR_H: i32 = 52;
 const STATUS_H: i32 = 30;
 const THUMB_W: i32 = 190;
@@ -76,7 +84,7 @@ fn button_rects() -> Vec<(Button, &'static str, Rect)> {
 }
 
 fn view_rect() -> Rect {
-    Rect::new(0, BAR_H, CLIENT_W, CLIENT_H - BAR_H - STATUS_H)
+    Rect::new(0, BAR_H, cw(), ch() - BAR_H - STATUS_H)
 }
 
 /// Pictures (or videos) in the usual places: some home folders, the
@@ -135,6 +143,11 @@ pub struct Photos {
 }
 
 impl Photos {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+        self.scroll = self.scroll.clamp(0, self.max_scroll());
+    }
+
     pub fn new() -> Self {
         Self {
             path: None,
@@ -379,9 +392,9 @@ impl Photos {
     }
 
     fn max_scroll(&self) -> i32 {
-        let per_row = ((CLIENT_W - 2 * GRID_X) / CELL_W).max(1) as usize;
+        let per_row = ((cw() - 2 * GRID_X) / CELL_W).max(1) as usize;
         let rows = self.thumbs.len().div_ceil(per_row) as i32;
-        (GRID_Y + rows * CELL_H + 20 - (CLIENT_H - STATUS_H)).max(0)
+        (GRID_Y + rows * CELL_H + 20 - (ch() - STATUS_H)).max(0)
     }
 
     fn scroll_by(&mut self, dy: i32) {
@@ -405,7 +418,7 @@ impl Photos {
     }
 
     fn thumb_rect(&self, i: usize) -> Rect {
-        let per_row = ((CLIENT_W - 2 * GRID_X) / CELL_W).max(1) as usize;
+        let per_row = ((cw() - 2 * GRID_X) / CELL_W).max(1) as usize;
         Rect::new(
             GRID_X + (i % per_row) as i32 * CELL_W,
             GRID_Y + (i / per_row) as i32 * CELL_H - self.scroll,
@@ -478,8 +491,8 @@ impl Photos {
 
     pub fn draw(&mut self, c: &mut Canvas) {
         // the toolbar
-        c.fill_rect(0, 0, CLIENT_W, BAR_H, theme::face());
-        c.fill_rect(0, BAR_H - 1, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, 0, cw(), BAR_H, theme::face());
+        c.fill_rect(0, BAR_H - 1, cw(), 1, theme::stroke());
         for (b, label, r) in button_rects() {
             if self.enabled(b) {
                 theme::button(c, r, label, self.pressed == Some(b));
@@ -534,9 +547,9 @@ impl Photos {
             status = String::from(fs::display(self.path.as_deref().unwrap_or("")));
         }
 
-        c.fill_rect(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H, theme::face());
-        c.fill_rect(0, CLIENT_H - STATUS_H, CLIENT_W, 1, theme::stroke());
-        c.draw_text(14, CLIENT_H - STATUS_H + 7, &status, theme::text_dim());
+        c.fill_rect(0, ch() - STATUS_H, cw(), STATUS_H, theme::face());
+        c.fill_rect(0, ch() - STATUS_H, cw(), 1, theme::stroke());
+        c.draw_text(14, ch() - STATUS_H + 7, &status, theme::text_dim());
 
         if let Some(d) = &mut self.dialog {
             d.draw(c, client(), true);
@@ -581,7 +594,7 @@ impl Photos {
 }
 
 fn client() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 fn short(name: &str, max: usize) -> String {

@@ -18,6 +18,8 @@ pub enum Cmd {
     Unpin(App),
     Close(App),
     Minimize(App),
+    /// Maximise or restore.
+    Maximize(App),
     /// Move a window to desktop `n`.
     MoveTo(App, usize),
     MoveToNew(App),

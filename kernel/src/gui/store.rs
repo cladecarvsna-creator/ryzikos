@@ -21,6 +21,14 @@ use crate::web::{self, url::Url, CatalogEntry, PROGRAM_EXT};
 pub const CLIENT_W: i32 = 1000;
 pub const CLIENT_H: i32 = 680;
 
+/// The window's size now; it opens at CLIENT_W x CLIENT_H.
+fn cw() -> i32 {
+    super::client_w(super::App::Store)
+}
+fn ch() -> i32 {
+    super::client_h(super::App::Store)
+}
+
 const HEAD_H: i32 = 104;
 const TABS_Y: i32 = HEAD_H + 14;
 const LIST_Y: i32 = HEAD_H + 62;
@@ -28,6 +36,11 @@ const STATUS_H: i32 = 30;
 const CARD_W: i32 = 470;
 const CARD_H: i32 = 132;
 const GAP: i32 = 16;
+
+/// Cards side by side: as many as fit, up to three.
+fn columns() -> usize {
+    ((cw() - 40 + GAP) / (CARD_W + GAP)).clamp(1, 3) as usize
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -171,7 +184,7 @@ fn wrap(text: &str, w: i32, max: usize) -> Vec<String> {
 }
 
 fn client() -> Rect {
-    Rect::new(0, 0, CLIENT_W, CLIENT_H)
+    Rect::new(0, 0, cw(), ch())
 }
 
 fn tab_rect(i: usize) -> Rect {
@@ -187,20 +200,25 @@ fn tab_rect(i: usize) -> Rect {
 }
 
 fn refresh_rect() -> Rect {
-    Rect::new(CLIENT_W - 24 - 170, TABS_Y, 170, 34)
+    Rect::new(cw() - 24 - 170, TABS_Y, 170, 34)
 }
 
 fn list_rect() -> Rect {
-    Rect::new(0, LIST_Y, CLIENT_W, CLIENT_H - LIST_Y - STATUS_H)
+    Rect::new(0, LIST_Y, cw(), ch() - LIST_Y - STATUS_H)
 }
 
 /// The scroll bar, in the margin right of the cards.
 fn track() -> Rect {
     let list = list_rect();
-    Rect::new(CLIENT_W - 18, list.y + 6, 12, list.h - 12)
+    Rect::new(cw() - 18, list.y + 6, 12, list.h - 12)
 }
 
 impl Store {
+    /// The window got a new size.
+    pub fn resized(&mut self) {
+        self.scroll = self.scroll.clamp(0, self.max_scroll());
+    }
+
     pub fn new() -> Self {
         Self {
             entries: web::parse_catalog(web::CATALOG_TEXT),
@@ -394,8 +412,9 @@ impl Store {
 
     fn card_rect(&self, i: usize) -> Rect {
         let list = list_rect();
-        let (col, row) = ((i % 2) as i32, (i / 2) as i32);
-        let left = (CLIENT_W - 2 * CARD_W - GAP) / 2;
+        let n = columns();
+        let (col, row) = ((i % n) as i32, (i / n) as i32);
+        let left = (cw() - n as i32 * (CARD_W + GAP) + GAP) / 2;
         Rect::new(
             left + col * (CARD_W + GAP),
             list.y + 8 + row * (CARD_H + GAP) - self.scroll,
@@ -420,7 +439,7 @@ impl Store {
 
     /// The height of all the cards.
     fn total(&self) -> i32 {
-        let rows = (self.shown().len() as i32 + 1) / 2;
+        let rows = self.shown().len().div_ceil(columns()) as i32;
         rows * (CARD_H + GAP) + 16
     }
 
@@ -526,7 +545,7 @@ impl Store {
     pub fn draw(&mut self, c: &mut Canvas) {
         c.fill(client(), theme::light());
         // the header
-        let head = Rect::new(0, 0, CLIENT_W, HEAD_H);
+        let head = Rect::new(0, 0, cw(), HEAD_H);
         c.vertical_gradient(head, rgb(0x6c, 0x3f, 0xd1), rgb(0x1a, 0x73, 0xe8));
         bag_icon(c, 28, 24);
         c.draw_text_in(&HEADING, 104, 22, "App Store", 0xffffff);
@@ -537,7 +556,7 @@ impl Store {
             Source::BuiltIn => ("Offline catalog", rgb(0xff, 0xe0, 0xc0)),
         };
         let w = UI.width(label);
-        c.draw_text(CLIENT_W - 28 - w, 40, label, color);
+        c.draw_text(cw() - 28 - w, 40, label, color);
         // tabs and refresh
         for (i, (tab, label)) in TABS.iter().enumerate() {
             let r = tab_rect(i);
@@ -562,7 +581,7 @@ impl Store {
                 } else {
                     "The catalog is empty."
                 };
-                s.text_centered(Rect::new(0, list.y + 40, CLIENT_W, 24), msg, theme::text_dim());
+                s.text_centered(Rect::new(0, list.y + 40, cw(), 24), msg, theme::text_dim());
             }
             for (i, e) in shown.iter().enumerate() {
                 let r = self.card_rect(i);
@@ -580,16 +599,16 @@ impl Store {
             c.fill_round(thumb, 4, color);
         }
         // the status line
-        let st = Rect::new(0, CLIENT_H - STATUS_H, CLIENT_W, STATUS_H);
+        let st = Rect::new(0, ch() - STATUS_H, cw(), STATUS_H);
         c.fill(st, theme::face());
-        c.fill_rect(0, st.y, CLIENT_W, 1, theme::stroke());
+        c.fill_rect(0, st.y, cw(), 1, theme::stroke());
         let n = self.installed.len();
         let left = if self.status.is_empty() {
             format!("{} program{} installed", n, if n == 1 { "" } else { "s" })
         } else {
             self.status.clone()
         };
-        c.draw_text(14, st.y + 6, &fit(&left, CLIENT_W - 28), theme::text());
+        c.draw_text(14, st.y + 6, &fit(&left, cw() - 28), theme::text());
     }
 
     fn draw_card(&self, c: &mut Canvas, i: usize, e: &CatalogEntry, r: Rect) {
