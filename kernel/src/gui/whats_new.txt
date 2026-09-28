@@ -1,2 +1,3 @@
-Renaming a file or folder on the desktop works properly again: the name box is drawn whole, with no pieces cut off or left behind, and it stays on the screen.
-Clicking inside the name box now moves the text cursor there instead of ending the rename, so you can fix one letter in the middle of a name.
+New app: Archiver. Make ZIP archives that open in 7-Zip, WinRAR and Windows, and open ZIP, TAR, TAR.GZ and GZIP files.
+Your files are on the left and the archive on the right: tick files and press Add to pack them, or tick files in the archive and press Extract. Each file shows how much it was packed.
+In Files, double-click an archive to open it, or right-click for "Add to ZIP archive" and "Extract to folder". The Terminal has zip and unzip too.

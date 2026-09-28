@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="100%" height="100%" fill="none">
+  <!-- Коробка -->
+  <path d="M9 22H55V52C55 55 53 57 50 57H14C11 57 9 55 9 52V22Z" fill="#FFD24C" stroke="#1E2022" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Крышка -->
+  <path d="M6 13C6 10.5 7.5 9 10 9H54C56.5 9 58 10.5 58 13V22H6V13Z" fill="#FFEAA7" stroke="#1E2022" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Молния -->
+  <rect x="28" y="9" width="8" height="48" fill="#A29BFE" stroke="#1E2022" stroke-width="2.5"/>
+  <path d="M28 15H32M32 20H36M28 25H32M32 30H36M28 35H32M32 40H36M28 45H32M32 50H36" stroke="#1E2022" stroke-width="2"/>
+  <!-- Бегунок -->
+  <rect x="25" y="28" width="14" height="10" rx="3" fill="#74B9FF" stroke="#1E2022" stroke-width="2.5"/>
+  <path d="M32 38V45" stroke="#1E2022" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="47" r="3" fill="#FF7675" stroke="#1E2022" stroke-width="2"/>
+</svg>

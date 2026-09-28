@@ -7,7 +7,7 @@ use crate::gui::{self, App};
 use crate::interrupts;
 use crate::keyboard::Key;
 use crate::multiboot::BootInfo;
-use crate::{fs, print, println, users};
+use crate::{archive, fs, print, println, users};
 
 const MAX_LINE: usize = 1000;
 
@@ -136,6 +136,8 @@ impl Shell {
                 println!("  beep    play the volume sound on the ES1370 sound card");
                 println!("  store   open the App Store to install programs");
                 println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
+                println!("  zip     zip <archive.zip> <files or folders> packs them (Archiver does it too)");
+                println!("  unzip   unzip <archive> [folder] unpacks ZIP, TAR, GZIP; unzip -l lists it");
                 println!("  browser open the web browser (browser <address> goes there)");
                 println!("  fetch   download a web page and show its title and links");
                 println!("  exit    close the terminal window");
@@ -229,6 +231,14 @@ impl Shell {
                     error("File not found");
                 }
             }
+            "archiver" | "7z" | "winrar" => {
+                if !args.trim().is_empty() {
+                    gui::request_file(&self.path(args));
+                }
+                open(App::Archiver);
+            }
+            "zip" => self.zip(args),
+            "unzip" | "untar" => self.unzip(args),
             "telegram" | "tg" => {
                 if args.trim() == "selftest" {
                     match crate::tg::self_test() {
@@ -400,6 +410,98 @@ impl Shell {
 
 impl Shell {
     /// A path typed in the shell, relative to the current folder.
+    /// `zip <archive.zip> <files or folders>`: pack them, adding to the
+    /// archive if it is there.
+    fn zip(&self, args: &str) {
+        let words: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+        if words.len() < 2 {
+            error("Usage: zip <archive.zip> <files or folders>");
+            return;
+        }
+        let mut target = self.path(words[0]);
+        if archive::Archive::kind_of(&target).is_none() {
+            target.push_str(".zip");
+        }
+        let base = match fs::read(&target) {
+            Ok(data) => match archive::Archive::parse(data, &target) {
+                Ok(a) if a.kind.editable() => a,
+                Ok(_) => return error("Only ZIP archives can have files added"),
+                Err(e) => return error(&e),
+            },
+            Err(_) => archive::Archive::new_zip(),
+        };
+        let mut sources = alloc::vec::Vec::new();
+        for w in &words[1..] {
+            let path = self.path(w);
+            if !fs::exists(&path) {
+                return error(&alloc::format!("{}: {}", w, fs::Error::NotFound.message()));
+            }
+            let name = String::from(fs::file_name(&path));
+            sources.push(archive::Source { path, name });
+        }
+        let result = archive::add(&base, &sources, archive::Level::Normal, &mut |_, _, _| true)
+            .and_then(|data| fs::write(&target, &data).map(|()| data.len()).map_err(|e| String::from(e.message())));
+        match result {
+            Ok(bytes) => {
+                println!("Packed {} into {} ({} bytes)", words[1..].join(" "), fs::display(&target), bytes);
+                crate::serial::write_str(&alloc::format!("\nzip: packed {} into {}\n", sources.len(), fs::file_name(&target)));
+            }
+            Err(e) => error(&e),
+        }
+    }
+
+    /// `unzip <archive> [folder]` unpacks into the folder (by default a
+    /// new one named after the archive); `unzip -l <archive>` lists it.
+    fn unzip(&self, args: &str) {
+        let words: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+        let (list, words) = match words.first() {
+            Some(&"-l") => (true, &words[1..]),
+            _ => (false, &words[..]),
+        };
+        let Some(first) = words.first() else {
+            return error("Usage: unzip <archive> [folder], or unzip -l <archive>");
+        };
+        let path = self.path(first);
+        let a = match fs::read(&path).map_err(|e| String::from(e.message())).and_then(|d| archive::Archive::parse(d, &path)) {
+            Ok(a) => a,
+            Err(e) => return error(&e),
+        };
+        if list {
+            for e in &a.entries {
+                if e.dir {
+                    println!("{:>10}  {}/", "", e.name);
+                } else {
+                    println!("{:>10}  {}", e.size, e.name);
+                }
+            }
+            let (size, _) = a.totals();
+            println!("{} entries, {} bytes, {}", a.entries.len(), size, a.kind.name());
+            crate::serial::write_str(&alloc::format!("\nunzip: listed {} entries\n", a.entries.len()));
+            return;
+        }
+        let dest = match words.get(1) {
+            Some(d) => self.path(d),
+            None => {
+                let dir = fs::parent(&path);
+                let file = fs::file_name(&path);
+                let lower = file.to_ascii_lowercase();
+                let cut = [".tar.gz", ".tgz", ".zip", ".tar", ".gz"]
+                    .iter()
+                    .find(|x| lower.ends_with(*x) && file.len() > x.len())
+                    .map_or(file.len(), |x| file.len() - x.len());
+                let name = fs::unique_name(&dir, &file[..cut], "");
+                fs::join(&dir, &name)
+            }
+        };
+        match archive::extract(&a, &[], "", &dest, &mut |_, _, _| true) {
+            Ok(n) => {
+                println!("Unpacked {} {} into {}", n, if n == 1 { "file" } else { "files" }, fs::display(&dest));
+                crate::serial::write_str(&alloc::format!("\nunzip: unpacked {} files to {}\n", n, fs::display(&dest)));
+            }
+            Err(e) => error(&e),
+        }
+    }
+
     fn path(&self, arg: &str) -> String {
         let arg = arg.trim();
         let cwd = if self.cwd.is_empty() {

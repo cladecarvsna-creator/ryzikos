@@ -18,6 +18,7 @@
 
 mod about;
 mod anim;
+mod archiver;
 mod browser;
 mod calc;
 mod canvas;
@@ -168,9 +169,10 @@ pub enum App {
     Welcome,
     Telegram,
     Vpn,
+    Archiver,
 }
 
-const APPS: [App; 17] = [
+const APPS: [App; 18] = [
     App::Terminal,
     App::Explorer,
     App::Notepad,
@@ -188,6 +190,7 @@ const APPS: [App; 17] = [
     App::Welcome,
     App::Telegram,
     App::Vpn,
+    App::Archiver,
 ];
 
 impl App {
@@ -215,6 +218,7 @@ impl App {
             App::Welcome => "Welcome",
             App::Telegram => "Telegram",
             App::Vpn => "VPN",
+            App::Archiver => "Archiver",
         }
     }
 
@@ -238,6 +242,7 @@ impl App {
             App::Welcome => (welcome::CLIENT_W, welcome::CLIENT_H),
             App::Telegram => (telegram::CLIENT_W, telegram::CLIENT_H),
             App::Vpn => (vpn::CLIENT_W, vpn::CLIENT_H),
+            App::Archiver => (archiver::CLIENT_W, archiver::CLIENT_H),
         }
     }
 
@@ -265,6 +270,7 @@ impl App {
             App::TaskManager => (780, 480),
             App::Telegram => (760, 620),
             App::Vpn => (700, 520),
+            App::Archiver => (820, 540),
             _ => self.default_size(),
         }
     }
@@ -289,6 +295,7 @@ impl App {
             App::Welcome => "welcome",
             App::Telegram => "telegram",
             App::Vpn => "vpn",
+            App::Archiver => "archiver",
         }
     }
 
@@ -316,6 +323,7 @@ impl App {
             App::Welcome => "welcome start tips get started добро пожаловать приветствие",
             App::Telegram => "messenger chat телеграм телеграмм мессенджер чат",
             App::Vpn => "vpn proxy vless reality trojan shadowsocks happ впн прокси хапп обход",
+            App::Archiver => "archive zip unzip rar 7zip winrar tar gz compress extract pack архив архиватор зип распаковать сжать упаковать",
         }
     }
 
@@ -338,6 +346,7 @@ impl App {
             App::Welcome => (580, 130),
             App::Telegram => (380, 90),
             App::Vpn => (460, 100),
+            App::Archiver => (400, 120),
         }
     }
 
@@ -671,6 +680,7 @@ pub struct Desktop<'a> {
     photos: Box<photos::Photos>,
     store: Box<store::Store>,
     taskmgr: Box<taskmgr::TaskManager>,
+    archiver: Box<archiver::Archiver>,
     /// The window a program runs in.
     program: Box<browser::Browser>,
     /// Its title when last drawn, to notice when the title bar changes.
@@ -818,6 +828,7 @@ impl<'a> Desktop<'a> {
             photos: Box::new(photos::Photos::new()),
             store: Box::new(store::Store::new()),
             taskmgr: Box::new(taskmgr::TaskManager::new()),
+            archiver: Box::new(archiver::Archiver::new()),
             program: Box::new(browser::Browser::program()),
             program_title: String::new(),
             video: Box::new(video::Video::new()),
@@ -1172,7 +1183,7 @@ impl<'a> Desktop<'a> {
     /// in the title bar, so their whole window is drawn again.
     fn app_changed(&mut self, app: App) {
         match app {
-            App::Notepad | App::Explorer | App::Photos | App::Video | App::Program => {
+            App::Notepad | App::Explorer | App::Photos | App::Video | App::Program | App::Archiver => {
                 self.stale[app.index()] = true;
                 self.damage_window(app);
             }
@@ -1211,6 +1222,7 @@ impl<'a> Desktop<'a> {
             App::Photos => self.photos.title(),
             App::Video => self.video.title(),
             App::Program => self.program.program_title(),
+            App::Archiver => self.archiver.title(),
             _ => String::from(app.title()),
         }
     }
@@ -1225,6 +1237,20 @@ impl<'a> Desktop<'a> {
             self.app_changed(App::Explorer);
         }
         if let Some(path) = self.explorer.open_request.take() {
+            self.open_file(&path);
+        }
+        if let Some(req) = self.explorer.archive_request.take() {
+            self.open(App::Archiver);
+            match req {
+                explorer::ArchiveRequest::Pack(paths) => self.archiver.pack_new(&paths),
+                explorer::ArchiveRequest::Extract(path) => self.archiver.extract_here(&path),
+            }
+            self.app_changed(App::Archiver);
+        }
+        if self.windows[App::Archiver.index()].open && self.archiver.check_changes() {
+            self.app_changed(App::Archiver);
+        }
+        if let Some(path) = self.archiver.open_request.take() {
             self.open_file(&path);
         }
         while let Some(req) = browser::take_desktop_request() {
@@ -1275,6 +1301,12 @@ impl<'a> Desktop<'a> {
     /// pages and downloaded programs in the browser, everything else in
     /// the text editor.
     fn open_file(&mut self, path: &str) {
+        if archiver::is_archive(path) {
+            self.open(App::Archiver);
+            self.archiver.open_file(path);
+            self.app_changed(App::Archiver);
+            return;
+        }
         if picture::is_picture(path) {
             self.open(App::Photos);
             self.photos.open_file(path);
@@ -1365,6 +1397,10 @@ impl<'a> Desktop<'a> {
         }
         if app == App::Store {
             self.store.start();
+        }
+        if app == App::Archiver {
+            self.archiver.start();
+            self.stale[app.index()] = true;
         }
         self.focus(app);
         self.damage_taskbar();
@@ -1612,6 +1648,7 @@ impl<'a> Desktop<'a> {
             App::Store => self.store.resized(),
             App::Telegram => self.telegram.resized(),
             App::Vpn => self.vpn.resized(),
+            App::Archiver => self.archiver.resized(),
             _ => {}
         }
     }
@@ -1888,6 +1925,7 @@ impl<'a> Desktop<'a> {
             App::Installer => self.installer.on_key(key),
             App::Telegram => self.telegram.on_key(key),
             App::Vpn => self.vpn.on_key(key),
+            App::Archiver => self.archiver.on_key(key),
             App::Welcome => self.welcome.on_key(key),
             App::About | App::TaskManager => false,
         };
@@ -2001,6 +2039,7 @@ impl<'a> Desktop<'a> {
                 Some(App::Program) => self.program.on_wheel(clicks),
                 Some(App::Telegram) => self.telegram.on_wheel(clicks),
                 Some(App::Vpn) => self.vpn.on_wheel(clicks),
+                Some(App::Archiver) => self.archiver.on_wheel(clicks),
                 _ => false,
             };
             if let Some(app) = app.filter(|_| changed) {
@@ -2109,6 +2148,7 @@ impl<'a> Desktop<'a> {
             App::Program => self.program.on_hover(x, y),
             App::Telegram => self.telegram.on_hover(x, y),
             App::Vpn => self.vpn.on_hover(x, y),
+            App::Archiver => self.archiver.on_hover(x, y),
             _ => false,
         }
     }
@@ -2480,6 +2520,7 @@ impl<'a> Desktop<'a> {
             App::Installer => self.installer.on_mouse(ev),
             App::Telegram => self.telegram.on_mouse(ev),
             App::Vpn => self.vpn.on_mouse(ev),
+            App::Archiver => self.archiver.on_mouse(ev),
             App::Welcome => self.welcome.on_mouse(ev),
             App::Terminal => false,
         };
@@ -2742,6 +2783,7 @@ impl<'a> Desktop<'a> {
                     }
                     App::Welcome => self.welcome.draw(&mut c),
                     App::Vpn => self.vpn.draw(&mut c, focused && self.cursor_on),
+                    App::Archiver => self.archiver.draw(&mut c, focused && self.cursor_on),
                     App::Browser => self.browser.draw(&mut c),
                     App::Notepad => self.notepad.draw(&mut c, focused && self.cursor_on),
                     App::Explorer => self.explorer.draw(&mut c, focused && self.cursor_on),
@@ -3533,6 +3575,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if (desk.vpn.busy() || desk.windows[App::Vpn.index()].open) && desk.vpn.tick() {
             desk.damage_client(App::Vpn);
         }
+        if desk.archiver.busy() && desk.archiver.tick() {
+            desk.app_changed(App::Archiver);
+        }
         if desk.windows[App::TaskManager.index()].open && desk.taskmgr.tick() {
             desk.damage_client(App::TaskManager);
         }
@@ -3572,6 +3617,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
                 // the text caret blinks
                 desk.stale[app.index()] = true;
                 desk.damage_client(app);
+            } else if desk.focused == Some(App::Archiver) && desk.archiver.typing() {
+                desk.damage_client(App::Archiver);
             }
         }
         let second = now / interrupts::TIMER_HZ;
@@ -3608,6 +3655,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             || desk.store.busy()
             || desk.settings.busy()
             || desk.installer.busy()
+            || desk.archiver.busy()
             || desk.telegram.busy();
         interrupts::wait_for_interrupt(|| {
             busy || !KEYBOARD_BYTES.is_empty() || !MOUSE_BYTES.is_empty() || !REQUESTS.is_empty()
