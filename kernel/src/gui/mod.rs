@@ -3564,8 +3564,7 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
             } else if desk.search.open {
                 desk.damage(Search::field(desk.search_panel()));
             } else if let Some((i, _)) = &desk.desk_icons.renaming {
-                let r = desk.icon_rect(*i).inset(-8);
-                desk.damage(r);
+                desk.damage_icon_rename(*i);
             } else if let Some(
                 app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram | App::Vpn),
             ) = desk.focused

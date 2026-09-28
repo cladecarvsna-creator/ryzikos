@@ -1,3 +1,2 @@
-RyzikOS is faster: the launcher, search, menus, window shadows and text are drawn about twice as fast, so opening, moving and animating windows is smoother. Nothing looks different, and every animation is still there.
-Starting from the CD takes a couple of seconds less: GRUB no longer unpacks the whole system twice, and the system itself is smaller.
-On the live CD, opening the launcher no longer copies the whole system in memory on every frame, which made it stutter.
+Renaming a file or folder on the desktop works properly again: the name box is drawn whole, with no pieces cut off or left behind, and it stays on the screen.
+Clicking inside the name box now moves the text cursor there instead of ending the rename, so you can fix one letter in the middle of a name.

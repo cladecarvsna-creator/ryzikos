@@ -376,6 +376,18 @@ impl Desktop<'_> {
     // ---- mouse -------------------------------------------------------------
 
     pub(super) fn icons_press(&mut self, x: i32, y: i32, right: bool) {
+        // a click in the rename box moves the caret, anywhere else finishes
+        if let Some(i) = self.desk_icons.renaming.as_ref().map(|(i, _)| *i) {
+            let box_ = self.icon_rename_rect(i);
+            if !right && box_.contains(x, y) {
+                if let Some((_, field)) = &mut self.desk_icons.renaming {
+                    field.click(box_, x);
+                }
+                self.cursor_on = true;
+                self.damage_icon_rename(i);
+                return;
+            }
+        }
         self.commit_icon_rename();
         let hit = self.icon_at(x, y);
         let ctrl = keyboard::ctrl_held();
@@ -600,14 +612,30 @@ impl Desktop<'_> {
         field.select(0, base);
         self.desk_icons.renaming = Some((i, field));
         self.focused_away();
-        self.damage(self.icon_rect(i).inset(-8));
+        self.cursor_on = true;
+        self.damage_icon_rename(i);
+    }
+
+    /// Where icon `i`'s rename box goes: under the picture, wider than the
+    /// icon so a long name fits, and kept on the screen.
+    pub(super) fn icon_rename_rect(&self, i: usize) -> Rect {
+        let r = self.icon_rect(i);
+        let w = r.w + 60;
+        let x = (r.x - 30).clamp(2, (self.width - w - 2).max(2));
+        Rect::new(x, r.y + 56, w, 26)
+    }
+
+    /// Redraw icon `i` and its whole rename box, focus ring included.
+    pub(super) fn damage_icon_rename(&mut self, i: usize) {
+        let r = self.icon_rect(i).inset(-8).union(&self.icon_rename_rect(i).inset(-4));
+        self.damage(r);
     }
 
     fn commit_icon_rename(&mut self) {
         let Some((i, field)) = self.desk_icons.renaming.take() else {
             return;
         };
-        self.damage(self.icon_rect(i).inset(-8));
+        self.damage_icon_rename(i);
         let new = field.string();
         let new = new.trim().trim_end_matches('.');
         if let (Some(path), false) = (self.icon_path(i), new.is_empty()) {
@@ -633,9 +661,9 @@ impl Desktop<'_> {
                 FieldEvent::Escape => {
                     self.desk_icons.renaming = None;
                 }
-                _ => {}
+                _ => self.cursor_on = true,
             }
-            self.damage(self.icon_rect(i).inset(-8));
+            self.damage_icon_rename(i);
             return;
         }
         let first = self.selected_icons().first().copied();
@@ -767,8 +795,7 @@ impl Desktop<'_> {
     /// The rename box, drawn above windows' shadows but under windows.
     pub(super) fn draw_icon_rename(&self, c: &mut Canvas) {
         if let Some((i, field)) = &self.desk_icons.renaming {
-            let r = self.icon_rect(*i);
-            let box_ = Rect::new(r.x - 30, r.y + 56, r.w + 60, 26);
+            let box_ = self.icon_rename_rect(*i);
             let mut field = field.clone();
             field.draw(c, box_, true, self.cursor_on);
         }
