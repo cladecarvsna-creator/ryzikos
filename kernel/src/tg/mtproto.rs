@@ -236,9 +236,26 @@ fn plain_send(t: &mut Transport, body: &[u8], msg_id: i64) -> Result<()> {
     t.send(&w.buf)
 }
 
+/// Counts key exchanges a server couldn't read; odd means try the older
+/// way of wrapping our half of the secret.
+static RSA_STYLE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn legacy_rsa() -> bool {
+    RSA_STYLE.load(core::sync::atomic::Ordering::Relaxed) % 2 == 1
+}
+
 fn plain_recv(t: &mut Transport) -> Result<Obj> {
     // a server that answers at all answers the key exchange at once
-    let packet = t.recv(now_ms() + KEY_TIMEOUT_MS)?;
+    let packet = match t.recv(now_ms() + KEY_TIMEOUT_MS) {
+        // there is no key yet: -404 here means it couldn't read our message
+        Err(Error::KeyUnknown) => {
+            RSA_STYLE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return Err(Error::Net(String::from(
+                "the server could not read our key exchange (error -404)",
+            )))
+        }
+        other => other?,
+    };
     let mut r = Reader::new(&packet);
     if r.i64()? != 0 {
         return Err(Error::Other(String::from("expected an unencrypted answer")));
@@ -303,14 +320,28 @@ pub fn create_key(t: &mut Transport, dc: i32, extra_keys: &[(u64, Vec<u8>)]) -> 
     }
     let pq = pq_bytes.iter().fold(0u64, |a, &b| a << 8 | b as u64);
     let (p, q) = crypto::factor(pq).ok_or_else(|| bad("can't factor pq"))?;
-    let (fingerprint, modulus) = res_pq
+    // the server lists its keys: take a current one if we know one, an
+    // old one (with the old encryption) only if not
+    let offered: Vec<u64> = res_pq
         .vec("server_public_key_fingerprints")
         .iter()
-        .find_map(|f| {
-            let f = f.as_i64() as u64;
-            crypto::server_key(f, extra_keys).map(|m| (f, m))
+        .map(|f| f.as_i64() as u64)
+        .collect();
+    let (fingerprint, modulus) = [false, true]
+        .iter()
+        .find_map(|&old| {
+            offered.iter().find_map(|&f| {
+                if crypto::is_old_key(f) != old {
+                    return None;
+                }
+                crypto::server_key(f, extra_keys).map(|m| (f, m))
+            })
         })
         .ok_or_else(|| bad("the server has none of the keys we know"))?;
+    super::client::log(&alloc::format!(
+        "the server offers keys {:x?}, using {:x}",
+        offered, fingerprint
+    ));
 
     // 2. send our half of the secret under the server's RSA key
     let be = |v: u64| {
@@ -319,19 +350,36 @@ pub fn create_key(t: &mut Transport, dc: i32, extra_keys: &[(u64, Vec<u8>)]) -> 
         b[skip..].to_vec()
     };
     let new_nonce: [u8; 32] = crypto::random_array();
+    // two ways to wrap it: RSA_PAD with the data centre (MTProto 2.0),
+    // and the older SHA-1 and padding that Telethon still uses. After a
+    // server rejects one (error -404) the next attempt takes the other.
+    let legacy = legacy_rsa();
+    super::client::log(if legacy {
+        "sending our half the older way"
+    } else {
+        "sending our half with RSA_PAD"
+    });
+    let mut fields = alloc::vec![
+        ("pq", Value::Bytes(pq_bytes.to_vec())),
+        ("p", Value::Bytes(be(p))),
+        ("q", Value::Bytes(be(q))),
+        ("nonce", Value::Bytes(nonce.to_vec())),
+        ("server_nonce", Value::Bytes(server_nonce.clone())),
+        ("new_nonce", Value::Bytes(new_nonce.to_vec())),
+    ];
+    if !legacy {
+        fields.push(("dc", Value::Int(dc)));
+    }
     let inner = Obj::new(
-        "p_q_inner_data_dc",
-        &[
-            ("pq", Value::Bytes(pq_bytes.to_vec())),
-            ("p", Value::Bytes(be(p))),
-            ("q", Value::Bytes(be(q))),
-            ("nonce", Value::Bytes(nonce.to_vec())),
-            ("server_nonce", Value::Bytes(server_nonce.clone())),
-            ("new_nonce", Value::Bytes(new_nonce.to_vec())),
-            ("dc", Value::Int(dc)),
-        ],
+        if legacy { "p_q_inner_data" } else { "p_q_inner_data_dc" },
+        &fields,
     );
-    let encrypted = crypto::rsa_pad(&super::tl::encode(&inner), &modulus);
+    let data = super::tl::encode(&inner);
+    let encrypted = if legacy {
+        crypto::rsa_old(&data, &modulus)
+    } else {
+        crypto::rsa_pad(&data, &modulus)
+    };
     let req = Obj::new(
         "req_DH_params",
         &[
@@ -345,6 +393,7 @@ pub fn create_key(t: &mut Transport, dc: i32, extra_keys: &[(u64, Vec<u8>)]) -> 
     );
     plain_send(t, &super::tl::encode(&req), msg_id.next(offset))?;
     let answer = plain_recv(t)?;
+    super::client::log(&format!("the server answered: {}", answer.name()));
     if !answer.is("server_DH_params_ok")
         || answer.bytes("nonce") != nonce
         || answer.bytes("server_nonce") != server_nonce.as_slice()
@@ -426,6 +475,7 @@ pub fn create_key(t: &mut Transport, dc: i32, extra_keys: &[(u64, Vec<u8>)]) -> 
     );
     plain_send(t, &super::tl::encode(&req), msg_id.next(time_offset))?;
     let done = plain_recv(t)?;
+    super::client::log(&format!("the server answered: {}", done.name()));
 
     // 5. both sides now know g^ab
     let key_num = crypto::modpow(&g_a, &b, &prime);

@@ -57,6 +57,9 @@ GROUP = 2001
 CHANNEL = 3001
 
 
+OLD_RSA_ONLY = False
+
+
 def sha1(*p):
     return hashlib.sha1(b"".join(p)).digest()
 
@@ -295,10 +298,19 @@ class Handler(socketserver.BaseRequestHandler):
             temp_key = bytes(a ^ b for a, b in zip(m[:32], sha256(m[32:])))
             data_with_hash = AES.decrypt_ige(m[32:], temp_key, bytes(32))
             padded = data_with_hash[:192][::-1]
-            assert sha256(temp_key, padded) == data_with_hash[192:], "RSA_PAD hash"
-            inner = BinaryReader(padded).tgread_object()
+            if sha256(temp_key, padded) == data_with_hash[192:] and not OLD_RSA_ONLY:
+                inner = BinaryReader(padded).tgread_object()
+                log("key exchange: RSA_PAD")
+            else:
+                # the older way: a zero byte, SHA-1 of the data, the data
+                inner = BinaryReader(m[21:]).tgread_object() if m[0] == 0 else None
+                if inner is None or sha1(bytes(inner)) != m[1:21]:
+                    log("key exchange: can't read the client's half, answering -404")
+                    self.send_packet(struct.pack("<i", -404))
+                    return
+                log("key exchange: older RSA")
             assert inner.p == ib(0x494C553B) and inner.q == ib(0x53911073), "p, q"
-            log("key exchange: client DC", inner.dc)
+            log("key exchange: client DC", getattr(inner, "dc", "not given"))
             self.new_nonce = inner.new_nonce.to_bytes(32, "little", signed=True)
             sn = self.server_nonce.to_bytes(16, "little", signed=True)
             self.a = random.getrandbits(2048)
@@ -573,7 +585,10 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8443)
     ap.add_argument("--key", default="tg-test-server.key", help="where to keep the RSA key")
     ap.add_argument("--conf", help="also write a telegram.conf for RyzikOS here")
+    ap.add_argument("--old-rsa-only", action="store_true",
+                    help="answer RSA_PAD with -404, like a server that can't read it")
     args = ap.parse_args()
+    OLD_RSA_ONLY = args.old_rsa_only
     RSA_N, RSA_D = rsa_key(args.key)
     Keys.load(args.key + ".sessions")
     FINGERPRINT = struct.unpack("<q", sha1(tl_bytes(ib(RSA_N)) + tl_bytes(b"\x01\x00\x01"))[-8:])[0]
