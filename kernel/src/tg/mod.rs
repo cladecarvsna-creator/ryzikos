@@ -68,6 +68,22 @@ pub enum Cmd {
     Send(Peer, String),
     /// Send a file from the disk.
     SendFile(Peer, String),
+    /// Load the picture of a message (a photo, or a file's preview) to
+    /// show in the chat.
+    Preview(Peer, i64),
+    /// Download a message's photo or file to Downloads; `true` opens it
+    /// when it is there.
+    Download(Peer, i64, bool),
+    /// Look for people, groups and channels on Telegram.
+    Search(String),
+    /// Show a chat found by the search (or already in the list).
+    Show(Peer),
+    /// Open @name, t.me/name or t.me/name/123.
+    Resolve(String),
+    Join(Peer),
+    Leave(Peer),
+    /// Load the details of a chat for its profile: about, members.
+    Info(Peer),
     Reload,
     /// The client's own timer, not the window's.
     Wake,
@@ -87,6 +103,10 @@ pub struct Chat {
     /// Our messages up to this one were read.
     pub read_out: i64,
     pub kind: ChatKind,
+    /// The public @name, without the @.
+    pub username: String,
+    /// A channel or group we are not in (found by the search or a link).
+    pub left: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -98,7 +118,7 @@ pub enum ChatKind {
     Channel,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Message {
     /// 0 while it is being sent.
     pub id: i64,
@@ -116,6 +136,82 @@ pub struct Message {
     /// Our random id while it is being sent.
     pub random_id: i64,
     pub failed: bool,
+    pub photo: Option<Photo>,
+    pub file: Option<FileInfo>,
+    /// Links in the text: (first char, end char, where to), in chars.
+    pub links: Vec<(usize, usize, String)>,
+    /// A link preview: the site and title.
+    pub web: Option<(String, String)>,
+}
+
+/// Where Telegram keeps a file, and which data centre has it.
+#[derive(Clone, Debug)]
+pub struct FileRef {
+    pub id: i64,
+    pub access_hash: i64,
+    pub file_reference: Vec<u8>,
+    pub dc: i32,
+    pub photo: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Photo {
+    pub file: FileRef,
+    pub w: i32,
+    pub h: i32,
+    /// The size to show in the chat ("m", "x", ...) and the biggest.
+    pub small: String,
+    pub big: String,
+    pub big_size: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileInfo {
+    pub file: FileRef,
+    pub name: String,
+    pub mime: String,
+    pub size: i64,
+    /// "Video", "Music", "Voice message", "Sticker", "GIF" or "File".
+    pub kind: String,
+    /// The preview picture's size type, for videos, stickers and photos
+    /// sent as files; its width and height.
+    pub thumb: Option<(String, i32, i32)>,
+}
+
+/// A picture loaded for the chat, or on its way.
+pub enum Preview {
+    Loading,
+    Ready(crate::web::image::Image),
+    Failed,
+}
+
+impl core::fmt::Debug for Preview {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str(match self {
+            Preview::Loading => "Loading",
+            Preview::Ready(_) => "Ready",
+            Preview::Failed => "Failed",
+        })
+    }
+}
+
+/// A download to Downloads.
+#[derive(Clone, Debug, Default)]
+pub struct Download {
+    pub done: i64,
+    pub total: i64,
+    /// Where it was saved, once it is all there.
+    pub path: Option<String>,
+    pub failed: Option<String>,
+}
+
+/// What the profile of a chat shows.
+#[derive(Clone, Debug, Default)]
+pub struct Info {
+    pub about: String,
+    /// Members or subscribers; 0 when not known.
+    pub members: i64,
+    pub phone: String,
 }
 
 #[derive(Default, Debug)]
@@ -147,6 +243,19 @@ pub struct Shared {
     pub tz: i64,
     /// The chat the window shows: new messages there are read at once.
     pub open: Option<Peer>,
+    /// Pictures for the chat by (chat, message).
+    pub previews: BTreeMap<(Peer, i64), Preview>,
+    pub downloads: BTreeMap<(Peer, i64), Download>,
+    /// What the search found on Telegram, for the query in the box.
+    pub found: Option<(String, Vec<Chat>)>,
+    /// A chat for the window to open (from a link or the search).
+    pub goto: Option<Peer>,
+    pub info: BTreeMap<Peer, Info>,
+    /// Files to open, for the desktop.
+    pub to_open: Vec<String>,
+    /// A short note for the window to show once, like a link that led
+    /// nowhere.
+    pub notice: Option<String>,
 }
 
 impl Shared {
@@ -163,6 +272,13 @@ impl Shared {
             version: 1,
             tz: 0,
             open: None,
+            previews: BTreeMap::new(),
+            downloads: BTreeMap::new(),
+            found: None,
+            goto: None,
+            info: BTreeMap::new(),
+            to_open: Vec::new(),
+            notice: None,
         }
     }
 

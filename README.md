@@ -280,3 +280,6 @@ MIT, см. [LICENSE](LICENSE). Шрифт Terminus Font (c) Dimitar Toshkov Zhek
 SIL Open Font License 1.1, см. [fonts/LICENSE.terminus](fonts/LICENSE.terminus).
 Шрифты DejaVu: Bitstream Vera License и public domain, см.
 [fonts/LICENSE.dejavu](fonts/LICENSE.dejavu).
+Эмодзи в Telegram: [Twemoji](https://github.com/jdecked/twemoji) (c) Twitter, Inc
+и другие авторы, CC-BY 4.0; картинки собраны из пакета `emoji-datasource-twitter`
+скриптом `scripts/make-emoji.py`.
