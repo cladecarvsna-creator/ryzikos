@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+mod archive;
 mod console;
 mod fiber;
 mod font;

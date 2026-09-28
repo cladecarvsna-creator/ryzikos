@@ -80,6 +80,16 @@ enum Cmd {
     SelectAll,
     /// Make the chosen picture the desktop background.
     SetBackground,
+    /// Pack the chosen items into a new ZIP file next to them.
+    Pack,
+    /// Unpack the chosen archive into a folder next to it.
+    Unpack,
+}
+
+/// Work for Archiver, which the desktop hands on.
+pub enum ArchiveRequest {
+    Pack(Vec<String>),
+    Extract(String),
 }
 
 /// A menu entry: label, shortcut, and what it does (None is a separator
@@ -174,6 +184,8 @@ pub struct Explorer {
     seen: u32,
     /// A file to open in Notepad, for the desktop to pick up.
     pub open_request: Option<String>,
+    /// Packing or unpacking for Archiver, for the desktop to pick up.
+    pub archive_request: Option<ArchiveRequest>,
     /// The disks and drives, when Computer is shown.
     drives: Vec<fs::DriveInfo>,
 }
@@ -346,6 +358,8 @@ fn type_name(item: &Info) -> String {
                 String::from("RyzikOS Program")
             } else if lower == "rzlink" {
                 String::from("Shortcut")
+            } else if ["zip", "tar", "tgz", "gz"].contains(&lower.as_str()) {
+                format!("{} Archive", lower.to_ascii_uppercase())
             } else {
                 let mut s: String = ext.chars().flat_map(char::to_uppercase).collect();
                 s.push_str(" File");
@@ -419,6 +433,7 @@ impl Explorer {
             started: false,
             seen: 0,
             open_request: None,
+            archive_request: None,
             drives: Vec::new(),
         }
     }
@@ -682,6 +697,14 @@ impl Explorer {
             .then(|| fs::join(&self.path, &item.name))
     }
 
+    /// The one chosen file, when it is an archive.
+    fn chosen_archive(&self) -> Option<String> {
+        let i = self.single()?;
+        let item = &self.items[i];
+        (!item.dir && super::archiver::is_archive(&item.name) && !self.in_bin())
+            .then(|| fs::join(&self.path, &item.name))
+    }
+
     // ---- commands --------------------------------------------------------------
 
     fn open(&mut self, i: usize) {
@@ -758,6 +781,18 @@ impl Explorer {
                 }
             }
             Cmd::SelectAll => self.select_all(),
+            Cmd::Pack => {
+                let paths: Vec<String> =
+                    self.chosen().iter().map(|&i| fs::join(&self.path, &self.items[i].name)).collect();
+                if !paths.is_empty() {
+                    self.archive_request = Some(ArchiveRequest::Pack(paths));
+                }
+            }
+            Cmd::Unpack => {
+                if let Some(path) = self.chosen_archive() {
+                    self.archive_request = Some(ArchiveRequest::Extract(path));
+                }
+            }
             Cmd::SetBackground => {
                 if let Some(path) = self.chosen_picture() {
                     super::personalize::set_wallpaper(&path);
@@ -1259,6 +1294,10 @@ impl Explorer {
             if self.chosen_picture().is_some() {
                 v.push(("Set as desktop background", "", Some(Cmd::SetBackground)));
             }
+            if self.chosen_archive().is_some() {
+                v.push(("Extract to folder", "", Some(Cmd::Unpack)));
+            }
+            v.push(("Add to ZIP archive", "", Some(Cmd::Pack)));
             v.push(SEP);
             v.push(("Rename", "F2", maybe(self.single().is_some(), Cmd::Rename)));
             v.push(("Delete", "Del", Some(Cmd::Delete)));
@@ -1814,6 +1853,8 @@ impl Explorer {
                 View::Details => {
                     if item.dir {
                         widgets::folder_icon(&mut f, r.x + 8, r.y + 6, 16);
+                    } else if super::archiver::is_archive(&item.name) {
+                        super::archiver::zip_icon(&mut f, r.x + 8, r.y + 6, 16);
                     } else {
                         widgets::file_icon(&mut f, r.x + 8, r.y + 6, 16);
                     }
@@ -1839,6 +1880,8 @@ impl Explorer {
                     let ix = r.x + (r.w - 48) / 2;
                     if item.dir {
                         widgets::folder_icon(&mut f, ix, r.y + 10, 48);
+                    } else if super::archiver::is_archive(&item.name) {
+                        super::archiver::zip_icon(&mut f, ix, r.y + 8, 48);
                     } else {
                         widgets::file_icon(&mut f, ix, r.y + 8, 48);
                     }

@@ -48,6 +48,27 @@ RyzikOS — любительская операционная система д�
   терминале, браузере, Telegram, настройках, калькуляторе и App Store
   открывает меню Cut, Copy, Paste, Select all.
 
+## Архиватор
+
+**Archiver** (в лаунчере, поиск находит его и по словам «архив», «zip»,
+«winrar», «7zip») делает ZIP-архивы, которые открываются в 7-Zip, WinRAR и
+Windows, и открывает ZIP, TAR, TAR.GZ/TGZ и GZIP. Окно разделено на две
+стороны: слева ваши файлы, справа архив. Отметьте галочками файлы и папки
+слева и нажмите **Add** — они упакуются в папку архива, которая открыта
+справа (если архива нет, рядом появится новый ZIP с их именем). Отметьте
+файлы справа и нажмите **Extract** — они распакуются в папку, открытую
+слева. **Extract all** распаковывает всё в новую папку рядом с архивом.
+Справа видно, насколько сжат каждый файл; внизу выбирается сжатие: Store
+(без сжатия), Fast, Normal или Best. Delete убирает отмеченное из архива,
+двойной щелчок по файлу в архиве открывает его.
+
+В Files двойной щелчок по архиву открывает его в Archiver, а в меню правой
+кнопки есть «Add to ZIP archive» и «Extract to folder». В терминале:
+`zip архив.zip файлы-и-папки`, `unzip архив [папка]`, `unzip -l архив`.
+
+Пока нельзя: RAR и 7z (только сообщение, что формат не поддерживается),
+архивы с паролем и ZIP64 (файлы больше 4 ГБ); архивы до 48 МБ.
+
 ## VPN
 
 Приложение **VPN** (в лаунчере и в быстрых настройках, плитка VPN)
@@ -128,6 +149,7 @@ ISO — это live CD: RyzikOS запускается прямо с диска 
 | Calculator | Калькулятор мышью или с клавиатуры |
 | Settings | Экран, сеть, язык, пользователи, оформление, сведения о системе |
 | Task Manager | Диспетчер задач (Ctrl+Shift+Esc): открытые программы, «Завершить задачу», графики процессора и памяти |
+| Archiver | Архиватор: создать ZIP, открыть ZIP, TAR, TAR.GZ и GZIP, посмотреть, распаковать, добавить и удалить файлы (подробнее ниже) |
 
 ### Программы из App Store
 
@@ -213,7 +235,8 @@ Esc в первую секунду загрузки и выберите преж
 `help`, `clear`, `echo`, `info`, `ls` (`dir`), `cd`, `pwd`, `cat`, `mkdir`,
 `rm`, `echo текст > файл`, `devices` (железо и драйверы), `install` (установка с live CD, `install erase|keep <номер диска>` без вопросов), `update` (версия и скачанное обновление), `beep` (сигнал на звуковой карте), `open <файл>` (открыть файл или запустить
 программу), `drives` (список дисков), `disc`, `store`, `browser [адрес]`,
-`fetch <адрес>`, `notepad`, `explorer`, `photos`, `video`, `paint`, `calc`,
+`fetch <адрес>`, `zip <архив> <файлы>`, `unzip <архив> [папка]` (`unzip -l` показывает содержимое), `archiver [архив]`,
+`notepad`, `explorer`, `photos`, `video`, `paint`, `calc`,
 `settings`, `about`, `theme dark|light`, `wallpaper`, `whoami`, `users`,
 `useradd`, `passwd`, `lock`, `restart`, `shutdown`, `exit`.
 
@@ -297,13 +320,14 @@ TLS, Trojan и Shadowsocks, а страница `http://127.0.0.1:8124/page.html
 | Путь | Что там |
 | --- | --- |
 | `boot/` | загрузка: заголовок multiboot2, переход в 64-битный режим, прерывания |
-| `kernel/src/gui/` | рабочий стол и программы: `mod.rs` (окна), `taskbar.rs` (док и строка меню), `start.rs` (лаунчер), `deskicons.rs` (значки), `explorer.rs`, `store.rs`, `browser.rs`, `photos.rs`, `video.rs`, `notepad.rs` и другие |
+| `kernel/src/gui/` | рабочий стол и программы: `mod.rs` (окна), `taskbar.rs` (док и строка меню), `start.rs` (лаунчер), `deskicons.rs` (значки), `explorer.rs`, `archiver.rs`, `store.rs`, `browser.rs`, `photos.rs`, `video.rs`, `notepad.rs` и другие |
 | `kernel/src/fs/` | диски и файлы: `ata.rs` (IDE), `ahci.rs` (SATA), `drive.rs`, `fat.rs` (FAT32), `iso9660.rs` (CD), `mod.rs` (пути и монтирование) |
 | `kernel/src/net/`, `kernel/src/pci.rs` | сетевая карта e1000, TCP/IP, DHCP, DNS, шина PCI |
 | `kernel/src/vpn/` | VPN: подписки и ссылки (`link.rs`), TLS 1.3 с REALITY (`tls.rs`), XTLS Vision (`vision.rs`), Shadowsocks (`ss.rs`), VLESS и Trojan (`mod.rs`) |
 | `kernel/src/web/` | движок браузера: HTTP и HTTPS, DOM, CSS, раскладка, картинки, мост к JavaScript, каталог программ |
 | `kernel/src/js/`, `kernel/quickjs/` | движок JavaScript QuickJS |
 | `kernel/src/sound.rs` | звуковая карта ES1370 и сигнал громкости |
+| `kernel/src/archive.rs` | ZIP (Deflate через miniz_oxide), TAR и GZIP для архиватора и команд `zip`/`unzip` |
 | `kernel/src/shell.rs` | терминал |
 | `programs/` | программы `.rzapp` и `catalog.txt` для App Store |
 | `iso/media/`, `scripts/gen-media.py` | фото и видео для CD |

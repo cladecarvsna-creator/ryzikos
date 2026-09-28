@@ -43,6 +43,7 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
 hmac = { version = "0.12", default-features = false }
 hkdf = { version = "0.12", default-features = false }
 md-5 = { version = "0.10", default-features = false, features = ["force-soft"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 
 [build-dependencies]
 cc = "1"

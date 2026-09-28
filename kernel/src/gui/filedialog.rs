@@ -33,6 +33,8 @@ pub enum Event {
 
 pub struct FileDialog {
     pub mode: Mode,
+    /// Added to a saved name that has no extension.
+    extension: &'static str,
     dir: String,
     items: Vec<Info>,
     selected: Option<usize>,
@@ -90,6 +92,7 @@ impl FileDialog {
     pub fn new(mode: Mode, dir: &str, name: &str) -> Self {
         let mut d = Self {
             mode,
+            extension: ".txt",
             dir: String::new(),
             items: Vec::new(),
             selected: None,
@@ -104,6 +107,12 @@ impl FileDialog {
         let base = name.rfind('.').unwrap_or(name.len());
         d.name.select(0, name[..base].chars().count());
         d
+    }
+
+    /// Save with this extension (".zip") instead of ".txt".
+    pub fn with_extension(mut self, extension: &'static str) -> Self {
+        self.extension = extension;
+        self
     }
 
     fn go(&mut self, dir: &str) {
@@ -180,10 +189,11 @@ impl FileDialog {
                     self.error = Some(fs::Error::BadName.message());
                     return Event::Redraw;
                 }
-                // "Text documents": add .txt when there is no extension
+                // "Text documents": add .txt (or the extension asked for) when
+                // there is no extension
                 let mut path = path;
                 if !file.contains('.') {
-                    path.push_str(".txt");
+                    path.push_str(self.extension);
                 }
                 Event::Chosen(path)
             }

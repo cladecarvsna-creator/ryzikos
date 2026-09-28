@@ -96,7 +96,7 @@ sign_in
 
 wait_for "desktop: opened Terminal" || fail "the desktop did not start"
 echo "desktop started"
-wait_for "icons: loaded 22 pictures" || fail "the app icons did not load"
+wait_for "icons: loaded 23 pictures" || fail "the app icons did not load"
 echo "app icons loaded"
 
 type_keys e c h o spc k e y b o a r d minus o k ret
@@ -137,6 +137,24 @@ sleep 1
 type_keys t e l e g r a m spc s e l f t e s t ret
 wait_for "telegram: self-test ok" || fail "the Telegram self-test failed"
 echo "Telegram's cryptography works"
+
+# Archiver: zip a file, unpack it into a new folder, read it back, then
+# open the archive in the Archiver window
+type_keys e c h o spc r o u n d t r i p minus o k spc shift-dot spc z dot t x t ret
+type_keys z i p spc t dot z i p spc z dot t x t ret
+wait_for "zip: packed 1 into t.zip" || fail "zip could not pack a file"
+type_keys u n z i p spc t dot z i p ret
+wait_for "unzip: unpacked 1 files to /Users/root/t" || fail "unzip could not unpack the archive"
+type_keys c a t spc t slash z dot t x t ret
+wait_for "roundtrip-ok" || fail "the unpacked file was not the same"
+echo "zip and unzip work"
+type_keys a r c h i v e r spc t dot z i p ret
+wait_for "desktop: opened Archiver" || fail "the shell could not open Archiver"
+wait_for "archiver: opened t.zip, 1 entry" || fail "Archiver could not open the archive"
+echo "Archiver opens archives"
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
 
 # PrintScreen, then Enter for the whole screen: saved and copied
 type_keys print
