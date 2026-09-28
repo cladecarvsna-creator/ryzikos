@@ -42,10 +42,32 @@ const HISTORY_PAGE: i32 = 40;
 const UPLOAD_PART: usize = 128 * 1024;
 const MAX_UPLOAD: usize = 64 << 20;
 
-fn log(s: &str) {
+/// The last things the client did: `telegram log` shows them, and the
+/// connecting screen shows the newest.
+static RECENT: crate::sync::IrqMutex<Vec<String>> = crate::sync::IrqMutex::new(Vec::new());
+
+pub(super) fn log(s: &str) {
     serial::write_str("\ntelegram: ");
     serial::write_str(s);
     serial::write_str("\n");
+    let mut recent = RECENT.lock();
+    if recent.len() >= 40 {
+        recent.remove(0);
+    }
+    let t = now_ms() / 1000;
+    recent.push(format!("{:02}:{:02}:{:02} {}", t / 3600 % 24, t / 60 % 60, t % 60, s));
+}
+
+/// What the client did lately, oldest first.
+pub fn recent_log() -> Vec<String> {
+    RECENT.lock().clone()
+}
+
+/// The newest line of [`recent_log`], without its time.
+pub fn last_step() -> Option<String> {
+    let recent = RECENT.lock();
+    let line = recent.last()?;
+    Some(line.split_once(' ').map_or(line.clone(), |(_, s)| s.to_string()))
 }
 
 // ---- settings ----------------------------------------------------------------------
@@ -254,11 +276,13 @@ impl Conn {
     /// Connect to a data centre, with our key for it or a new one.
     fn open(cfg: &Config, dc: i32, key: Option<[u8; 256]>) -> Result<(Conn, [u8; 256])> {
         let (ip, port) = dc_address(cfg, dc);
+        // know the real time before Telegram sees our first message
+        mtproto::clock_offset();
         log(&format!("connecting to DC {} at {}:{}", dc, ip, port));
         let dc_number = if cfg.test { 10000 + dc } else { dc };
         let mut t = Transport::connect(ip, port, dc_number)?;
         let (key, salt, offset) = match key {
-            Some(k) => (k, 0, 0),
+            Some(k) => (k, 0, mtproto::clock_offset()),
             None => {
                 log("creating an authorization key");
                 let k = mtproto::create_key(&mut t, dc_number, &cfg.keys)?;
@@ -558,13 +582,6 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
         match c.session() {
             Ok(Stop::Cancelled) => break,
             Ok(Stop::Restart) => failures = 0,
-            Err(Error::KeyUnknown) => {
-                // the server dropped our key: make a new one
-                log("the server forgot our key");
-                c.conn = None;
-                c.saved = Saved::default();
-                save_session(&c.saved);
-            }
             Err(e) => {
                 if crate::fiber::cancelled() {
                     break;
@@ -572,6 +589,15 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
                 log(&format!("error: {}", e.text()));
                 c.conn = None;
                 failures += 1;
+                if matches!(e, Error::KeyUnknown) {
+                    // the server dropped our key: make a new one, at once
+                    // the first time, but don't go round in circles
+                    c.saved = Saved::default();
+                    save_session(&c.saved);
+                    if failures == 1 {
+                        continue;
+                    }
+                }
                 if matches!(e, Error::Net(_)) {
                     PORT_TRY.fetch_add(1, Ordering::Relaxed);
                 }
@@ -809,6 +835,7 @@ impl Client {
     /// half minute.
     fn qr_login(&mut self) -> Result<Next> {
         loop {
+            log("asking for a QR code");
             let req = Obj::new(
                 "auth.exportLoginToken",
                 &[

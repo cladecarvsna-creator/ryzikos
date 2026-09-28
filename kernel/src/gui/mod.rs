@@ -183,6 +183,7 @@ impl App {
             App::TaskManager => "Task Manager",
             App::Program => "Program",
             App::Installer => "Install RyzikOS",
+            App::Welcome if welcome::news() => "What's new",
             App::Welcome => "Welcome",
             App::Telegram => "Telegram",
         }
@@ -998,6 +999,13 @@ impl<'a> Desktop<'a> {
         // the first sign-in after installing: Welcome, on top
         if fs::exists(crate::install::WELCOME) {
             let _ = fs::remove(crate::install::WELCOME);
+            // a fresh install needs no news of this build
+            let _ = welcome::updated();
+            welcome::show_news(false);
+            self.open(App::Welcome);
+        } else if welcome::updated() {
+            // the first sign-in after an update: what changed
+            welcome::show_news(true);
             self.open(App::Welcome);
         }
     }
@@ -1268,6 +1276,9 @@ impl<'a> Desktop<'a> {
     fn close(&mut self, app: App) {
         if !self.windows[app.index()].open {
             return;
+        }
+        if app == App::Welcome {
+            welcome::show_news(false);
         }
         // Notepad first asks about unsaved changes
         if app == App::Notepad && !self.notepad.try_close() {

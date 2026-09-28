@@ -276,6 +276,11 @@ class Handler(socketserver.BaseRequestHandler):
 
     # ---- key exchange
     def plain(self, p):
+        # like Telegram: a message whose time is far off is ignored
+        sent = struct.unpack("<q", p[8:16])[0] >> 32
+        if not -300 < sent - time.time() < 30:
+            log("ignoring a plain message: client clock off by", int(sent - time.time()), "s")
+            return
         length = struct.unpack("<i", p[16:20])[0]
         obj = BinaryReader(p[20:20 + length]).tgread_object()
         name = type(obj).__name__

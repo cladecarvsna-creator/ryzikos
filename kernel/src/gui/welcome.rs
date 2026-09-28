@@ -1,8 +1,9 @@
 //! Welcome: opens after the first sign-in on a freshly installed
 //! RyzikOS, with tiles for the first things to do. The launcher opens it
-//! again later.
+//! again later. After an update the same window says what's new instead.
 
 use alloc::format;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::canvas::{Canvas, Rect};
 use super::icons::{self, LARGE};
@@ -64,6 +65,40 @@ const TILES: [(App, Go, &str, &str); 6] = [
     ),
 ];
 
+/// What this version changed, one point per line.
+const WHATS_NEW: &str = include_str!("whats_new.txt");
+
+/// Which build last showed its news, on an installed system.
+pub const SEEN: &str = "/boot/seen-build.txt";
+
+/// The window shows the news rather than the tiles.
+static NEWS: AtomicBool = AtomicBool::new(false);
+
+pub fn show_news(on: bool) {
+    NEWS.store(on, Ordering::Relaxed);
+}
+
+pub fn news() -> bool {
+    NEWS.load(Ordering::Relaxed)
+}
+
+/// Whether this build is newer than the one that last signed in; notes
+/// it as seen. Only for released builds on an installed system.
+pub fn updated() -> bool {
+    let build = crate::update::BUILD;
+    if build == 0 || crate::multiboot::live() {
+        return false;
+    }
+    let seen = crate::fs::read(SEEN)
+        .ok()
+        .and_then(|b| core::str::from_utf8(&b).ok()?.trim().parse::<u32>().ok());
+    if seen == Some(build) {
+        return false;
+    }
+    let _ = crate::fs::write(SEEN, format!("{}", build).as_bytes());
+    true
+}
+
 pub struct Welcome {
     pressed: Option<usize>,
     hover: Option<usize>,
@@ -97,6 +132,9 @@ impl Welcome {
         if done_rect().contains(x, y) {
             return Some(DONE);
         }
+        if news() {
+            return None;
+        }
         (0..TILES.len()).find(|&i| tile_rect(i).contains(x, y))
     }
 
@@ -107,6 +145,7 @@ impl Welcome {
             }
             Some(Go::Settings(page)) => self.open_page = Some(page),
             None => {
+                show_news(false);
                 super::request_close(App::Welcome);
             }
         }
@@ -146,6 +185,10 @@ impl Welcome {
     }
 
     pub fn draw(&self, c: &mut Canvas) {
+        if news() {
+            self.draw_news(c);
+            return;
+        }
         c.fill_rect(0, 0, CLIENT_W, CLIENT_H, theme::face());
         // a band in the accent color with the logo
         let band = Rect::new(0, 0, CLIENT_W, 132);
@@ -177,5 +220,35 @@ impl Welcome {
             theme::text_dim(),
         );
         theme::accent_button(c, done_rect(), "Get started", self.pressed == Some(DONE));
+    }
+}
+
+impl Welcome {
+    /// The points of [`WHATS_NEW`], each with a dot in the accent color.
+    fn draw_news(&self, c: &mut Canvas) {
+        c.fill_rect(0, 0, CLIENT_W, CLIENT_H, theme::face());
+        let band = Rect::new(0, 0, CLIENT_W, 132);
+        c.fill(band, theme::accent_base());
+        icons::get().draw_logo(c, 64, 32, 34);
+        let white = 0xffffff;
+        let title = format!("What's new in RyzikOS {}", crate::update::version());
+        c.draw_text_in(&HEADING, 116, 36, &title, white);
+        wrap(
+            c,
+            116,
+            80,
+            CLIENT_W - 116 - 32,
+            "RyzikOS was updated. Here is what changed.",
+            white,
+        );
+        let mut y = 164;
+        for point in WHATS_NEW.lines().filter(|l| !l.trim().is_empty()) {
+            if y > done_rect().y - 40 {
+                break;
+            }
+            c.fill_round(Rect::new(40, y + 6, 8, 8), 4, theme::accent());
+            y = wrap(c, 60, y, CLIENT_W - 60 - 40, point.trim(), theme::text()) + 10;
+        }
+        theme::accent_button(c, done_rect(), "Got it", self.pressed == Some(DONE));
     }
 }
