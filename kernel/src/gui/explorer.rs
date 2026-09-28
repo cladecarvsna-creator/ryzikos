@@ -352,7 +352,7 @@ fn type_name(item: &Info) -> String {
                 String::from("Text Document")
             } else if ["png", "jpg", "jpeg", "bmp"].contains(&lower.as_str()) {
                 String::from("Picture")
-            } else if ["avi", "mjpg", "mjpeg"].contains(&lower.as_str()) {
+            } else if super::video::is_video(&item.name) {
                 String::from("Video")
             } else if lower == "rzapp" {
                 String::from("RyzikOS Program")

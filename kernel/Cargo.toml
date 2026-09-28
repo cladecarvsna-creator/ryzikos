@@ -44,6 +44,9 @@ hmac = { version = "0.12", default-features = false }
 hkdf = { version = "0.12", default-features = false }
 md-5 = { version = "0.10", default-features = false, features = ["force-soft"] }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# H.264 for the Video Player, vendored for one no_std fix (see its VENDORED.md)
+rusty_h264-decoder = { path = "vendor/rusty_h264-decoder", default-features = false, features = ["libm"] }
+rusty_h264-common = { version = "0.16", default-features = false }
 
 [build-dependencies]
 cc = "1"

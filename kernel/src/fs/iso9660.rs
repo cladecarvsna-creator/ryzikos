@@ -164,6 +164,26 @@ impl Disc {
         Ok(data)
     }
 
+    /// Where a file is on the disc, for `read_at`: its first sector and
+    /// its size.
+    pub fn open(&self, dev: &mut CdDrive, path: &str) -> Result<(u32, u64), Error> {
+        let r = self.find(dev, path)?;
+        if r.dir {
+            return Err(Error::IsADirectory);
+        }
+        Ok((r.lba, r.size as u64))
+    }
+
+    /// Read part of a file `open` found; files on a disc are in one piece.
+    pub fn read_at(dev: &mut CdDrive, lba: u32, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        let first = offset / CD_SECTOR as u64;
+        let skip = (offset % CD_SECTOR as u64) as usize;
+        let mut tmp = vec![0u8; (skip + buf.len()).div_ceil(CD_SECTOR) * CD_SECTOR];
+        dev.read(lba + first as u32, &mut tmp).map_err(|_| Error::Io)?;
+        buf.copy_from_slice(&tmp[skip..skip + buf.len()]);
+        Ok(())
+    }
+
     pub fn is_dir(&self, dev: &mut CdDrive, path: &str) -> bool {
         self.find(dev, path).is_ok_and(|r| r.dir)
     }

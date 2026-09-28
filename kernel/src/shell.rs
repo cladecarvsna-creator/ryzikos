@@ -125,7 +125,7 @@ impl Shell {
                 println!("  paint   open Draw");
                 println!("  calc    open the calculator");
                 println!("  photos  open Photos (photos <picture> shows one)");
-                println!("  video   open Video Player (video <file.avi> plays one)");
+                println!("  video   open Video Player (video <file.mp4> plays one)");
                 println!("  disc    look for a CD or DVD and list it (it is at /Disc)");
                 println!("  drives  list the disks and CD/DVD drives");
                 println!("  devices list the PC's hardware and which parts have drivers");
