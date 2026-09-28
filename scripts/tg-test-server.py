@@ -7,9 +7,12 @@ key instead of Telegram's), encrypted messages, containers, gzip, salts,
 and just enough of the API: sign-in with a QR code (it counts as
 scanned a few seconds after it is shown) or with a code and a two-step
 verification password, file uploads, users, a chat list, history, sending, and an
-answer pushed back a moment after you write.
+answer pushed back a moment after you write. Messages have photos, files,
+links, @names and emoji; photos and files download (one photo from
+another data centre); the search finds a public channel you are not in,
+which you can open by @spacenews and join.
 
-    python3 -m venv /tmp/tgvenv && /tmp/tgvenv/bin/pip install telethon
+    python3 -m venv /tmp/tgvenv && /tmp/tgvenv/bin/pip install telethon pillow
     /tmp/tgvenv/bin/python scripts/tg-test-server.py --conf telegram.conf
 
 It prints the telegram.conf lines that point RyzikOS at it (QEMU's user
@@ -21,6 +24,7 @@ the code 22222 (or 12345 to be asked for the password "everos").
 import argparse
 import gzip
 import hashlib
+import io
 import os
 import random
 import socketserver
@@ -48,13 +52,56 @@ G = 3
 PASSWORD = "everos"
 ME = 1000
 USERS = {
-    ME: ("Jack", "", False),
-    1001: ("Алиса", "Смирнова", False),
-    1002: ("Bob", "", False),
-    1003: ("RyzikBot", "", True),
+    ME: ("Jack", "", False, "jack"),
+    1001: ("Алиса", "Смирнова", False, "alice"),
+    1002: ("Bob", "", False, None),
+    1003: ("RyzikBot", "", True, "ryzikbot"),
 }
 GROUP = 2001
 CHANNEL = 3001
+# a public channel we are not in, found by the search
+SPACE = 3002
+HOME_DC = 2
+# files by id: (bytes, its picture's bytes or None)
+FILES = {}
+
+
+def picture(w, h, color, text):
+    """A JPEG to send as a photo."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (w, h), color)
+    d = ImageDraw.Draw(img)
+    for i in range(0, w, 40):
+        d.line([(i, 0), (i + h, h)], fill=tuple(min(255, c + 40) for c in color), width=8)
+    d.ellipse([w // 2 - h // 5, h // 2 - h // 5, w // 2 + h // 5, h // 2 + h // 5], fill=(255, 255, 255))
+    d.text((12, 12), text, fill=(255, 255, 255))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=80)
+    return out.getvalue()
+
+
+def photo(pid, w, h, color, text, dc=HOME_DC):
+    big = picture(w, h, color, text)
+    small = picture(w * 320 // max(w, h), h * 320 // max(w, h), color, text)
+    FILES[pid] = (big, small)
+    return types.MessageMediaPhoto(photo=types.Photo(
+        id=pid, access_hash=pid * 3, file_reference=b"ref", date=0, dc_id=dc,
+        sizes=[types.PhotoSize("m", small_w(w, h)[0], small_w(w, h)[1], len(small)),
+               types.PhotoSize("y", w, h, len(big))]))
+
+
+def small_w(w, h):
+    return w * 320 // max(w, h), h * 320 // max(w, h)
+
+
+def document(did, name, mime, data, attrs=(), thumb=None):
+    FILES[did] = (data, thumb)
+    thumbs = None
+    if thumb:
+        thumbs = [types.PhotoSize("m", 320, 180, len(thumb))]
+    return types.MessageMediaDocument(document=types.Document(
+        id=did, access_hash=did * 3, file_reference=b"ref", date=0, mime_type=mime, size=len(data),
+        dc_id=HOME_DC, attributes=[types.DocumentAttributeFilename(name)] + list(attrs), thumbs=thumbs))
 
 
 OLD_RSA_ONLY = False
@@ -120,12 +167,34 @@ class World:
         self.add(("chat", GROUP), 1001, "Welcome to the RyzikOS group!", now - 5000)
         self.add(("chat", GROUP), 1002, "A long message that has to wrap over several lines, because it is much wider than a bubble can be in the Telegram window of RyzikOS.", now - 4000)
         self.add(("channel", CHANNEL), None, "RyzikOS now has a Telegram client.", now - 3000, media=True)
+        # photos, files, links and emoji
+        self.add(a, 1001, "", now - 6000, media=photo(501, 1280, 720, (60, 120, 200), "sea"))
+        self.add(a, 1001, "Смотри какой закат \U0001F305\U0001F60D", now - 5900,
+                 media=photo(502, 600, 900, (220, 110, 60), "sunset", dc=4))
+        self.add(a, ME, "Класс! \U0001F44D\U0001F3FD \u2764\ufe0f", now - 5800)
+        notes = "Shopping list:\n- milk\n- bread\n".encode() * 20
+        self.add(a, 1001, "Вот список", now - 5700, media=document(601, "notes.txt", "text/plain", notes))
+        self.add(a, 1001, "", now - 5600, media=document(602, "big-report.pdf", "application/pdf", os.urandom(1300000)))
+        text = "Read https://github.com/cladecarvsna-creator/ryzikos and follow @spacenews or t.me/ryzikos_news"
+        self.add(a, 1001, text, now - 5500, entities=[
+            types.MessageEntityUrl(text.index("https"), len("https://github.com/cladecarvsna-creator/ryzikos")),
+            types.MessageEntityMention(text.index("@space"), len("@spacenews")),
+            types.MessageEntityUrl(text.index("t.me"), len("t.me/ryzikos_news"))])
+        text = "Our website, with a preview"
+        self.add(a, 1001, text, now - 5400, entities=[types.MessageEntityTextUrl(4, 7, "https://example.com/")],
+                 media=types.MessageMediaWebPage(webpage=types.WebPage(
+                     id=1, url="https://example.com/", display_url="example.com", hash=0,
+                     site_name="Example", title="Example Domain: for use in documentation")))
+        self.add(("channel", SPACE), None, "Welcome to Space News \U0001F680", now - 20000)
+        self.add(("channel", SPACE), None, "The Moon tonight", now - 10000,
+                 media=photo(503, 1024, 1024, (30, 30, 60), "moon"))
         self.add(("user", ME), ME, "Notes to self", now - 100000)
         self.unread = {a: 1, ("user", 1003): 1}
         self.read_out = {a: 0}
         self.pending = []  # (when, peer, from, text)
+        self.joined = set()
 
-    def add(self, peer, from_id, text, date, media=False, out_for_me=None):
+    def add(self, peer, from_id, text, date, media=False, out_for_me=None, entities=None):
         self.next_id += 1
         kind, pid = peer
         peer_obj = {"user": types.PeerUser, "chat": types.PeerChat, "channel": types.PeerChannel}[kind](pid)
@@ -136,23 +205,27 @@ class World:
             message=text,
             out=(from_id == ME),
             from_id=types.PeerUser(from_id) if from_id and kind != "user" else None,
-            media=types.MessageMediaPhoto(photo=types.PhotoEmpty(1)) if media else None,
+            media=(types.MessageMediaPhoto(photo=types.PhotoEmpty(1)) if media is True else media or None),
+            entities=entities,
         )
         self.history.setdefault(peer, []).append(m)
         return m
 
     def users(self):
         out = []
-        for uid, (first, last, bot) in USERS.items():
+        for uid, (first, last, bot, username) in USERS.items():
             out.append(types.User(id=uid, is_self=uid == ME, bot=bot or None, bot_info_version=1 if bot else None,
-                                  access_hash=uid * 7,
+                                  access_hash=uid * 7, username=username,
                                   first_name=first, last_name=last or None, phone="99966" + str(uid)))
         return out
 
     def chats(self):
         return [
             types.Chat(id=GROUP, title="RyzikOS devs", photo=types.ChatPhotoEmpty(), participants_count=3, date=0, version=1),
-            types.Channel(id=CHANNEL, title="RyzikOS News", photo=types.ChatPhotoEmpty(), date=0, broadcast=True, access_hash=555),
+            types.Channel(id=CHANNEL, title="RyzikOS News", photo=types.ChatPhotoEmpty(), date=0, broadcast=True,
+                          access_hash=555, username="ryzikos_news"),
+            types.Channel(id=SPACE, title="Space News", photo=types.ChatPhotoEmpty(), date=0, broadcast=True,
+                          access_hash=777, username="spacenews", left=SPACE not in self.joined),
         ]
 
 
@@ -216,6 +289,8 @@ class Handler(socketserver.BaseRequestHandler):
         # AES-CTR of the obfuscated transport, when the client uses it
         self.dec = None
         self.enc = None
+        self.dc = HOME_DC
+        self.main = False
 
     # transport
     def read_exact(self, n):
@@ -262,7 +337,8 @@ class Handler(socketserver.BaseRequestHandler):
                 return
             if self.buf:
                 self.buf = self.dec.decrypt(self.buf)
-            log("obfuscated transport, DC", struct.unpack("<h", plain[60:62])[0])
+            self.dc = abs(struct.unpack("<h", plain[60:62])[0])
+            log("obfuscated transport, DC", self.dc)
         log("connection from", self.client_address)
         threading.Thread(target=self.pusher, daemon=True).start()
         try:
@@ -469,8 +545,10 @@ class Handler(socketserver.BaseRequestHandler):
         if n == "GetUsersRequest":
             return [u for u in WORLD.users() if u.id == ME]
         if n == "GetDialogsRequest":
+            self.main = True
             return self.dialogs()
         if n == "GetStateRequest":
+            self.main = True
             return types.updates.State(pts=1, qts=0, date=int(time.time()), seq=1, unread_count=0)
         if n == "GetHistoryRequest":
             key = peer_key(obj.peer)
@@ -514,6 +592,64 @@ class Handler(socketserver.BaseRequestHandler):
                                  users=WORLD.users(), chats=WORLD.chats(), date=m.date, seq=0)
         if n == "LogOutRequest":
             return types.auth.LoggedOut()
+        if n == "GetFileRequest":
+            loc = obj.location
+            if loc.id not in FILES:
+                raise RpcError(400, "FILE_ID_INVALID")
+            if loc.id == 502 and self.dc != 4:
+                raise RpcError(303, "FILE_MIGRATE_4")
+            data, thumb = FILES[loc.id]
+            if loc.thumb_size == "m":
+                data = thumb
+            log("  file", loc.id, loc.thumb_size or "whole", obj.offset, "of", len(data))
+            time.sleep(0.2)
+            return types.upload.File(type=types.storage.FileUnknown(), mtime=0,
+                                     bytes=data[obj.offset:obj.offset + obj.limit])
+        if n == "ExportAuthorizationRequest":
+            return types.auth.ExportedAuthorization(id=ME, bytes=b"exported")
+        if n == "ImportAuthorizationRequest":
+            if obj.bytes != b"exported":
+                raise RpcError(400, "AUTH_BYTES_INVALID")
+            return self.authorization()
+        if n == "SearchRequest":
+            q = obj.q.lower().lstrip("@")
+            found = [c for c in WORLD.chats() if q in c.title.lower() or q in (getattr(c, "username", "") or "")]
+            users = [u for u in WORLD.users() if u.id != ME and (q in u.first_name.lower() or q in (u.username or ""))]
+            return types.contacts.Found(
+                my_results=[], results=[types.PeerChannel(c.id) if isinstance(c, types.Channel) else types.PeerChat(c.id)
+                                        for c in found] + [types.PeerUser(u.id) for u in users],
+                chats=WORLD.chats(), users=WORLD.users())
+        if n == "ResolveUsernameRequest":
+            name = obj.username.lower()
+            for c in WORLD.chats():
+                if getattr(c, "username", None) == name:
+                    return types.contacts.ResolvedPeer(peer=types.PeerChannel(c.id), chats=WORLD.chats(),
+                                                       users=WORLD.users())
+            for u in WORLD.users():
+                if u.username == name:
+                    return types.contacts.ResolvedPeer(peer=types.PeerUser(u.id), chats=[], users=WORLD.users())
+            raise RpcError(400, "USERNAME_NOT_OCCUPIED")
+        if n in ("JoinChannelRequest", "LeaveChannelRequest"):
+            cid = obj.channel.channel_id
+            if n == "JoinChannelRequest":
+                WORLD.joined.add(cid)
+            else:
+                WORLD.joined.discard(cid)
+            log("  joined" if n == "JoinChannelRequest" else "  left", cid)
+            return types.Updates(updates=[], users=[], chats=WORLD.chats(), date=int(time.time()), seq=0)
+        if n == "GetFullChannelRequest":
+            cid = obj.channel.channel_id
+            about = {SPACE: "News about space, rockets and the Moon \U0001F319", CHANNEL: "What is new in RyzikOS"}
+            full = types.ChannelFull(
+                id=cid, about=about.get(cid, ""), participants_count=12345 if cid == SPACE else 42,
+                read_inbox_max_id=0, read_outbox_max_id=0, unread_count=0, chat_photo=types.PhotoEmpty(0),
+                notify_settings=types.PeerNotifySettings(), exported_invite=None, bot_info=[], pts=1)
+            return types.messages.ChatFull(full_chat=full, chats=WORLD.chats(), users=[])
+        if n == "GetFullUserRequest":
+            uid = getattr(obj.id, "user_id", ME)
+            full = types.UserFull(id=uid, settings=types.PeerSettings(), notify_settings=types.PeerNotifySettings(),
+                                  common_chats_count=1, about="Hi, I am %s \U0001F44B" % USERS[uid][0])
+            return types.users.UserFull(full_user=full, chats=[], users=WORLD.users())
         raise RpcError(400, "METHOD_NOT_IN_TEST_SERVER")
 
     def scan_qr(self):
@@ -530,6 +666,8 @@ class Handler(socketserver.BaseRequestHandler):
         dialogs, tops = [], []
         order = sorted(WORLD.history.items(), key=lambda kv: -kv[1][-1].date)
         for key, msgs in order:
+            if key == ("channel", SPACE) and SPACE not in WORLD.joined:
+                continue
             peer = {"user": types.PeerUser, "chat": types.PeerChat, "channel": types.PeerChannel}[key[0]](key[1])
             dialogs.append(types.Dialog(peer=peer, top_message=msgs[-1].id, read_inbox_max_id=0,
                                         read_outbox_max_id=WORLD.read_out.get(key, 0), unread_count=WORLD.unread.get(key, 0),
@@ -544,7 +682,7 @@ class Handler(socketserver.BaseRequestHandler):
             time.sleep(0.3)
             now = time.time()
             due = [p for p in WORLD.pending if p[0] <= now]
-            if not due or self.key is None:
+            if not due or self.key is None or not self.main:
                 continue
             for p in due:
                 WORLD.pending.remove(p)
