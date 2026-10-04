@@ -252,12 +252,15 @@ wait_for "desktops: task view" || fail "Win+Tab did not open Task View"
 echo "virtual desktops and Task View work"
 
 # the blue screen: a panic saves a report on the disk and restarts (QEMU
-# quits on the restart), and the next sign-in says why it restarted
+# quits on the restart), and the next sign-in says why it restarted; an
+# account made before it is still there after
 type_keys esc
 sleep 1
 type_keys meta_l-s
 type_keys t e r m ret
 sleep 1
+type_keys u s e r a d d spc j a c k spc s e c r e t ret
+wait_for "added jack" || fail "useradd did not add a user"
 type_keys p a n i c ret
 wait_for "bsod: PANIC_REQUESTED" || fail "panic did not show the blue screen"
 wait_for "crash: report saved to the disk" || fail "the blue screen did not save the crash report"
@@ -267,7 +270,16 @@ wait "$qemu" 2> /dev/null
 echo "panic shows the blue screen and saves a report"
 boot disk
 wait_for "crash: the last run stopped with PANIC_REQUESTED" || fail "the crash report was not found after restarting"
+wait_for "users: loaded the saved accounts" || fail "the accounts were not read back after the blue screen"
 sign_in
 wait_for "crash: showing the report, PANIC_REQUESTED" || fail "the crash report window did not open"
 echo "after the restart, the crash report explains what happened"
+type_keys esc
+sleep 1
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
+type_keys u s e r s ret
+wait_for "jack  *password set" || fail "the account made before the blue screen was gone"
+echo "accounts survive the blue screen"
 echo "boot test passed"
