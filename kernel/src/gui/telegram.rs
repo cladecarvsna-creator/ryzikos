@@ -997,8 +997,15 @@ impl Telegram {
             self.send_file(path);
             return;
         }
+        // kept in Pictures > Telegram, where Files and Photos show it
         let user = users::current_name().unwrap_or_default();
-        let dir = fs::app_data(user.as_str());
+        let pictures = fs::join(&fs::home(user.as_str()), "Pictures");
+        let dir = fs::join(&pictures, "Telegram");
+        for d in [&pictures, &dir] {
+            if !fs::is_dir(d) {
+                let _ = fs::create_dir(d);
+            }
+        }
         let path = fs::join(&dir, &fs::unique_name(&dir, "Pasted picture", ".png"));
         let png = super::picture::encode_png(&img.pixels, img.w, img.h);
         match fs::write(&path, &png) {

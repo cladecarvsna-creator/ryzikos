@@ -134,6 +134,7 @@ impl Shell {
                 println!("  install install RyzikOS on a hard disk (from the live CD)");
                 println!("  update  show the version and a downloaded update (update undo removes it)");
                 println!("  beep    play the volume sound on the ES1370 sound card");
+                println!("  date    the date and time; 'date set DD.MM.YYYY HH:MM', 'date zone +5', 'date auto on|off'");
                 println!("  store   open the App Store to install programs");
                 println!("  open    open a file or run a program: open ~/Programs/snake.rzapp");
                 println!("  zip     zip <archive.zip> <files or folders> packs them (Archiver does it too)");
@@ -215,6 +216,7 @@ impl Shell {
                 open(app);
             }
             "store" | "apps" => open(App::Store),
+            "date" | "time" => date(args),
             "beep" => {
                 if crate::sound::available() {
                     crate::sound::play(&crate::sound::volume_chime());
@@ -857,4 +859,61 @@ fn js(source: &str) {
         "\njs: done in {} ms\n",
         crate::js::now_ms() - t0
     ));
+}
+
+/// `date`: show or set the date, the time and the time zone.
+fn date(args: &str) {
+    use crate::clock;
+    let mut words = args.split_whitespace();
+    match words.next() {
+        None => {}
+        Some("set") => {
+            let rest: alloc::vec::Vec<&str> = words.collect();
+            match clock::parse(&rest.join(" ")) {
+                Some(t) => clock::set_local(t),
+                None => return error("type it like: date set 04.10.2026 15:30"),
+            }
+        }
+        Some("zone") => {
+            let Some(z) = words.next() else {
+                return error("type it like: date zone +5 or date zone -3:30");
+            };
+            let (sign, z) = match z.strip_prefix('-') {
+                Some(rest) => (-1, rest),
+                None => (1, z.trim_start_matches('+')),
+            };
+            let (h, m) = z.split_once(':').unwrap_or((z, "0"));
+            match (h.parse::<i32>(), m.parse::<i32>()) {
+                (Ok(h), Ok(m)) if (-12..=14).contains(&(sign * h)) && (0..60).contains(&m) => {
+                    clock::set_zone(sign * (h * 60 + m))
+                }
+                _ => return error("type it like: date zone +5 or date zone -3:30"),
+            }
+        }
+        Some("auto") => match words.next() {
+            Some("on") => clock::set_auto(true),
+            Some("off") => clock::set_auto(false),
+            _ => return error("date auto on, or date auto off"),
+        },
+        Some(_) => return error("date, date set, date zone or date auto"),
+    }
+    let ((y, mo, d), (h, mi, s)) = clock::now();
+    println!(
+        "{:02}.{:02}.{} {:02}:{:02}:{:02}  {}",
+        d,
+        mo,
+        y,
+        h,
+        mi,
+        s,
+        clock::zone_name(clock::zone())
+    );
+    println!(
+        "Set automatically: {}",
+        match (clock::auto(), clock::synced()) {
+            (false, _) => "off",
+            (true, true) => "on, read from the internet",
+            (true, false) => "on, not read from the internet yet",
+        }
+    );
 }

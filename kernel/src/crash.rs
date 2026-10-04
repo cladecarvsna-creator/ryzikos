@@ -23,7 +23,7 @@ use crate::console::{Color, CONSOLE};
 use crate::framebuffer::{Framebuffer, Rgb};
 use crate::gui::text::{Font, HEADING, UI, UI_BOLD};
 use crate::port::{inb, outb};
-use crate::{fs, interrupts, rtc, serial};
+use crate::{fs, interrupts, serial};
 
 /// The file the report is written into. It always has [`SLOT_BYTES`].
 pub const SLOT: &str = "/boot/crash-report.txt";
@@ -358,8 +358,7 @@ pub fn on_panic(info: &PanicInfo) -> ! {
         len: 0,
         one_line: false,
     };
-    let (year, month, day) = rtc::date();
-    let (h, m, s) = rtc::time();
+    let ((year, month, day), (h, m, s)) = crate::clock::now();
     let up = interrupts::ticks() / interrupts::TIMER_HZ;
     let _ = writeln!(w, "{}", MAGIC);
     let _ = writeln!(w, "new: 1");

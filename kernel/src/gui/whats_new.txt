@@ -1,3 +1,3 @@
-When RyzikOS hits an error it can't recover from, it now shows a blue screen that says what went wrong, instead of freezing with red text.
-The blue screen saves a report on the disk and restarts the computer. After you sign in, a window explains why the computer restarted, with every detail a click away.
-The Terminal commands "crash" (show the last report) and "panic" (try the blue screen) go with it.
+Screenshots: Ctrl+Alt+S and a Screenshot button in quick settings, for when Windows keeps PrintScreen to itself.
+Shared clipboard with Windows: run RyzikOS with run-windows.bat and ryzikos-clipboard.ps1, and text copied on either side pastes on the other.
+Date and time in Settings > Time & language: set automatically from the internet, pick your time zone, or set it by hand.

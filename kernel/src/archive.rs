@@ -957,8 +957,7 @@ fn gather(path: &str, name: &str, out: &mut Vec<Item>) -> Result<(), String> {
 }
 
 fn now() -> Stamp {
-    let (y, mo, d) = crate::rtc::date();
-    let (h, mi, _) = crate::rtc::time();
+    let ((y, mo, d), (h, mi, _)) = crate::clock::now();
     (y, mo, d, h, mi)
 }
 

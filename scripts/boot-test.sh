@@ -39,6 +39,7 @@ boot() {
     timeout 90 qemu-system-x86_64 "${media[@]}" -m 512M -display none \
         -serial "file:$log" -monitor "unix:$monitor,server,nowait" -no-reboot \
         -drive "file=$disk,format=raw,if=ide,index=0,media=disk" \
+        -chardev "socket,id=clip,path=$dir/clip.sock,server=on,wait=off" -serial chardev:clip \
         -nic user,model=e1000 2> /dev/null &
     qemu=$!
 }
@@ -164,9 +165,40 @@ type_keys meta_l-s
 type_keys t e r m ret
 sleep 1
 
+# the shared clipboard: COM2 stands in for ryzikos-clipboard.ps1 on
+# Windows; text copied on the host arrives in RyzikOS's clipboard
+python3 - "$dir/clip.sock" << 'PY' &
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b"HELLO\nCLIP 17\nfrom the host \xd0\x96!")
+time.sleep(5)
+PY
+wait_for "clipboard: 16 characters from the host" || fail "text copied on the host did not reach the clipboard"
+echo "the shared clipboard takes text from the host"
+
+# the date and time can be set by hand, in a time zone
+type_keys d a t e spc z o n e spc shift-equal 5 ret
+wait_for "clock: time zone UTC+05:00" || fail "date zone did not set the time zone"
+type_keys d a t e spc s e t spc 0 1 dot 0 2 dot 2 0 2 7 spc 1 0 shift-semicolon 2 0 ret
+wait_for "clock: set by hand to 01.02.2027 10:20" || fail "date set did not set the clock"
+wait_for "01.02.2027 10:2" || fail "the clock did not show the time that was set"
+type_keys d a t e spc a u t o spc o n ret
+echo "the date, time and time zone can be set"
+
+# Ctrl+Alt+S starts a screenshot too (Windows keeps PrintScreen)
+type_keys ctrl-alt-s
+wait_for "screenshot: pick an area" || fail "Ctrl+Alt+S did not start a screenshot"
+type_keys esc
+sleep 0.5
+
 # PrintScreen, then Enter for the whole screen: saved and copied
 type_keys print
-wait_for "screenshot: pick an area" || fail "PrintScreen did not start a screenshot"
+for _ in $(seq 1 20); do
+    [ "$(grep -c "^screenshot: pick an area" "$log")" = 2 ] && break
+    sleep 0.5
+done
+[ "$(grep -c "^screenshot: pick an area" "$log")" = 2 ] || fail "PrintScreen did not start a screenshot"
 type_keys ret
 wait_for "screenshot: saved /Users/root/Pictures/Screenshots/Screenshot.png" || fail "the screenshot was not saved"
 echo "PrintScreen saves a screenshot"

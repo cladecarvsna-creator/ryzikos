@@ -16,10 +16,12 @@ use super::icons::{self, Pic, SMALL};
 use super::personalize::{self, Background, Prefs, COLORS, FITS};
 use super::text::{TITLE, UI, UI_BOLD};
 use super::tray::{self, Net};
+use super::widgets::{FieldEvent, TextField};
 use super::{picture, theme, wallpaper, App, MouseEvent, MouseKind};
-use crate::fs;
+use crate::fiber::Fiber;
 use crate::keyboard::{Key, Layout};
 use crate::update::{self, State, Updater};
+use crate::{clock, fs, interrupts};
 
 pub const CLIENT_W: i32 = 940;
 pub const CLIENT_H: i32 = 620;
@@ -49,6 +51,8 @@ pub struct Info<'a> {
     pub clock: &'a str,
     pub date: &'a str,
     pub uptime_minutes: u64,
+    /// The text caret is showing (it blinks).
+    pub caret: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +81,19 @@ enum Button {
     SwitchLayout,
     OpenAbout,
     Update,
+    /// Time & language: type a new date and time.
+    ChangeTime,
+    AutoTime,
+    ZoneWest,
+    ZoneEast,
+    SaveTime,
+    CancelTime,
+}
+
+/// Typing a new date and time on the Time & language page.
+struct TimeEdit {
+    field: TextField,
+    error: bool,
 }
 
 pub struct Settings {
@@ -91,6 +108,10 @@ pub struct Settings {
     /// Small pictures of the backgrounds, made when first shown.
     thumbs: RefCell<Thumbs>,
     pub updater: Updater,
+    time_edit: RefCell<Option<TimeEdit>>,
+    /// Reading the time from the internet, and when that was last tried.
+    clock_sync: Option<Fiber>,
+    clock_tried: Option<u64>,
 }
 
 #[derive(Default)]
@@ -236,6 +257,39 @@ fn row_button(i: usize) -> Rect {
     Rect::new(r.right() - 16 - 170, r.y + (ROW_H - 32) / 2, 170, 32)
 }
 
+/// The time zone row's two buttons, west then east.
+fn zone_buttons() -> (Rect, Rect) {
+    let b = row_button(2);
+    (
+        Rect::new(b.x, b.y, 81, b.h),
+        Rect::new(b.right() - 81, b.y, 81, b.h),
+    )
+}
+
+/// The card for typing a new date and time, under the rows.
+fn time_card() -> Rect {
+    let r = row_rect(4);
+    Rect::new(r.x, r.y, r.w, 96)
+}
+
+fn time_field() -> Rect {
+    let r = time_card();
+    Rect::new(r.x + 20, r.y + 40, 220, 32)
+}
+
+fn time_save() -> Rect {
+    let f = time_field();
+    Rect::new(f.right() + 12, f.y, 100, 32)
+}
+
+fn time_cancel() -> Rect {
+    let s = time_save();
+    Rect::new(s.right() + 8, s.y, 100, 32)
+}
+
+/// Try the internet time again after this long, if it failed.
+const CLOCK_RETRY_TICKS: u64 = 120 * interrupts::TIMER_HZ;
+
 impl Settings {
     pub fn new() -> Self {
         Self {
@@ -246,16 +300,66 @@ impl Settings {
             error: None,
             thumbs: RefCell::new(Thumbs::default()),
             updater: Updater::new(),
+            time_edit: RefCell::new(None),
+            clock_sync: None,
+            clock_tried: None,
         }
     }
 
-    /// Run the updater a little. Returns true if the Update page changed.
+    /// Run the updater and the clock check a little. Returns true if a
+    /// page changed.
     pub fn tick(&mut self) -> bool {
-        self.updater.tick()
+        let mut changed = self.updater.tick();
+        if let Some(f) = &mut self.clock_sync {
+            if f.resume() {
+                self.clock_sync = None;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn busy(&self) -> bool {
-        self.updater.busy()
+        self.updater.busy() || self.clock_sync.is_some()
+    }
+
+    /// With the network up, read the time from the internet if it is
+    /// set automatically and was not read yet.
+    pub fn check_clock(&mut self) {
+        if !clock::auto() || clock::synced() || self.clock_sync.is_some() {
+            return;
+        }
+        let now = interrupts::ticks();
+        if self
+            .clock_tried
+            .is_some_and(|t| now - t < CLOCK_RETRY_TICKS)
+        {
+            return;
+        }
+        self.clock_tried = Some(now);
+        self.clock_sync = Some(Fiber::new(|| match clock::fetch_utc() {
+            Some(utc) => clock::set_utc(utc),
+            None => crate::serial::write_str("clock: could not read the time from the internet\n"),
+        }));
+    }
+
+    /// Typing a new time: the caret blinks.
+    pub fn typing(&self) -> bool {
+        self.page == Page::Time && self.time_edit.borrow().is_some()
+    }
+
+    fn save_time(&mut self) {
+        let edit = self.time_edit.get_mut();
+        let Some(e) = edit else {
+            return;
+        };
+        match clock::parse(&e.field.string()) {
+            Some(t) => {
+                clock::set_local(t);
+                *edit = None;
+            }
+            None => e.error = true,
+        }
     }
 
     /// The Update page's button, for the updater's state.
@@ -286,6 +390,17 @@ impl Settings {
     }
 
     pub fn on_key(&mut self, key: Key) -> bool {
+        if self.page == Page::Time {
+            if let Some(e) = self.time_edit.get_mut() {
+                match e.field.on_key(key) {
+                    FieldEvent::Enter => self.save_time(),
+                    FieldEvent::Escape => *self.time_edit.get_mut() = None,
+                    FieldEvent::Changed => e.error = false,
+                    FieldEvent::None => {}
+                }
+                return true;
+            }
+        }
         let event = match self.dialog.get_mut() {
             Some(d) => d.on_key(key, dialog_area()),
             None => return false,
@@ -350,14 +465,43 @@ impl Settings {
         true
     }
 
-    /// Where the page's button is, if it has one.
-    fn button(&self) -> Option<(Button, Rect)> {
+    /// The page's buttons and where they are.
+    fn buttons(&self) -> Vec<(Button, Rect)> {
+        let mut out = Vec::new();
         match self.page {
-            Page::Time => Some((Button::SwitchLayout, row_button(1))),
-            Page::About => Some((Button::OpenAbout, row_button(4))),
-            Page::Update if self.update_label().is_some() => Some((Button::Update, row_button(0))),
-            _ => None,
+            Page::Time => {
+                out.push((Button::ChangeTime, row_button(0)));
+                out.push((Button::AutoTime, row_button(1)));
+                let (west, east) = zone_buttons();
+                out.push((Button::ZoneWest, west));
+                out.push((Button::ZoneEast, east));
+                out.push((Button::SwitchLayout, row_button(3)));
+                if self.time_edit.borrow().is_some() {
+                    out.push((Button::SaveTime, time_save()));
+                    out.push((Button::CancelTime, time_cancel()));
+                }
+            }
+            Page::About => out.push((Button::OpenAbout, row_button(4))),
+            Page::Update if self.update_label().is_some() => {
+                out.push((Button::Update, row_button(0)))
+            }
+            _ => {}
         }
+        out
+    }
+
+    fn button_at(&self, x: i32, y: i32) -> Option<Button> {
+        self.buttons()
+            .into_iter()
+            .find(|(_, r)| r.contains(x, y))
+            .map(|(b, _)| b)
+    }
+
+    fn button_rect(&self, b: Button) -> Option<Rect> {
+        self.buttons()
+            .into_iter()
+            .find(|&(k, _)| k == b)
+            .map(|(_, r)| r)
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) -> bool {
@@ -382,20 +526,49 @@ impl Settings {
                 if self.page == Page::Personalization {
                     return self.personalize_click(ev.x, ev.y);
                 }
-                match self.button() {
-                    Some((b, r)) if r.contains(ev.x, ev.y) => {
+                if self.page == Page::Time && time_field().contains(ev.x, ev.y) {
+                    if let Some(e) = self.time_edit.get_mut() {
+                        e.field.click(time_field(), ev.x);
+                        return true;
+                    }
+                }
+                match self.button_at(ev.x, ev.y) {
+                    Some(b) => {
                         self.pressed = Some(b);
                         true
                     }
-                    _ => false,
+                    None => false,
                 }
             }
             MouseKind::Up => {
                 let Some(b) = self.pressed.take() else {
                     return false;
                 };
-                if self.button().is_some_and(|(_, r)| r.contains(ev.x, ev.y)) {
+                if self.button_at(ev.x, ev.y) == Some(b) {
                     match b {
+                        Button::ChangeTime => {
+                            let ((y, mo, d), (h, mi, _)) = clock::now();
+                            let mut field = TextField::new(&format!(
+                                "{:02}.{:02}.{} {:02}:{:02}",
+                                d, mo, y, h, mi
+                            ));
+                            field.select_all();
+                            *self.time_edit.get_mut() = Some(TimeEdit {
+                                field,
+                                error: false,
+                            });
+                        }
+                        Button::SaveTime => self.save_time(),
+                        Button::CancelTime => *self.time_edit.get_mut() = None,
+                        Button::AutoTime => {
+                            clock::set_auto(!clock::auto());
+                            self.clock_tried = None;
+                            if clock::auto() && crate::net::configured() {
+                                self.check_clock();
+                            }
+                        }
+                        Button::ZoneWest => clock::step_zone(-1),
+                        Button::ZoneEast => clock::step_zone(1),
                         Button::SwitchLayout => self.switch_layout = true,
                         Button::OpenAbout => {
                             super::request_open(App::About);
@@ -477,18 +650,36 @@ impl Settings {
                     Layout::Ru => "Russian (РУС)",
                 };
                 let now = format!("{}   {}", info.clock, info.date);
+                let (auto_note, auto_value) = if !clock::auto() {
+                    ("Off: the time you set is used", "Off")
+                } else if clock::synced() {
+                    ("Read from the internet", "On")
+                } else if self.clock_sync.is_some() {
+                    ("Asking the internet what time it is...", "On")
+                } else {
+                    ("From the internet, once it is connected", "On")
+                };
+                let zone = clock::zone_name(clock::zone());
                 self.rows(
                     c,
                     &[
-                        ("Date and time", "From the computer's clock", &now),
+                        ("Date and time", "Shown in the menu bar", &now),
+                        ("Set time automatically", auto_note, auto_value),
+                        ("Time zone", "", &zone),
                         ("Keyboard layout", "Alt+Shift also switches it", layout),
                     ],
                 );
+                self.draw_button(c, Button::ChangeTime, "Change");
+                let auto_label = if clock::auto() { "Turn off" } else { "Turn on" };
+                self.draw_button(c, Button::AutoTime, auto_label);
+                self.draw_button(c, Button::ZoneWest, "<  West");
+                self.draw_button(c, Button::ZoneEast, "East  >");
                 let label = match info.layout {
                     Layout::Us => "Switch to Russian",
                     Layout::Ru => "Switch to English",
                 };
                 self.draw_button(c, Button::SwitchLayout, label);
+                self.draw_time_edit(c, info.caret);
             }
             Page::Accounts => {
                 let mut rows: [(String, &str); 8] = Default::default();
@@ -610,10 +801,13 @@ impl Settings {
                 c.draw_text(r.x + 20, r.y + 29, note, theme::text_dim());
             }
             // values go left of a button in the same row
-            let right = match self.button() {
-                Some((_, b)) if r.contains(b.x, b.y) => b.x - 16,
-                _ => r.right() - 20,
-            };
+            let right = self
+                .buttons()
+                .iter()
+                .filter(|(_, b)| r.contains(b.x, b.y))
+                .map(|(_, b)| b.x - 16)
+                .min()
+                .unwrap_or(r.right() - 20);
             let w = UI.width(value);
             let y = r.y + (ROW_H - UI.line_height) / 2;
             c.draw_text(right - w, y, value, theme::text_dim());
@@ -664,7 +858,7 @@ impl Settings {
         };
         c.draw_text(r.x + 20, r.y + 29, &note, color);
         if let Some(label) = self.update_label() {
-            if let Some((_, b)) = self.button() {
+            if let Some(b) = self.button_rect(Button::Update) {
                 let pressed = self.pressed == Some(Button::Update);
                 if matches!(state, State::Ready(_)) {
                     theme::accent_button(c, b, label, pressed);
@@ -692,9 +886,40 @@ impl Settings {
     }
 
     fn draw_button(&self, c: &mut Canvas, b: Button, label: &str) {
-        if let Some((_, r)) = self.button() {
+        if let Some(r) = self.button_rect(b) {
             theme::button(c, r, label, self.pressed == Some(b));
         }
+    }
+
+    /// The card for typing a new date and time, when it is open.
+    fn draw_time_edit(&self, c: &mut Canvas, caret: bool) {
+        let mut edit = self.time_edit.borrow_mut();
+        let Some(e) = edit.as_mut() else {
+            return;
+        };
+        let r = time_card();
+        card(c, r);
+        let (note, color) = if e.error {
+            (
+                "That isn't a date and time. Type it like 04.10.2026 15:30",
+                theme::error(),
+            )
+        } else {
+            (
+                "Type the date and time (day.month.year hours:minutes), then Save",
+                theme::text_dim(),
+            )
+        };
+        c.draw_text(r.x + 20, r.y + 12, note, color);
+        let f = time_field();
+        c.fill_round(f, 4, theme::control());
+        c.outline_round(f, 4, theme::accent());
+        e.field.draw(c, f.inset(6), true, caret);
+        // not through buttons(): it borrows time_edit too
+        let save = self.pressed == Some(Button::SaveTime);
+        theme::accent_button(c, time_save(), "Save", save);
+        let cancel = self.pressed == Some(Button::CancelTime);
+        theme::button(c, time_cancel(), "Cancel", cancel);
     }
 }
 

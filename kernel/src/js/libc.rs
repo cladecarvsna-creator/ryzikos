@@ -130,7 +130,7 @@ pub fn now_ms() -> i64 {
     let ticks = interrupts::ticks();
     let base = unsafe {
         let b = &mut *core::ptr::addr_of_mut!(BASE);
-        *b.get_or_insert_with(|| (crate::rtc::unix_time() * 1000, ticks))
+        *b.get_or_insert_with(|| (crate::clock::utc() * 1000, ticks))
     };
     base.0 + ((ticks - base.1) * 1000 / interrupts::TIMER_HZ) as i64
 }
