@@ -11,6 +11,10 @@ answer pushed back a moment after you write. Messages have photos, files,
 links, @names and emoji; photos and files download (one photo from
 another data centre); the search finds a public channel you are not in,
 which you can open by @spacenews and join.
+Messages can be answered, edited, deleted, forwarded and pinned; Alice
+shows "typing..." before she answers and is online; the bot answers with
+inline buttons and a keyboard; the group has pinned messages and
+answers that quote older messages.
 
     python3 -m venv /tmp/tgvenv && /tmp/tgvenv/bin/pip install telethon pillow
     /tmp/tgvenv/bin/python scripts/tg-test-server.py --conf telegram.conf
@@ -189,12 +193,53 @@ class World:
         self.add(("channel", SPACE), None, "The Moon tonight", now - 10000,
                  media=photo(503, 1024, 1024, (30, 30, 60), "moon"))
         self.add(("user", ME), ME, "Notes to self", now - 100000)
+        # answers, a forwarded message and pinned ones
+        g = ("chat", GROUP)
+        first = self.history[g][0].id
+        self.add(g, 1002, "Thanks! Glad to be here.", now - 3500, reply_to=first)
+        self.add(g, 1001, "Rules: be nice, write in any language.", now - 3400, pinned=True)
+        self.add(g, 1002, "Meeting on Friday at 18:00", now - 3300, pinned=True)
+        self.add(g, 1001, "Look what I found", now - 3200,
+                 fwd_from=types.MessageFwdHeader(date=now - 9000, from_id=types.PeerChannel(CHANNEL)))
+        bot = ("user", 1003)
+        self.add(bot, 1003, "Pick one:", now - 200, reply_markup=self.bot_buttons())
         self.unread = {a: 1, ("user", 1003): 1}
         self.read_out = {a: 0}
         self.pending = []  # (when, peer, from, text)
         self.joined = set()
 
-    def add(self, peer, from_id, text, date, media=False, out_for_me=None, entities=None):
+    def bot_buttons(self):
+        cb = lambda t, d: types.KeyboardInlineButton(t, types.InlineButtonTypeCallback(d))
+        return types.ReplyInlineMarkup(rows=[
+            types.KeyboardInlineButtonRow([cb("Yes \U0001F44D", b"yes"), cb("No", b"no")]),
+            types.KeyboardInlineButtonRow([
+                types.KeyboardInlineButton("Open the website", types.InlineButtonTypeUrl("https://example.com/"))]),
+        ])
+
+    def bot_keyboard(self):
+        k = lambda t: types.KeyboardButton(t, types.ButtonTypeDefault())
+        return types.ReplyKeyboardMarkup(rows=[
+            types.KeyboardButtonRow([k("Hello"), k("Help")]),
+            types.KeyboardButtonRow([k("What time is it?")]),
+        ], resize=True)
+
+    def find(self, key, mid):
+        for m in self.history.get(key, []):
+            if m.id == mid:
+                return m
+        return None
+
+    def find_any(self, mid):
+        """A message of a user or group chat (they share ids), and its chat."""
+        for key, msgs in self.history.items():
+            if key[0] != "channel":
+                for m in msgs:
+                    if m.id == mid:
+                        return key, m
+        return None, None
+
+    def add(self, peer, from_id, text, date, media=False, out_for_me=None, entities=None,
+            reply_to=None, fwd_from=None, reply_markup=None, pinned=None):
         self.next_id += 1
         kind, pid = peer
         peer_obj = {"user": types.PeerUser, "chat": types.PeerChat, "channel": types.PeerChannel}[kind](pid)
@@ -207,6 +252,10 @@ class World:
             from_id=types.PeerUser(from_id) if from_id and kind != "user" else None,
             media=(types.MessageMediaPhoto(photo=types.PhotoEmpty(1)) if media is True else media or None),
             entities=entities,
+            reply_to=types.MessageReplyHeader(reply_to_msg_id=reply_to) if reply_to else None,
+            fwd_from=fwd_from,
+            reply_markup=reply_markup,
+            pinned=pinned,
         )
         self.history.setdefault(peer, []).append(m)
         return m
@@ -214,8 +263,10 @@ class World:
     def users(self):
         out = []
         for uid, (first, last, bot, username) in USERS.items():
+            status = {1001: types.UserStatusOnline(expires=int(time.time()) + 300),
+                      1002: types.UserStatusOffline(was_online=int(time.time()) - 5400)}.get(uid)
             out.append(types.User(id=uid, is_self=uid == ME, bot=bot or None, bot_info_version=1 if bot else None,
-                                  access_hash=uid * 7, username=username,
+                                  access_hash=uid * 7, username=username, status=status,
                                   first_name=first, last_name=last or None, phone="99966" + str(uid)))
         return out
 
@@ -562,11 +613,14 @@ class Handler(socketserver.BaseRequestHandler):
             return types.messages.AffectedMessages(pts=1, pts_count=0)
         if n == "SendMessageRequest":
             key = peer_key(obj.peer)
-            m = WORLD.add(key, ME, obj.message, int(time.time()))
-            log("  message to", key, repr(obj.message))
+            reply = getattr(obj.reply_to, "reply_to_msg_id", None)
+            m = WORLD.add(key, ME, obj.message, int(time.time()), reply_to=reply)
+            log("  message to", key, repr(obj.message), "answering %s" % reply if reply else "")
             if key[0] == "user" and key[1] != ME:
-                WORLD.pending.append((time.time() + 2, key, key[1], "You wrote: " + obj.message))
-                WORLD.pending.append((time.time() + 3, key, None, "read"))
+                # first "typing...", then an answer that quotes ours
+                WORLD.pending.append((time.time() + 0.6, key, key[1], "typing"))
+                WORLD.pending.append((time.time() + 3, key, key[1], ("You wrote: " + obj.message, m.id)))
+                WORLD.pending.append((time.time() + 4, key, None, "read"))
             return types.UpdateShortSentMessage(id=m.id, pts=1, pts_count=1, date=m.date, out=True)
         if n == "ExportLoginTokenRequest":
             if getattr(self, "qr_scanned", False):
@@ -586,7 +640,23 @@ class Handler(socketserver.BaseRequestHandler):
             parts = self.parts.pop(obj.media.file.id, {})
             data = b"".join(parts[i] for i in sorted(parts))
             log("  file to", key, type(obj.media).__name__, obj.media.file.name, len(data), "bytes")
-            m = WORLD.add(key, ME, "", int(time.time()), media=True)
+            # keep the file, so it shows (and downloads) like a real one
+            fid = 700 + len(FILES)
+            if isinstance(obj.media, types.InputMediaUploadedPhoto):
+                from PIL import Image
+                img = Image.open(io.BytesIO(data))
+                small = io.BytesIO()
+                img.convert("RGB").resize(small_w(*img.size)).save(small, "JPEG")
+                FILES[fid] = (data, small.getvalue())
+                w, h = img.size
+                media = types.MessageMediaPhoto(photo=types.Photo(
+                    id=fid, access_hash=fid * 3, file_reference=b"ref", date=0, dc_id=HOME_DC,
+                    sizes=[types.PhotoSize("m", *small_w(w, h), len(small.getvalue())),
+                           types.PhotoSize("y", w, h, len(data))]))
+            else:
+                media = document(fid, obj.media.file.name, obj.media.mime_type, data)
+            reply = getattr(obj.reply_to, "reply_to_msg_id", None)
+            m = WORLD.add(key, ME, obj.message, int(time.time()), media=media, reply_to=reply)
             return types.Updates(updates=[types.UpdateMessageID(id=m.id, random_id=obj.random_id),
                                           types.UpdateNewMessage(message=m, pts=1, pts_count=1)],
                                  users=WORLD.users(), chats=WORLD.chats(), date=m.date, seq=0)
@@ -611,6 +681,80 @@ class Handler(socketserver.BaseRequestHandler):
             if obj.bytes != b"exported":
                 raise RpcError(400, "AUTH_BYTES_INVALID")
             return self.authorization()
+        if isinstance(obj, functions.messages.SearchRequest):
+            key = peer_key(obj.peer)
+            msgs = [m for m in reversed(WORLD.history.get(key, []))
+                    if isinstance(obj.filter, types.InputMessagesFilterPinned) and m.pinned]
+            return types.messages.Messages(messages=msgs[: obj.limit], chats=WORLD.chats(), users=WORLD.users(),
+                                           topics=[])
+        if isinstance(obj, (functions.messages.GetMessagesRequest, functions.channels.GetMessagesRequest)):
+            found = []
+            for i in obj.id:
+                if isinstance(obj, functions.channels.GetMessagesRequest):
+                    m = WORLD.find(peer_key(obj.channel), i.id)
+                else:
+                    m = WORLD.find_any(i.id)[1]
+                found.append(m or types.MessageEmpty(id=i.id))
+            return types.messages.Messages(messages=found, chats=WORLD.chats(), users=WORLD.users(), topics=[])
+        if n == "EditMessageRequest":
+            key = peer_key(obj.peer)
+            m = WORLD.find(key, obj.id)
+            if m is None:
+                raise RpcError(400, "MESSAGE_ID_INVALID")
+            if not m.out:
+                raise RpcError(403, "MESSAGE_AUTHOR_REQUIRED")
+            if m.message == obj.message:
+                raise RpcError(400, "MESSAGE_NOT_MODIFIED")
+            m.message, m.edit_date, m.entities = obj.message, int(time.time()), None
+            log("  edited", obj.id, repr(obj.message))
+            return types.Updates(updates=[types.UpdateEditMessage(message=m, pts=1, pts_count=1)],
+                                 users=WORLD.users(), chats=WORLD.chats(), date=int(time.time()), seq=0)
+        if isinstance(obj, (functions.messages.DeleteMessagesRequest, functions.channels.DeleteMessagesRequest)):
+            for mid in obj.id:
+                if isinstance(obj, functions.channels.DeleteMessagesRequest):
+                    key = peer_key(obj.channel)
+                else:
+                    key = WORLD.find_any(mid)[0]
+                if key:
+                    WORLD.history[key] = [m for m in WORLD.history[key] if m.id != mid]
+            log("  deleted", obj.id, "revoke" if getattr(obj, "revoke", True) else "just for me")
+            return types.messages.AffectedMessages(pts=1, pts_count=len(obj.id))
+        if n == "ForwardMessagesRequest":
+            src, dst = peer_key(obj.from_peer), peer_key(obj.to_peer)
+            ups = []
+            for mid, rid in zip(obj.id, obj.random_id):
+                m = WORLD.find(src, mid)
+                if m is None:
+                    raise RpcError(400, "MESSAGE_ID_INVALID")
+                orig = m.from_id or (types.PeerUser(ME) if m.out else m.peer_id)
+                new = WORLD.add(dst, ME, m.message, int(time.time()), media=m.media,
+                                fwd_from=types.MessageFwdHeader(date=m.date, from_id=orig))
+                ups += [types.UpdateMessageID(id=new.id, random_id=rid),
+                        types.UpdateNewMessage(message=new, pts=1, pts_count=1)]
+            log("  forwarded", obj.id, "from", src, "to", dst)
+            return types.Updates(updates=ups, users=WORLD.users(), chats=WORLD.chats(), date=int(time.time()), seq=0)
+        if n == "UpdatePinnedMessageRequest":
+            key = peer_key(obj.peer)
+            m = WORLD.find(key, obj.id)
+            if m is None:
+                raise RpcError(400, "MESSAGE_ID_INVALID")
+            m.pinned = None if obj.unpin else True
+            log("  unpinned" if obj.unpin else "  pinned", obj.id)
+            peer = {"user": types.PeerUser, "chat": types.PeerChat, "channel": types.PeerChannel}[key[0]](key[1])
+            return types.Updates(updates=[types.UpdatePinnedMessages(peer=peer, messages=[obj.id], pts=1, pts_count=1,
+                                                                     pinned=None if obj.unpin else True)],
+                                 users=WORLD.users(), chats=WORLD.chats(), date=int(time.time()), seq=0)
+        if n == "SetTypingRequest":
+            log("  typing in", peer_key(obj.peer), type(obj.action).__name__)
+            return struct.pack("<I", 0x997275B5)  # boolTrue
+        if n == "UpdateStatusRequest":
+            log("  we are", "offline" if obj.offline else "online")
+            return struct.pack("<I", 0x997275B5)
+        if n == "GetBotCallbackAnswerRequest":
+            log("  button pressed:", obj.data)
+            if obj.data == b"yes":
+                return types.messages.BotCallbackAnswer(cache_time=0, message="You said yes!")
+            return types.messages.BotCallbackAnswer(cache_time=0, message="Maybe next time")
         if n == "SearchRequest":
             q = obj.q.lower().lstrip("@")
             found = [c for c in WORLD.chats() if q in c.title.lower() or q in (getattr(c, "username", "") or "")]
@@ -687,6 +831,14 @@ class Handler(socketserver.BaseRequestHandler):
             for p in due:
                 WORLD.pending.remove(p)
                 _, key, from_id, text = p
+                if text == "typing":
+                    self.send(bytes(types.UpdateShort(update=types.UpdateUserTyping(
+                        user_id=from_id, action=types.SendMessageTypingAction()), date=int(now))))
+                    log("  pushed typing")
+                    continue
+                reply = None
+                if isinstance(text, tuple):
+                    text, reply = text
                 if text == "read" and from_id is None:
                     # the other side read our messages
                     WORLD.read_out[key] = WORLD.history[key][-1].id
@@ -695,10 +847,13 @@ class Handler(socketserver.BaseRequestHandler):
                         date=int(now))
                     self.send(bytes(upd))
                     continue
-                m = WORLD.add(key, from_id, text, int(now))
-                if random.random() < 0.5:
+                markup = None
+                if from_id == 1003:
+                    markup = WORLD.bot_buttons() if random.random() < 0.5 else WORLD.bot_keyboard()
+                m = WORLD.add(key, from_id, text, int(now), reply_to=reply, reply_markup=markup)
+                if random.random() < 0.5 and markup is None:
                     upd = types.UpdateShortMessage(id=m.id, user_id=key[1], message=text, pts=1, pts_count=1,
-                                                   date=m.date)
+                                                   date=m.date, reply_to=m.reply_to)
                 else:
                     upd = types.Updates(updates=[types.UpdateNewMessage(message=m, pts=1, pts_count=1)],
                                         users=WORLD.users(), chats=[], date=m.date, seq=0)

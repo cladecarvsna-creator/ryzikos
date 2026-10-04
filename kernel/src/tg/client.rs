@@ -40,6 +40,10 @@ const TEST_DCS: [[u8; 4]; 3] = [
 /// The API layer of schema.tl.
 const LAYER: i32 = 229;
 const PING_MS: i64 = 60_000;
+/// How often to tell Telegram we are still online.
+const ONLINE_MS: i64 = 240_000;
+/// How long "typing..." lasts without news.
+const TYPING_MS: i64 = 6_000;
 const HISTORY_PAGE: i32 = 40;
 /// Files go up in parts of this size (512 KB must be a multiple of it).
 const UPLOAD_PART: usize = 128 * 1024;
@@ -286,8 +290,20 @@ fn dc_address(cfg: &Config, dc: i32) -> (Ipv4Address, u16) {
 }
 
 const PORTS: [u16; 3] = [443, 80, 5222];
-/// Which of [`PORTS`] to use; moves on after a network error.
+/// Which of [`PORTS`] to use; moves on after network errors.
 static PORT_TRY: AtomicUsize = AtomicUsize::new(0);
+/// Network errors in a row on this port.
+static PORT_FAILS: AtomicUsize = AtomicUsize::new(0);
+
+/// A connection failed or dropped. A port that worked before gets a
+/// second try (a dropped connection is often just the Wi-Fi or the
+/// provider for a moment); after that the next port.
+fn net_failed() {
+    if PORT_FAILS.fetch_add(1, Ordering::Relaxed) >= 1 {
+        PORT_FAILS.store(0, Ordering::Relaxed);
+        PORT_TRY.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 impl Conn {
     /// Connect to a data centre, with our key for it or a new one.
@@ -566,6 +582,10 @@ struct Client {
     wake_at: i64,
     /// Connections to other data centres, for their files.
     media: BTreeMap<i32, Conn>,
+    /// Chats whose pinned messages changed: load them again.
+    pinned_dirty: Vec<Peer>,
+    /// When we last told Telegram we are online, in ms.
+    online_at: i64,
 }
 
 /// How a way of logging in ended.
@@ -601,9 +621,12 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
         login_token: false,
         wake_at: 0,
         media: BTreeMap::new(),
+        pinned_dirty: Vec::new(),
+        online_at: 0,
     };
     let mut failures = 0;
     loop {
+        let started = now_ms();
         match c.session() {
             Ok(Stop::Cancelled) => break,
             Ok(Stop::Restart) => failures = 0,
@@ -613,6 +636,11 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
                 }
                 log(&format!("error: {}", e.text()));
                 c.conn = None;
+                // a connection that worked for a while and then dropped
+                // starts the count again, so it comes back quickly
+                if c.me != 0 && now_ms() - started > 60_000 {
+                    failures = 0;
+                }
                 failures += 1;
                 if matches!(e, Error::KeyUnknown) {
                     // the server dropped our key: make a new one, at once
@@ -624,7 +652,7 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
                     }
                 }
                 if matches!(e, Error::Net(_)) {
-                    PORT_TRY.fetch_add(1, Ordering::Relaxed);
+                    net_failed();
                 }
                 c.update(|s| {
                     s.online = false;
@@ -635,8 +663,13 @@ pub fn run(shared: Rc<RefCell<Shared>>) {
                         failures + 1
                     ));
                 });
-                // wait a little longer after each failure, up to a minute
-                let wait = (2_000i64 << failures.min(5)).min(60_000);
+                // wait a little longer after each failure, up to half a
+                // minute; the first time hardly at all
+                let wait = if failures == 1 {
+                    500
+                } else {
+                    (1_000i64 << failures.min(5)).min(30_000)
+                };
                 let until = now_ms() + wait;
                 while now_ms() < until && !crate::fiber::cancelled() {
                     if c.shared
@@ -718,6 +751,21 @@ impl Client {
                     }
                 }
             }
+            if self.me != 0 && self.shared.borrow().stage == Stage::Ready {
+                if let Some(peer) = self.pinned_dirty.pop() {
+                    return Ok(Some(Cmd::Pinned(peer)));
+                }
+                if now_ms() - self.online_at > ONLINE_MS {
+                    self.online_at = now_ms();
+                    // online, so Telegram sends who else is online and typing
+                    let req = Obj::new("account.updateStatus", &[("offline", Value::Bool(false))]);
+                    match self.call(&req) {
+                        Err(Error::Rpc { .. }) | Ok(_) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                self.forget_typing();
+            }
             if self.login_token || (self.wake_at != 0 && now_ms() >= self.wake_at) {
                 self.login_token = false;
                 self.wake_at = 0;
@@ -725,10 +773,12 @@ impl Client {
             }
             let cmd = self.shared.borrow_mut().commands.pop_front();
             if let Some(cmd) = cmd {
-                self.update(|s| {
-                    s.error = None;
-                    s.busy = true;
-                });
+                if !cmd.quiet() {
+                    self.update(|s| {
+                        s.error = None;
+                        s.busy = true;
+                    });
+                }
                 return Ok(Some(cmd));
             }
             crate::fiber::pause();
@@ -744,9 +794,17 @@ impl Client {
         // our clock runs on local time in QEMU: the difference to the
         // server's is the time zone, in quarter hours
         let tz = (450 - conn.s.time_offset).div_euclid(900) * 900;
+        let offset = conn.s.time_offset;
         let updates = core::mem::take(&mut conn.updates);
-        if self.shared.borrow().tz != tz {
-            self.update(|s| s.tz = tz);
+        let known = {
+            let s = self.shared.borrow();
+            (s.tz, s.time_offset)
+        };
+        if known != (tz, offset) {
+            self.update(|s| {
+                s.tz = tz;
+                s.time_offset = offset;
+            });
         }
         for u in updates {
             self.apply(&u);
@@ -782,6 +840,7 @@ impl Client {
             };
             save_session(&self.saved);
         }
+        PORT_FAILS.store(0, Ordering::Relaxed);
         self.update(|s| {
             s.online = true;
             s.error = None;
@@ -1163,6 +1222,8 @@ impl Client {
             s.me = name.unwrap_or_default();
             s.stage = Stage::Ready;
         });
+        self.online_at = 0;
+        self.pinned_dirty.clear();
         self.load_dialogs()?;
         // from now on the server pushes new messages to this session
         self.call(&Obj::new("updates.getState", &[]))?;
@@ -1178,6 +1239,7 @@ impl Client {
                     self.load_history(peer, 0)?;
                 }
                 self.mark_read(peer)?;
+                self.load_pinned(peer)?;
             }
             Cmd::Older(peer) => {
                 let oldest = {
@@ -1191,8 +1253,29 @@ impl Client {
                 };
                 self.load_history(peer, oldest)?;
             }
-            Cmd::Send(peer, text) => self.send_message(peer, text)?,
-            Cmd::SendFile(peer, path) => match self.send_file(peer, path) {
+            Cmd::Send(peer, text, reply_to) => self.send_message(peer, text, reply_to)?,
+            Cmd::Edit(peer, id, text) => self.edit(peer, id, text)?,
+            Cmd::Delete(peer, ids, revoke) => self.delete(peer, ids, revoke)?,
+            Cmd::Forward(from, ids, to) => self.forward(from, ids, to)?,
+            Cmd::Pin(peer, id, pin) => self.pin(peer, id, pin)?,
+            Cmd::Pinned(peer) => self.load_pinned(peer)?,
+            Cmd::Quote(peer, ids) => self.quote(peer, ids)?,
+            Cmd::Typing(peer) => {
+                let req = Obj::new(
+                    "messages.setTyping",
+                    &[
+                        ("peer", self.input_peer(peer).into()),
+                        ("action", Obj::new("sendMessageTypingAction", &[]).into()),
+                    ],
+                );
+                // not worth an error on the screen
+                match self.call(&req) {
+                    Err(Error::Rpc { .. }) | Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Cmd::Callback(peer, id, data) => self.callback(peer, id, data)?,
+            Cmd::SendFile(peer, path, reply_to) => match self.send_file(peer, path, reply_to) {
                 // a file that can't be read is no reason to reconnect
                 Err(Error::Other(e)) => self.notice(e),
                 other => other?,
@@ -1967,7 +2050,7 @@ impl Client {
         )
     }
 
-    fn send_message(&mut self, peer: Peer, text: String) -> Result<()> {
+    fn send_message(&mut self, peer: Peer, text: String, reply_to: i64) -> Result<()> {
         let random_id = crypto::random_i64();
         let date = now_ms() / 1000 + self.conn.as_ref().map_or(0, |c| c.s.time_offset);
         let me = self.me;
@@ -1983,6 +2066,7 @@ impl Client {
             edited: false,
             random_id,
             failed: false,
+            reply_to,
             ..Default::default()
         };
         self.sending.insert(random_id, peer);
@@ -1992,12 +2076,14 @@ impl Client {
                 .or_default()
                 .messages
                 .push(local.clone());
+            s.typing.remove(&peer);
         });
         self.bump_chat(peer, &local);
         let req = Obj::new(
             "messages.sendMessage",
             &[
                 ("peer", self.input_peer(peer).into()),
+                ("reply_to", reply_header(reply_to)),
                 ("message", Value::str(&text)),
                 ("random_id", Value::Long(random_id)),
             ],
@@ -2029,9 +2115,338 @@ impl Client {
         }
     }
 
+    // ---- changing messages -----------------------------------------------------------
+
+    fn edit(&mut self, peer: Peer, id: i64, text: String) -> Result<()> {
+        let req = Obj::new(
+            "messages.editMessage",
+            &[
+                ("peer", self.input_peer(peer).into()),
+                ("id", Value::Int(id as i32)),
+                ("message", Value::str(&text)),
+            ],
+        );
+        match self.call(&req) {
+            Ok(v) => {
+                if let Some(o) = v.as_obj() {
+                    self.apply(o);
+                }
+            }
+            // the same text as before
+            Err(Error::Rpc { message, .. }) if message == "MESSAGE_NOT_MODIFIED" => {}
+            Err(e @ Error::Rpc { .. }) => {
+                self.notice(format!("Can't edit the message: {}", friendly(&e)));
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+        // the server's copy comes with the update; until then ours
+        self.change(peer, id, |m| {
+            if m.text != text {
+                m.text = text.clone();
+                m.links.clear();
+            }
+            m.edited = true;
+        });
+        Ok(())
+    }
+
+    /// Change a message wherever it is shown.
+    fn change(&self, peer: Peer, id: i64, f: impl Fn(&mut Message)) {
+        self.update(|s| {
+            if let Some(m) = s
+                .history
+                .get_mut(&peer)
+                .and_then(|h| h.messages.iter_mut().find(|m| m.id == id))
+            {
+                f(m);
+            }
+            if let Some(m) = s.quoted.get_mut(&(peer, id)) {
+                f(m);
+            }
+            if let Some(m) = s
+                .pinned
+                .get_mut(&peer)
+                .and_then(|v| v.iter_mut().find(|m| m.id == id))
+            {
+                f(m);
+            }
+        });
+    }
+
+    fn delete(&mut self, peer: Peer, ids: Vec<i64>, revoke: bool) -> Result<()> {
+        let list = Value::Vector(ids.iter().map(|&i| Value::Int(i as i32)).collect());
+        let req = match peer {
+            Peer::Channel(_) => Obj::new(
+                "channels.deleteMessages",
+                &[("channel", self.input_channel(peer).into()), ("id", list)],
+            ),
+            _ => Obj::new(
+                "messages.deleteMessages",
+                &[("revoke", Value::Bool(revoke)), ("id", list)],
+            ),
+        };
+        match self.call(&req) {
+            Ok(_) => {}
+            Err(e @ Error::Rpc { .. }) => {
+                self.notice(format!("Can't delete: {}", friendly(&e)));
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+        self.deleted(Some(peer), None, &ids);
+        Ok(())
+    }
+
+    /// Messages are gone: from one chat, from a channel, or (`None`,
+    /// `None`) from any chat that isn't a channel.
+    fn deleted(&self, peer: Option<Peer>, channel: Option<i64>, ids: &[i64]) {
+        let hit = |p: &Peer| match (peer, channel) {
+            (Some(x), _) => *p == x,
+            (None, Some(c)) => *p == Peer::Channel(c),
+            (None, None) => !matches!(p, Peer::Channel(_)),
+        };
+        self.update(|s| {
+            let mut touched = Vec::new();
+            for (p, h) in s.history.iter_mut() {
+                if hit(p) {
+                    let before = h.messages.len();
+                    h.messages.retain(|m| m.id == 0 || !ids.contains(&m.id));
+                    if h.messages.len() != before {
+                        touched.push((*p, h.messages.iter().rev().find(|m| m.id != 0).cloned()));
+                    }
+                }
+            }
+            // answers to them now quote "Deleted message"
+            for (p, _) in &touched {
+                for &id in ids {
+                    s.quoted.insert((*p, id), gone(id));
+                }
+            }
+            for (p, v) in s.pinned.iter_mut() {
+                if hit(p) {
+                    v.retain(|m| !ids.contains(&m.id));
+                }
+            }
+            for (key, m) in s.quoted.iter_mut() {
+                if hit(&key.0) && ids.contains(&key.1) {
+                    *m = gone(key.1);
+                }
+            }
+            // the chat list shows what is now the last message
+            for (p, last) in touched {
+                if let Some(c) = s.chats.iter_mut().find(|c| c.peer == p) {
+                    match last {
+                        Some(m) => {
+                            c.last = preview(&m);
+                            c.last_out = m.out;
+                        }
+                        None => c.last.clear(),
+                    }
+                }
+            }
+        });
+    }
+
+    fn forward(&mut self, from: Peer, ids: Vec<i64>, to: Peer) -> Result<()> {
+        let req = Obj::new(
+            "messages.forwardMessages",
+            &[
+                ("from_peer", self.input_peer(from).into()),
+                (
+                    "id",
+                    Value::Vector(ids.iter().map(|&i| Value::Int(i as i32)).collect()),
+                ),
+                (
+                    "random_id",
+                    Value::Vector(ids.iter().map(|_| Value::Long(crypto::random_i64())).collect()),
+                ),
+                ("to_peer", self.input_peer(to).into()),
+            ],
+        );
+        match self.call(&req) {
+            Ok(v) => {
+                if let Some(o) = v.as_obj() {
+                    self.apply(o);
+                }
+            }
+            Err(e @ Error::Rpc { .. }) => {
+                self.notice(format!("Can't forward: {}", friendly(&e)));
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+        let n = ids.len();
+        self.update(|s| {
+            s.goto = Some(to);
+            s.notice = Some(String::from(if n == 1 {
+                "Message forwarded"
+            } else {
+                "Messages forwarded"
+            }));
+        });
+        Ok(())
+    }
+
+    fn pin(&mut self, peer: Peer, id: i64, pin: bool) -> Result<()> {
+        let req = Obj::new(
+            "messages.updatePinnedMessage",
+            &[
+                ("unpin", Value::Bool(!pin)),
+                ("peer", self.input_peer(peer).into()),
+                ("id", Value::Int(id as i32)),
+            ],
+        );
+        match self.call(&req) {
+            Ok(v) => {
+                if let Some(o) = v.as_obj() {
+                    self.apply(o);
+                }
+            }
+            Err(e @ Error::Rpc { .. }) => {
+                let what = if pin { "pin" } else { "unpin" };
+                self.notice(format!("Can't {}: {}", what, friendly(&e)));
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+        self.change(peer, id, |m| m.pinned = pin);
+        self.load_pinned(peer)
+    }
+
+    /// The pinned messages of a chat, newest first.
+    fn load_pinned(&mut self, peer: Peer) -> Result<()> {
+        let req = Obj::new(
+            "messages.search",
+            &[
+                ("peer", self.input_peer(peer).into()),
+                ("q", Value::str("")),
+                ("filter", Obj::new("inputMessagesFilterPinned", &[]).into()),
+                ("limit", Value::Int(50)),
+            ],
+        );
+        let v = match self.call(&req) {
+            Ok(v) => v,
+            // a chat that can't be searched has nothing pinned to show
+            Err(Error::Rpc { .. }) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let o = v.as_obj().ok_or("bad pinned messages")?;
+        self.remember_all(o);
+        let mut list: Vec<Message> = o
+            .vec("messages")
+            .iter()
+            .filter_map(|m| m.as_obj())
+            .filter_map(|m| self.convert(m))
+            .collect();
+        list.sort_by_key(|m| -m.id);
+        self.update(|s| {
+            if let Some(h) = s.history.get_mut(&peer) {
+                for m in h.messages.iter_mut() {
+                    m.pinned = list.iter().any(|p| p.id == m.id);
+                }
+            }
+            s.pinned.insert(peer, list);
+        });
+        Ok(())
+    }
+
+    /// Load messages that others answer, for what they quote.
+    fn quote(&mut self, peer: Peer, ids: Vec<i64>) -> Result<()> {
+        let list = Value::Vector(
+            ids.iter()
+                .map(|&i| Obj::new("inputMessageID", &[("id", Value::Int(i as i32))]).into())
+                .collect(),
+        );
+        let req = match peer {
+            Peer::Channel(_) => Obj::new(
+                "channels.getMessages",
+                &[("channel", self.input_channel(peer).into()), ("id", list)],
+            ),
+            _ => Obj::new("messages.getMessages", &[("id", list)]),
+        };
+        let v = match self.call(&req) {
+            Ok(v) => v,
+            Err(Error::Rpc { .. }) => Value::None,
+            Err(e) => return Err(e),
+        };
+        let mut found: BTreeMap<i64, Message> = BTreeMap::new();
+        if let Some(o) = v.as_obj() {
+            self.remember_all(o);
+            for m in o.vec("messages").iter().filter_map(|m| m.as_obj()) {
+                if let Some(msg) = self.convert(m) {
+                    found.insert(msg.id, msg);
+                }
+            }
+        }
+        self.update(|s| {
+            for id in ids {
+                let m = found.remove(&id).unwrap_or_else(|| gone(id));
+                s.quoted.insert((peer, id), m);
+            }
+        });
+        Ok(())
+    }
+
+    /// An inline button with data for the bot was pressed: the bot
+    /// answers with a note or a link.
+    fn callback(&mut self, peer: Peer, id: i64, data: Vec<u8>) -> Result<()> {
+        let req = Obj::new(
+            "messages.getBotCallbackAnswer",
+            &[
+                ("peer", self.input_peer(peer).into()),
+                ("msg_id", Value::Int(id as i32)),
+                ("data", Value::Bytes(data)),
+            ],
+        );
+        match self.call(&req) {
+            Ok(v) => {
+                if let Some(a) = v.as_obj() {
+                    let text = a.string("message");
+                    let url = a.string("url");
+                    self.update(|s| {
+                        if !text.is_empty() {
+                            s.notice = Some(text);
+                        }
+                        if !url.is_empty() {
+                            s.follow = Some(url);
+                        }
+                    });
+                }
+                Ok(())
+            }
+            // bots that don't answer in time are common
+            Err(Error::Rpc { message, .. }) if message.contains("TIMEOUT") => Ok(()),
+            Err(e @ Error::Rpc { .. }) => {
+                self.notice(format!("The bot didn't answer: {}", friendly(&e)));
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Forget who stopped typing a while ago.
+    fn forget_typing(&self) {
+        let now = now_ms();
+        let stale = self
+            .shared
+            .borrow()
+            .typing
+            .values()
+            .any(|v| v.iter().any(|t| t.2 <= now));
+        if stale {
+            self.update(|s| {
+                for v in s.typing.values_mut() {
+                    v.retain(|t| t.2 > now);
+                }
+                s.typing.retain(|_, v| !v.is_empty());
+            });
+        }
+    }
+
     /// Upload a file in parts, then send it: pictures as photos,
     /// everything else as a file.
-    fn send_file(&mut self, peer: Peer, path: String) -> Result<()> {
+    fn send_file(&mut self, peer: Peer, path: String, reply_to: i64) -> Result<()> {
         let data = fs::read(&path).map_err(|e| {
             Error::Other(format!(
                 "Can't read {}: {}",
@@ -2069,6 +2484,7 @@ impl Client {
             edited: false,
             random_id,
             failed: false,
+            reply_to,
             ..Default::default()
         };
         self.sending.insert(random_id, peer);
@@ -2080,7 +2496,9 @@ impl Client {
                 .push(local.clone());
         });
         self.bump_chat(peer, &local);
-        let result = self.upload_and_send(peer, &data, &name, mime, photo, random_id, &label);
+        let result = self.upload_and_send(
+            peer, &data, &name, mime, photo, random_id, reply_to, &label,
+        );
         match result {
             Ok(v) => {
                 if let Some(o) = v.as_obj() {
@@ -2119,6 +2537,7 @@ impl Client {
         mime: &str,
         photo: bool,
         random_id: i64,
+        reply_to: i64,
         label: &dyn Fn(usize) -> String,
     ) -> Result<Value> {
         let file_id = crypto::random_i64();
@@ -2202,6 +2621,7 @@ impl Client {
             "messages.sendMedia",
             &[
                 ("peer", self.input_peer(peer).into()),
+                ("reply_to", reply_header(reply_to)),
                 ("media", media.into()),
                 ("message", Value::str("")),
                 ("random_id", Value::Long(random_id)),
@@ -2270,6 +2690,7 @@ impl Client {
                     random_id: 0,
                     failed: false,
                     links,
+                    reply_to: reply_of(u),
                     ..Default::default()
                 };
                 self.incoming(peer, msg);
@@ -2301,13 +2722,19 @@ impl Client {
             "updateEditMessage" | "updateEditChannelMessage" => {
                 if let Some(m) = u.obj("message") {
                     if let (Some(peer), Some(msg)) = (peer_of(m.obj("peer_id")), self.convert(m)) {
+                        let id = msg.id;
+                        self.change(peer, id, |old| *old = msg.clone());
+                        // the chat list shows the new text of the last one
                         self.update(|s| {
-                            if let Some(old) = s
+                            let last = s
                                 .history
-                                .get_mut(&peer)
-                                .and_then(|h| h.messages.iter_mut().find(|x| x.id == msg.id))
+                                .get(&peer)
+                                .and_then(|h| h.messages.iter().rev().find(|m| m.id != 0))
+                                .is_some_and(|m| m.id == id);
+                            if let (true, Some(c)) =
+                                (last, s.chats.iter_mut().find(|c| c.peer == peer))
                             {
-                                *old = msg;
+                                c.last = preview(&msg);
                             }
                         });
                     }
@@ -2319,18 +2746,63 @@ impl Client {
                 let channel = u
                     .is("updateDeleteChannelMessages")
                     .then(|| u.int("channel_id"));
+                self.deleted(None, channel, &ids);
+            }
+            "updatePinnedMessages" | "updatePinnedChannelMessages" => {
+                let peer = if u.is("updatePinnedChannelMessages") {
+                    Some(Peer::Channel(u.int("channel_id")))
+                } else {
+                    peer_of(u.obj("peer"))
+                };
+                let pinned = u.flag("pinned");
+                let ids: Vec<i64> = u.vec("messages").iter().map(|v| v.as_i64()).collect();
+                if let Some(peer) = peer {
+                    for &id in &ids {
+                        self.change(peer, id, |m| m.pinned = pinned);
+                    }
+                    if !pinned {
+                        self.update(|s| {
+                            if let Some(v) = s.pinned.get_mut(&peer) {
+                                v.retain(|m| !ids.contains(&m.id));
+                            }
+                        });
+                    } else if !self.pinned_dirty.contains(&peer) {
+                        self.pinned_dirty.push(peer);
+                    }
+                }
+            }
+            "updateUserTyping" | "updateChatUserTyping" | "updateChannelUserTyping" => {
+                let (peer, who) = match u.name() {
+                    "updateUserTyping" => (Peer::User(u.int("user_id")), u.int("user_id")),
+                    "updateChatUserTyping" => (
+                        Peer::Chat(u.int("chat_id")),
+                        peer_of(u.obj("from_id")).map_or(0, peer_id),
+                    ),
+                    _ => (
+                        Peer::Channel(u.int("channel_id")),
+                        peer_of(u.obj("from_id")).map_or(0, peer_id),
+                    ),
+                };
+                if who == self.me {
+                    return;
+                }
+                let what = typing_text(u.obj("action"));
+                let until = now_ms() + TYPING_MS;
                 self.update(|s| {
-                    for (peer, h) in s.history.iter_mut() {
-                        let same = match (peer, channel) {
-                            (Peer::Channel(id), Some(c)) => *id == c,
-                            (Peer::Channel(_), None) | (_, Some(_)) => false,
-                            _ => true,
-                        };
-                        if same {
-                            h.messages.retain(|m| m.id == 0 || !ids.contains(&m.id));
-                        }
+                    let v = s.typing.entry(peer).or_default();
+                    v.retain(|t| t.0 != who);
+                    if let Some(what) = what {
+                        v.push((who, what, until));
                     }
                 });
+            }
+            "updateUserStatus" => {
+                let id = u.int("user_id");
+                if let Some(st) = u.obj("status").map(status_of) {
+                    self.update(|s| {
+                        s.status.insert(id, st);
+                    });
+                }
             }
             "updateReadHistoryInbox" | "updateReadChannelInbox" => {
                 let peer = if u.is("updateReadChannelInbox") {
@@ -2378,8 +2850,22 @@ impl Client {
         }
         let out = msg.out;
         self.bump_chat(peer, &msg);
+        let from = msg.from_id;
         self.update(|s| {
+            if let Some(v) = s.typing.get_mut(&peer) {
+                v.retain(|t| t.0 != from);
+            }
             if let Some(h) = s.history.get_mut(&peer) {
+                // our copy shown while sending already has the id: the
+                // server's has the photo or file itself
+                if let Some(m) = h
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == msg.id && msg.id != 0 && m.random_id != 0)
+                {
+                    *m = msg;
+                    return;
+                }
                 if msg.id == 0 || !h.messages.iter().any(|m| m.id == msg.id) {
                     // our own message coming back from the server replaces
                     // the copy shown while sending
@@ -2505,6 +2991,10 @@ impl Client {
         if u.flag("self") {
             self.me = id;
         }
+        if let Some(st) = u.obj("status").map(status_of) {
+            // the window draws it with the rest of the change
+            self.shared.borrow_mut().status.insert(id, st);
+        }
         self.users.insert(
             id,
             UserInfo {
@@ -2576,8 +3066,143 @@ impl Client {
             file,
             links,
             web,
+            reply_to: reply_of(m),
+            pinned: m.flag("pinned"),
+            fwd: m.obj("fwd_from").map(|f| {
+                match peer_of(f.obj("from_id")) {
+                    Some(p) => self.name_of(peer_id(p)),
+                    None => f.string("from_name"),
+                }
+            }),
+            buttons: m.obj("reply_markup").map(buttons_of).unwrap_or_default(),
+            keyboard: m.obj("reply_markup").and_then(keyboard_of),
         })
     }
+}
+
+fn peer_id(p: Peer) -> i64 {
+    match p {
+        Peer::User(id) | Peer::Chat(id) | Peer::Channel(id) => id,
+    }
+}
+
+/// The message a message (or an updateShortMessage) answers; 0 for none.
+fn reply_of(m: &Obj) -> i64 {
+    m.obj("reply_to")
+        .filter(|r| r.is("messageReplyHeader") && r.get("reply_to_peer_id").as_obj().is_none())
+        .map_or(0, |r| r.int("reply_to_msg_id"))
+}
+
+/// The reply_to field of a message we send.
+fn reply_header(reply_to: i64) -> Value {
+    if reply_to == 0 {
+        return Value::None;
+    }
+    Obj::new(
+        "inputReplyToMessage",
+        &[("reply_to_msg_id", Value::Int(reply_to as i32))],
+    )
+    .into()
+}
+
+/// What a message that is no more is quoted as.
+fn gone(id: i64) -> Message {
+    Message {
+        id,
+        text: String::from("Deleted message"),
+        service: true,
+        ..Default::default()
+    }
+}
+
+/// Inline buttons under a message.
+fn buttons_of(markup: &Obj) -> Vec<Vec<super::KeyButton>> {
+    use super::{ButtonAction, KeyButton};
+    if !markup.is("replyInlineMarkup") {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for row in markup.vec("rows").iter().filter_map(|r| r.as_obj()) {
+        let mut out = Vec::new();
+        for b in row.vec("buttons").iter().filter_map(|b| b.as_obj()) {
+            let t = b.obj("type");
+            let action = match t.map(|t| t.name()) {
+                Some("inlineButtonTypeUrl" | "inlineButtonTypeUrlAuth" | "inlineButtonTypeWebView") => {
+                    ButtonAction::Url(t.map_or(String::new(), |t| t.string("url")))
+                }
+                Some("inlineButtonTypeCallback") => {
+                    ButtonAction::Callback(t.map_or(Vec::new(), |t| t.bytes("data").to_vec()))
+                }
+                Some("inlineButtonTypeCopy") => {
+                    ButtonAction::Copy(t.map_or(String::new(), |t| t.string("copy_text")))
+                }
+                _ => ButtonAction::Other,
+            };
+            out.push(KeyButton {
+                text: b.string("text"),
+                action,
+            });
+        }
+        if !out.is_empty() {
+            rows.push(out);
+        }
+    }
+    rows
+}
+
+/// A bot's keyboard: rows of texts; empty when it hides the keyboard.
+fn keyboard_of(markup: &Obj) -> Option<Vec<Vec<String>>> {
+    match markup.name() {
+        "replyKeyboardHide" => Some(Vec::new()),
+        "replyKeyboardMarkup" => Some(
+            markup
+                .vec("rows")
+                .iter()
+                .filter_map(|r| r.as_obj())
+                .map(|r| {
+                    r.vec("buttons")
+                        .iter()
+                        .filter_map(|b| b.as_obj())
+                        .map(|b| b.string("text"))
+                        .collect::<Vec<String>>()
+                })
+                .filter(|r| !r.is_empty())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn status_of(st: &Obj) -> super::Status {
+    use super::Status;
+    match st.name() {
+        "userStatusOnline" => Status::Online(st.int("expires")),
+        "userStatusOffline" => Status::Offline(st.int("was_online")),
+        "userStatusRecently" => Status::Recently,
+        "userStatusLastWeek" => Status::LastWeek,
+        "userStatusLastMonth" => Status::LastMonth,
+        _ => Status::Hidden,
+    }
+}
+
+/// "typing", "sending a photo", ...; None when they stopped.
+fn typing_text(action: Option<&Obj>) -> Option<String> {
+    let name = action.map_or("sendMessageTypingAction", |a| a.name());
+    let what = match name {
+        "sendMessageCancelAction" => return None,
+        "sendMessageRecordVideoAction" | "sendMessageRecordRoundAction" => "recording a video",
+        "sendMessageUploadVideoAction" | "sendMessageUploadRoundAction" => "sending a video",
+        "sendMessageRecordAudioAction" => "recording a voice message",
+        "sendMessageUploadAudioAction" => "sending a voice message",
+        "sendMessageUploadPhotoAction" => "sending a photo",
+        "sendMessageUploadDocumentAction" => "sending a file",
+        "sendMessageChooseStickerAction" => "choosing a sticker",
+        "sendMessageGamePlayAction" => "playing a game",
+        "sendMessageGeoLocationAction" => "choosing a location",
+        "sendMessageChooseContactAction" => "choosing a contact",
+        _ => "typing",
+    };
+    Some(String::from(what))
 }
 
 fn peer_of(p: Option<&Obj>) -> Option<Peer> {

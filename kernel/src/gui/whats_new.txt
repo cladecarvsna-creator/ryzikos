@@ -1,3 +1,5 @@
-When RyzikOS hits an error it can't recover from, it now shows a blue screen that says what went wrong, instead of freezing with red text.
-The blue screen saves a report on the disk and restarts the computer. After you sign in, a window explains why the computer restarted, with every detail a click away.
-The Terminal commands "crash" (show the last report) and "panic" (try the blue screen) go with it.
+Telegram can now reply to, edit, delete, pin and forward messages. Right-click a message to see every action, or press Up in an empty box to edit your last message.
+Replies show the quoted message above the text, and a click on the quote jumps to it. Pinned messages show in a bar at the top of the chat.
+Pick "Select" to choose several messages, then forward, copy or delete them together.
+Chats show when someone is typing and whether they are online or when they were last seen. Bot buttons show under their messages.
+The attach button lets you pick several files at once with Ctrl+click, and files you send show in the chat right away. Telegram also reconnects more reliably when the connection drops.
