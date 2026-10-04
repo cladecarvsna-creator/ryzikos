@@ -22,8 +22,25 @@ use sha2::{Digest, Sha256};
 use super::url::Url;
 use crate::net::TcpStream;
 
-/// Pages and downloads bigger than this are refused, to leave memory.
+/// Pages kept in memory bigger than this are refused, to leave memory.
+/// Downloads the caller saves (see [`get_saving`]) have no such limit.
 const MAX_BODY: usize = 40 * 1024 * 1024;
+/// A body the caller can save goes to the file once it is this big.
+const SAVE_AT: usize = 2 * 1024 * 1024;
+/// Saved bodies are written in parts of about this size.
+const SAVE_PART: usize = 1024 * 1024;
+
+/// Asked, once a reply's head has arrived, where to save a big body:
+/// the path of a new file, or None to keep it in memory.
+pub type SaveTo<'a> = &'a mut dyn FnMut(&Response) -> Option<String>;
+
+/// Lend out a [`SaveTo`] for one call, keeping it for the next.
+fn lend<'a>(save_to: &'a mut Option<SaveTo<'_>>) -> Option<SaveTo<'a>> {
+    match save_to {
+        Some(f) => Some(&mut **f),
+        None => None,
+    }
+}
 const MAX_REDIRECTS: usize = 8;
 
 pub struct Response {
@@ -37,7 +54,25 @@ pub struct Response {
     pub date: Option<i64>,
     /// All the headers, names in lower case.
     pub headers: Vec<(String, String)>,
+    /// Empty when the body went to `file`.
     pub body: Vec<u8>,
+    /// The file a big body was saved in, for [`get_saving`].
+    pub file: Option<String>,
+}
+
+impl Response {
+    fn new(url: Url, head: Head, body: Vec<u8>, file: Option<String>) -> Response {
+        Response {
+            url,
+            status: head.status,
+            content_type: head.content_type,
+            disposition: head.disposition,
+            date: head.date,
+            headers: head.headers,
+            body,
+            file,
+        }
+    }
 }
 
 /// Download `url`, following redirects. With `form`, send it as a POST.
@@ -50,6 +85,15 @@ pub fn get(url: &Url, form: Option<&str>) -> Result<Response, String> {
         ),
         None => request("GET", url, None),
     }
+}
+
+/// Like [`get`], but a big body is saved into the file `save_to` names
+/// as it arrives instead of being held in memory, so downloads can be
+/// bigger than the memory.
+pub fn get_saving(url: &Url, form: Option<&str>, save_to: SaveTo) -> Result<Response, String> {
+    let body = form.map(|f| ("application/x-www-form-urlencoded", f.as_bytes()));
+    let method = if form.is_some() { "POST" } else { "GET" };
+    request_saving(method, url, body, None, Some(save_to))
 }
 
 /// Download `url` introducing ourselves as `agent` (VPN subscriptions
@@ -67,13 +111,23 @@ pub fn request(method: &str, url: &Url, body: Option<(&str, &[u8])>) -> Result<R
 fn request_as(
     method: &str,
     url: &Url,
+    body: Option<(&str, &[u8])>,
+    agent: Option<&str>,
+) -> Result<Response, String> {
+    request_saving(method, url, body, agent, None)
+}
+
+fn request_saving(
+    method: &str,
+    url: &Url,
     mut body: Option<(&str, &[u8])>,
     agent: Option<&str>,
+    mut save_to: Option<SaveTo>,
 ) -> Result<Response, String> {
     let mut url = url.clone();
     let mut method = method.to_string();
     for _ in 0..MAX_REDIRECTS {
-        let raw = fetch_raw(&method, &url, body, agent)?;
+        let (raw, file) = fetch_raw(&method, &url, body, agent, lend(&mut save_to))?;
         let head = parse_head(&raw).ok_or("bad reply from server")?;
         for c in &head.cookies {
             store_cookie(&url.host, c);
@@ -89,6 +143,9 @@ fn request_as(
                 continue;
             }
         }
+        if file.is_some() {
+            return Ok(Response::new(url, head, Vec::new(), file));
+        }
         let data = &raw[head.body_start..];
         let data = if head.chunked {
             dechunk(data)
@@ -98,15 +155,7 @@ fn request_as(
                 None => data.to_vec(),
             }
         };
-        return Ok(Response {
-            url,
-            status: head.status,
-            content_type: head.content_type,
-            disposition: head.disposition,
-            date: head.date,
-            headers: head.headers,
-            body: data,
-        });
+        return Ok(Response::new(url, head, data, None));
     }
     Err("too many redirects".to_string())
 }
@@ -296,12 +345,15 @@ fn pool_put(key: String, link: Link) {
     drop(evicted);
 }
 
+/// Send a request and read the reply: the raw bytes, or with `save_to`
+/// maybe just the head, and the file the body was saved in.
 fn fetch_raw(
     method: &str,
     url: &Url,
     body: Option<(&str, &[u8])>,
     agent: Option<&str>,
-) -> Result<Vec<u8>, String> {
+    mut save_to: Option<SaveTo>,
+) -> Result<(Vec<u8>, Option<String>), String> {
     log(&format!("{} ", method), &url.to_string());
     let host = if url.port == if url.https { 443 } else { 80 } {
         url.host.clone()
@@ -345,16 +397,20 @@ fn fetch_raw(
             Some(l) => (l, true),
             None => (Link::open(url)?, false),
         };
-        let result = link
-            .write_all(&request)
-            .and_then(|_| read_response(|buf| link.read(buf)));
+        let result = link.write_all(&request).and_then(|_| {
+            read_response(|buf| link.read(buf), url, lend(&mut save_to))
+        });
         match result {
-            Ok(data) => {
-                let keep = parse_head(&data).is_some_and(|h| !h.close) && complete(&data);
+            Ok((data, file)) => {
+                // a saved body was not kept, so the reply can't be checked
+                // for its end: the connection is not used again
+                let keep = file.is_none()
+                    && parse_head(&data).is_some_and(|h| !h.close)
+                    && complete(&data);
                 if keep {
                     pool_put(key, link);
                 }
-                return Ok(data);
+                return Ok((data, file));
             }
             Err(e) if reused && e != "cancelled" && !e.starts_with("timed out") => {
                 log("stale connection: ", &e);
@@ -365,10 +421,14 @@ fn fetch_raw(
     Err("the server keeps closing the connection".to_string())
 }
 
-/// Read until the connection closes or the body is complete.
+/// Read until the connection closes or the body is complete. With
+/// `save_to`, a big successful body goes into a file as it arrives, and
+/// only the head is returned, with the file's path.
 fn read_response(
     mut read: impl FnMut(&mut [u8]) -> Result<usize, String>,
-) -> Result<Vec<u8>, String> {
+    url: &Url,
+    mut save_to: Option<SaveTo>,
+) -> Result<(Vec<u8>, Option<String>), String> {
     let mut data = Vec::new();
     let mut buf = vec![0u8; 16 * 1024];
     loop {
@@ -385,6 +445,24 @@ fn read_response(
             break;
         }
         data.extend_from_slice(&buf[..n]);
+        if let Some(save) = lend(&mut save_to) {
+            if let Some(head) = parse_head(&data).filter(|h| worth_saving(h, data.len())) {
+                let start = head.body_start;
+                let mut body = BodyReader::new(&head);
+                let reply = Response::new(url.clone(), head, Vec::new(), None);
+                if let Some(path) = save(&reply) {
+                    let first = data.split_off(start);
+                    let saved = save_body(&path, &mut body, &first, &mut read);
+                    if let Err(e) = saved {
+                        let _ = crate::fs::remove(&path);
+                        return Err(e);
+                    }
+                    return Ok((data, Some(path)));
+                }
+                // kept in memory: don't ask again
+                save_to = None;
+            }
+        }
         if data.len() > MAX_BODY {
             return Err("the file is larger than 40 MB".to_string());
         }
@@ -395,7 +473,148 @@ fn read_response(
     if data.is_empty() {
         return Err("empty reply".to_string());
     }
-    Ok(data)
+    Ok((data, None))
+}
+
+/// Whether a reply should be saved to a file rather than kept: it worked
+/// and its body is, or says it will be, big.
+fn worth_saving(head: &Head, have: usize) -> bool {
+    (200..300).contains(&head.status)
+        && head.status != 204
+        && (have - head.body_start >= SAVE_AT || head.content_length.is_some_and(|n| n >= SAVE_AT))
+}
+
+/// Write a body into the file at `path`: the part that has arrived
+/// (`first`), then the rest as it is read.
+fn save_body(
+    path: &str,
+    body: &mut BodyReader,
+    first: &[u8],
+    read: &mut impl FnMut(&mut [u8]) -> Result<usize, String>,
+) -> Result<(), String> {
+    let fail = |e: crate::fs::Error| format!("could not save the file: {}", e.message());
+    crate::fs::write(path, &[]).map_err(fail)?;
+    let mut part = Vec::with_capacity(SAVE_PART + 16 * 1024);
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut done = body.feed(first, &mut part);
+    let mut saved = 0u64;
+    while !done {
+        if part.len() >= SAVE_PART {
+            crate::fs::append(path, &part).map_err(fail)?;
+            saved += part.len() as u64;
+            part.clear();
+        }
+        let n = match read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if body.ends_at_close() => {
+                log("read ended: ", &e);
+                0
+            }
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            if !body.ends_at_close() {
+                return Err("the connection closed before the file was complete".to_string());
+            }
+            break;
+        }
+        done = body.feed(&buf[..n], &mut part);
+    }
+    crate::fs::append(path, &part).map_err(fail)?;
+    saved += part.len() as u64;
+    log("saved: ", &format!("{} ({} bytes)", path, saved));
+    Ok(())
+}
+
+/// Takes a body as it arrives and gives back its bytes: up to
+/// Content-Length, without the chunk sizes of a chunked one, or
+/// everything until the connection closes.
+enum BodyReader {
+    Length(u64),
+    Chunked(Chunk),
+    UntilClose,
+}
+
+enum Chunk {
+    /// Reading the size line.
+    Size(Vec<u8>),
+    /// Bytes of data left in this chunk.
+    Data(usize),
+    /// The CR LF after a chunk's data: bytes of it left.
+    End(u8),
+    Done,
+}
+
+impl BodyReader {
+    fn new(head: &Head) -> BodyReader {
+        if head.chunked {
+            BodyReader::Chunked(Chunk::Size(Vec::new()))
+        } else {
+            match head.content_length {
+                Some(n) => BodyReader::Length(n as u64),
+                None => BodyReader::UntilClose,
+            }
+        }
+    }
+
+    fn ends_at_close(&self) -> bool {
+        matches!(self, BodyReader::UntilClose)
+    }
+
+    /// Add what arrived to `out`; true once the body is complete.
+    fn feed(&mut self, mut input: &[u8], out: &mut Vec<u8>) -> bool {
+        match self {
+            BodyReader::UntilClose => {
+                out.extend_from_slice(input);
+                false
+            }
+            BodyReader::Length(left) => {
+                let n = (*left).min(input.len() as u64) as usize;
+                out.extend_from_slice(&input[..n]);
+                *left -= n as u64;
+                *left == 0
+            }
+            BodyReader::Chunked(state) => {
+                while !input.is_empty() {
+                    match state {
+                        Chunk::Size(line) => {
+                            let Some(i) = input.iter().position(|&b| b == b'\n') else {
+                                line.extend_from_slice(input);
+                                return false;
+                            };
+                            line.extend_from_slice(&input[..i]);
+                            input = &input[i + 1..];
+                            let text = String::from_utf8_lossy(line);
+                            let size = text.split(';').next().unwrap_or("").trim();
+                            match usize::from_str_radix(size, 16) {
+                                Ok(0) | Err(_) => *state = Chunk::Done,
+                                Ok(n) => *state = Chunk::Data(n),
+                            }
+                        }
+                        Chunk::Data(left) => {
+                            let n = (*left).min(input.len());
+                            out.extend_from_slice(&input[..n]);
+                            input = &input[n..];
+                            *left -= n;
+                            if *left == 0 {
+                                *state = Chunk::End(2);
+                            }
+                        }
+                        Chunk::End(left) => {
+                            let n = (*left as usize).min(input.len());
+                            input = &input[n..];
+                            *left -= n as u8;
+                            if *left == 0 {
+                                *state = Chunk::Size(Vec::new());
+                            }
+                        }
+                        Chunk::Done => break,
+                    }
+                }
+                matches!(state, Chunk::Done)
+            }
+        }
+    }
 }
 
 fn complete(data: &[u8]) -> bool {
