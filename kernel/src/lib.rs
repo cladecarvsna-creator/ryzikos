@@ -51,6 +51,11 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     heap::init();
     users::init();
     let boot = unsafe { multiboot::parse(multiboot_info) };
+    heap::grow(&boot.ram, boot.info);
+    crate::serial::write_str(&alloc::format!(
+        "\nheap: {} MiB\n",
+        heap::total_bytes() >> 20
+    ));
     if let Some(fb) = &boot.framebuffer {
         framebuffer::write_combine(fb);
     }

@@ -1,9 +1,10 @@
-//! HTTP/1.1 client over plain TCP or TLS 1.3 (https). Downloads a whole
-//! page into memory, follows redirects and keeps connections open for
-//! the next file from the same server.
+//! HTTP/1.1 client over plain TCP or TLS 1.3 and 1.2 (https, see
+//! `crate::net::tls`). Downloads a whole page into memory, follows
+//! redirects and keeps connections open for the next file from the same
+//! server.
 //!
 //! HTTPS encrypts the connection but does not check the server's
-//! certificate: EverOS has no list of trusted certificate authorities.
+//! certificate: RyzikOS has no list of trusted certificate authorities.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -11,15 +12,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::mem::ManuallyDrop;
 
-use embedded_tls::blocking::{
-    Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider,
-};
-use rand_core::{CryptoRng, RngCore};
-use sha2::{Digest, Sha256};
 
 use super::url::Url;
+use crate::net::tls::{self, Tls};
 use crate::net::TcpStream;
 
 /// Pages and downloads bigger than this are refused, to leave memory.
@@ -152,28 +148,7 @@ pub fn cookies(host: &str) -> String {
 /// An open connection to a server, plain or encrypted.
 enum Link {
     Plain(TcpStream),
-    Tls(Box<TlsLink>),
-}
-
-/// A TLS connection with the buffers it borrows. The buffers live on the
-/// heap and are freed after the connection.
-struct TlsLink {
-    conn: ManuallyDrop<TlsConnection<'static, TcpStream, Aes128GcmSha256>>,
-    bufs: [*mut [u8]; 2],
-}
-
-// one CPU; a link is only ever used by whoever took it from the pool
-unsafe impl Send for TlsLink {}
-
-impl Drop for TlsLink {
-    fn drop(&mut self) {
-        unsafe {
-            ManuallyDrop::drop(&mut self.conn);
-            for b in self.bufs {
-                drop(Box::from_raw(b));
-            }
-        }
-    }
+    Tls(Box<Tls<TcpStream>>),
 }
 
 impl Link {
@@ -182,55 +157,27 @@ impl Link {
         if !url.https {
             return Ok(Link::Plain(stream));
         }
-        let read: *mut [u8] = Box::into_raw(vec![0u8; 16 * 1024 + 512].into_boxed_slice());
-        let write: *mut [u8] = Box::into_raw(vec![0u8; 16 * 1024 + 512].into_boxed_slice());
-        // Safety: the buffers outlive the connection (see TlsLink's Drop)
-        let conn = TlsConnection::new(stream, unsafe { &mut *read }, unsafe { &mut *write });
-        let mut link = TlsLink {
-            conn: ManuallyDrop::new(conn),
-            bufs: [read, write],
+        let opts = tls::Options {
+            sni: &url.host,
+            alpn: &[],
+            reality: None,
         };
-        let config = TlsConfig::new()
-            .with_server_name(&url.host)
-            .enable_rsa_signatures();
-        link.conn
-            .open(TlsContext::new(
-                &config,
-                UnsecureProvider::new::<Aes128GcmSha256>(Rng::new()),
-            ))
-            .map_err(|e| format!("TLS handshake failed: {:?}", e))?;
-        Ok(Link::Tls(Box::new(link)))
+        let conn = Tls::connect(stream, &opts).map_err(|e| format!("secure connection failed: {}", e))?;
+        Ok(Link::Tls(Box::new(conn)))
     }
 
     fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
         match self {
             Link::Plain(s) => s.write_all(data),
-            Link::Tls(t) => {
-                let mut sent = 0;
-                while sent < data.len() {
-                    let n = t
-                        .conn
-                        .write(&data[sent..])
-                        .map_err(|e| format!("TLS: {:?}", e))?;
-                    if n == 0 {
-                        return Err("TLS: could not send".to_string());
-                    }
-                    sent += n;
-                }
-                t.conn.flush().map_err(|e| format!("TLS: {:?}", e))
-            }
+            Link::Tls(t) => t.write_all(data),
         }
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
         match self {
             Link::Plain(s) => s.read(buf),
-            Link::Tls(t) => match t.conn.read(buf) {
-                Ok(n) => Ok(n),
-                // the server closing the connection ends the page
-                Err(embedded_tls::TlsError::ConnectionClosed) => Ok(0),
-                Err(e) => Err(format!("TLS: {:?}", e)),
-            },
+            // the server closing the connection ends the page
+            Link::Tls(t) => Ok(t.read(buf, true)?.unwrap_or(0)),
         }
     }
 }
@@ -496,61 +443,6 @@ fn log(what: &str, detail: &str) {
     crate::serial::write_str(detail);
     crate::serial::write_str("\n");
 }
-
-/// Random numbers for TLS keys: SHA-256 over a counter and a seed taken
-/// from the CPU's time stamp counter, which jitters between runs.
-struct Rng {
-    seed: [u8; 32],
-    counter: u64,
-}
-
-impl Rng {
-    fn new() -> Self {
-        let mut h = Sha256::new();
-        for _ in 0..64 {
-            h.update(unsafe { core::arch::x86_64::_rdtsc() }.to_le_bytes());
-            h.update(crate::interrupts::ticks().to_le_bytes());
-            for _ in 0..100 {
-                core::hint::spin_loop();
-            }
-        }
-        Rng {
-            seed: h.finalize().into(),
-            counter: 0,
-        }
-    }
-}
-
-impl RngCore for Rng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut b = [0; 8];
-        self.fill_bytes(&mut b);
-        u64::from_le_bytes(b)
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for chunk in dest.chunks_mut(32) {
-            let mut h = Sha256::new();
-            h.update(self.seed);
-            h.update(self.counter.to_le_bytes());
-            h.update(unsafe { core::arch::x86_64::_rdtsc() }.to_le_bytes());
-            self.counter += 1;
-            let out = h.finalize();
-            chunk.copy_from_slice(&out[..chunk.len()]);
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl CryptoRng for Rng {}
 
 /// An HTTP date such as "Sun, 28 Sep 2026 05:20:24 GMT", in Unix seconds.
 pub fn parse_date(text: &str) -> Option<i64> {

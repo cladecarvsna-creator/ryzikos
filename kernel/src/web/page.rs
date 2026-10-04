@@ -73,6 +73,8 @@ pub struct Page {
     pub generation: u64,
     /// How long the last layout took.
     pub layout_ms: i64,
+    /// Something to tell the reader, such as part of the page left out.
+    pub notice: Option<String>,
 }
 
 /// Measurements for layout: the web fonts and this page's images.
@@ -152,6 +154,7 @@ impl Page {
             next_timer: None,
             generation: next_generation_base(),
             layout_ms: 0,
+            notice: None,
         }
     }
 

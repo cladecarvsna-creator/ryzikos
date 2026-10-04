@@ -1,3 +1,3 @@
-When RyzikOS hits an error it can't recover from, it now shows a blue screen that says what went wrong, instead of freezing with red text.
-The blue screen saves a report on the disk and restarts the computer. After you sign in, a window explains why the computer restarted, with every detail a click away.
-The Terminal commands "crash" (show the last report) and "panic" (try the blue screen) go with it.
+You can now select text on web pages: drag over it with the mouse, double-click a word, or press Ctrl+A for the whole page, then Ctrl+C to copy it.
+Big web pages and HTML files open now. RyzikOS uses all of your computer's memory instead of a fixed 128 MB, and a page too big even for that shows the part that fits instead of a blue screen.
+Sites that failed with a certificate error open now: HTTPS uses RyzikOS's own TLS, which handles long certificate chains and sites that still speak only TLS 1.2.

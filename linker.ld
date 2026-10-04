@@ -13,4 +13,7 @@ SECTIONS {
     .rodata : { *(.rodata .rodata.*) }
     .data : { *(.data .data.*) }
     .bss : { *(.bss .bss.*) }
+
+    /* where free memory starts, for growing the heap */
+    _kernel_end = .;
 }
