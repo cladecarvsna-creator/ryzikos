@@ -120,6 +120,13 @@ impl Desktop<'_> {
             .map(|(_, r)| r)
     }
 
+    /// What a dock item covers, also when the mouse lifts it up.
+    pub(super) fn task_hover_rect(&self, item: TaskItem) -> Rect {
+        self.task_rect(item)
+            .map(|r| Rect::new(r.x, r.y - LIFT, r.w, r.h + LIFT))
+            .unwrap_or_default()
+    }
+
     pub(super) fn task_at(&self, x: i32, y: i32) -> Option<TaskItem> {
         self.task_layout()
             .into_iter()

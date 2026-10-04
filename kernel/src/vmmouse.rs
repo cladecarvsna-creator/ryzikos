@@ -63,6 +63,13 @@ pub struct Event {
     pub wheel: i32,
 }
 
+/// Whether a PS/2 packet looks like the one QEMU sends with every
+/// vmmouse event only to raise the mouse interrupt: one pixel (or a few,
+/// when they bunch up) to the right and nothing else.
+pub fn is_nudge(dx: i32, dy: i32, left: bool, right: bool, wheel: i32) -> bool {
+    dx > 0 && dy == 0 && !left && !right && wheel == 0
+}
+
 /// The next queued event, if any.
 pub fn poll() -> Option<Event> {
     let status = call(STATUS, 0).0;

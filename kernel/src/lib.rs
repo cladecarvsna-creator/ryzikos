@@ -8,6 +8,7 @@ extern crate alloc;
 mod archive;
 mod console;
 mod crash;
+mod display;
 mod fiber;
 mod font;
 mod framebuffer;

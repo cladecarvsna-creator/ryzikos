@@ -438,6 +438,14 @@ pub fn request_power(restart: bool) -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
 
+/// A resolution Settings asked for, as width << 16 | height; 0 for none.
+static SCREEN_REQUEST: AtomicU32 = AtomicU32::new(0);
+
+/// Ask the desktop to switch the screen to `width` x `height`.
+pub fn request_screen(width: usize, height: usize) {
+    SCREEN_REQUEST.store((width as u32) << 16 | height as u32, Ordering::Relaxed);
+}
+
 /// Switch between the light and the dark look (the shell's `theme`).
 pub fn set_theme(dark: bool) {
     personalize::update(|p| p.dark = dark);
@@ -685,6 +693,13 @@ pub struct Desktop<'a> {
     surfaces: [Vec<u32>; APPS.len()],
     /// Apps whose surface must be drawn again.
     stale: [bool; APPS.len()],
+    /// A hash of each window's title when `app_changed` last looked, so
+    /// a change that leaves the title alone redraws only the inside.
+    titles: [u64; APPS.len()],
+    /// The size each surface was last drawn at.
+    surface_sizes: [(i32, i32); APPS.len()],
+    /// Whether Settings can change the resolution (a virtual card).
+    screen_modes: bool,
 
     terminal: terminal::Terminal,
     paint: paint::Paint,
@@ -835,6 +850,9 @@ impl<'a> Desktop<'a> {
             scratch: SCRATCH.take(),
             surfaces,
             stale: [true; APPS.len()],
+            titles: [0; APPS.len()],
+            surface_sizes: [(0, 0); APPS.len()],
+            screen_modes: crate::display::can_change(&fb),
             terminal: terminal::Terminal::new(),
             paint: paint::Paint::new(),
             calc: calc::Calc::new(),
@@ -1191,13 +1209,16 @@ impl<'a> Desktop<'a> {
         }
     }
 
-    /// The app's content changed: draw its surface again.
+    /// The app's content changed: draw its surface again. What changed
+    /// on it goes on the screen at the next frame (`update_surfaces`).
     fn damage_client(&mut self, app: App) {
         self.stale[app.index()] = true;
-        let w = self.windows[app.index()];
-        if w.visible() {
-            self.damage(w.client());
-        }
+    }
+
+    /// Whether a window on the screen has contents to draw again.
+    fn surfaces_due(&self) -> bool {
+        APPS.iter()
+            .any(|a| self.stale[a.index()] && self.windows[a.index()].drawn())
     }
 
     /// An app changed. Notepad and File Explorer show the file or folder
@@ -1205,8 +1226,15 @@ impl<'a> Desktop<'a> {
     fn app_changed(&mut self, app: App) {
         match app {
             App::Notepad | App::Explorer | App::Photos | App::Video | App::Program | App::Archiver => {
-                self.stale[app.index()] = true;
-                self.damage_window(app);
+                // hovering and scrolling leave the title as it was: then
+                // only the inside is drawn again, not the frame and shadow
+                let title = title_hash(&self.window_title(app));
+                if core::mem::replace(&mut self.titles[app.index()], title) == title {
+                    self.damage_client(app);
+                } else {
+                    self.stale[app.index()] = true;
+                    self.damage_window(app);
+                }
             }
             _ => self.damage_client(app),
         }
@@ -2174,6 +2202,7 @@ impl<'a> Desktop<'a> {
             App::Telegram => self.telegram.on_hover(x, y),
             App::Vpn => self.vpn.on_hover(x, y),
             App::Archiver => self.archiver.on_hover(x, y),
+            App::Settings => self.settings.on_hover(x, y),
             _ => false,
         }
     }
@@ -2254,7 +2283,7 @@ impl<'a> Desktop<'a> {
             Hover::Minimize(app) => self.windows[app.index()].minimize_button(),
             Hover::Maximize(app) => self.windows[app.index()].maximize_button(),
             Hover::Close(app) => self.windows[app.index()].close_button(),
-            Hover::Task(item) => self.task_rect(item).unwrap_or_default(),
+            Hover::Task(item) => self.task_hover_rect(item),
             Hover::Tray(i) => self.tray_rect(i),
             Hover::ShowDesktop => self.show_desktop_rect().inset(-2),
             Hover::Quick(_) => self.panel_rect(Panel::Quick),
@@ -2730,7 +2759,12 @@ impl<'a> Desktop<'a> {
             Phase::Unlocking(t) | Phase::Locking(t) => Some(t),
             _ => self.crossfade,
         };
-        if self.dirty.is_empty() && fading.is_none() && self.slide.is_none() && !self.present_all {
+        if self.dirty.is_empty()
+            && fading.is_none()
+            && self.slide.is_none()
+            && !self.present_all
+            && !self.surfaces_due()
+        {
             return;
         }
         self.update_surfaces();
@@ -2738,11 +2772,17 @@ impl<'a> Desktop<'a> {
         let mut back = core::mem::take(&mut self.back);
         let mut scratch = core::mem::take(&mut self.scratch);
         for r in &rects[..n] {
-            let mut c = Canvas::new(back, self.width as usize, self.height as usize);
-            c.clip_to(*r);
-            self.draw_scene(&mut c, scratch);
-            if !matches!(self.phase, Phase::Boot(_) | Phase::Power(..)) {
-                self.pointer_image.draw(&mut c, self.mouse_x, self.mouse_y, self.pointer_edges);
+            // under the solid middle of a window nothing below it shows:
+            // draw the rest of the rectangle in full, that part from the
+            // window up
+            match self.occluder(*r) {
+                Some((i, o)) => {
+                    for part in around(*r, o) {
+                        self.draw_part(back, scratch, part, None);
+                    }
+                    self.draw_part(back, scratch, o, Some(i));
+                }
+                None => self.draw_part(back, scratch, *r, None),
             }
         }
         core::mem::swap(&mut self.back, &mut back);
@@ -2765,10 +2805,106 @@ impl<'a> Desktop<'a> {
         self.present_all = false;
     }
 
+    /// Draw the area `r` of the back buffer and the pointer over it,
+    /// starting from window `order[i]` when `from` is `Some(i)`.
+    fn draw_part(&self, back: &mut [u32], scratch: &mut [u32], r: Rect, from: Option<usize>) {
+        let mut c = Canvas::new(back, self.width as usize, self.height as usize);
+        c.clip_to(r);
+        self.draw_scene_from(&mut c, scratch, from);
+        if !matches!(self.phase, Phase::Boot(_) | Phase::Power(..)) {
+            self.pointer_image.draw(&mut c, self.mouse_x, self.mouse_y, self.pointer_edges);
+        }
+    }
+
+    /// The window that hides the most of `r` under its solid middle (all
+    /// but the rounded top and bottom rows), as its place in `order` and
+    /// the part of `r` it hides. Windows below it and the background
+    /// needn't be drawn there.
+    fn occluder(&self, r: Rect) -> Option<(usize, Rect)> {
+        if !matches!(self.phase, Phase::Desktop) || self.snip.is_some() || self.tv.open {
+            return None;
+        }
+        let mut best: Option<(usize, Rect)> = None;
+        for i in 0..self.order_len {
+            let app = self.order[i];
+            let w = &self.windows[app.index()];
+            if !w.visible() || self.anim_frame(app).is_some() {
+                continue;
+            }
+            let solid = Rect::new(w.rect.x, w.rect.y + WINDOW_RADIUS, w.rect.w, w.rect.h - 2 * WINDOW_RADIUS);
+            let o = solid.intersect(&r);
+            let area = |r: &Rect| r.w as i64 * r.h as i64;
+            if !o.is_empty() && best.is_none_or(|(_, b)| area(&o) >= area(&b)) {
+                best = Some((i, o));
+            }
+        }
+        best
+    }
+
+    /// Switch the screen to `width` x `height` and lay the desktop out
+    /// for it: the background drawn again at the new size, maximised
+    /// windows filling the new screen, the others kept on it.
+    fn change_screen(&mut self, width: usize, height: usize) {
+        if (width as i32, height as i32) == (self.width, self.height)
+            || width > MAX_W
+            || height > MAX_H
+        {
+            return;
+        }
+        let Some(fb) = crate::display::set_mode(&self.fb, width, height) else {
+            serial::write_str("screen: the graphics card can't show that mode\n");
+            return;
+        };
+        crate::display::save(width, height);
+        CONSOLE.lock().set_framebuffer(fb);
+        self.fb = fb;
+        self.width = width as i32;
+        self.height = height as i32;
+        self.mouse_x = self.mouse_x.min(self.width - 1);
+        self.mouse_y = self.mouse_y.min(self.height - 1);
+        // menus and panels open at the old size close
+        self.close_popup();
+        if self.start.open {
+            self.close_menu();
+        }
+        self.close_panel();
+        let _ = wallpaper::render(&personalize::get(), self.wallpaper, self.width, self.height);
+        self.login.resize(self.wallpaper, self.width, self.height);
+        shrink_wallpaper(&mut self.wall_thumb, self.wallpaper, self.width, self.height);
+        let area = self.work_area();
+        for app in APPS {
+            let w = self.windows[app.index()];
+            if w.maximized() {
+                self.set_rect(app, area);
+            } else if w.open {
+                // smaller if it no longer fits, then back on the screen
+                let (min_w, min_h) = app.min_size();
+                let (mut r, fits) = (w.rect, app.resizable());
+                if fits {
+                    r.w = r.w.min(area.w).max(min_w + 2 * BORDER);
+                    r.h = r.h.min(area.h).max(min_h + TITLE_H + BORDER);
+                }
+                r.x = r.x.min(area.right() - r.w).max(0);
+                r.y = r.y.min(area.bottom() - r.h).max(MENUBAR_H);
+                self.set_rect(app, r);
+            }
+        }
+        // the desktop icons find their places again
+        self.relayout_icons();
+        self.screen_modes = crate::display::can_change(&self.fb);
+        self.settings.screen_modes = self.screen_modes;
+        self.stale = [true; APPS.len()];
+        self.dirty = Dirty::default();
+        self.damage(self.screen());
+        self.present_all = true;
+        serial::write_str(&alloc::format!("screen: {}x{}\n", width, height));
+    }
+
     /// Facts about the system for Settings and About.
     fn system_info(&self) -> settings::Info<'_> {
         settings::Info {
             screen: (self.width, self.height),
+            screen_modes: self.screen_modes,
             memory_mib: self.boot.upper_memory_kib / 1024 + 1,
             bootloader: self.boot.bootloader,
             net: self.tray.net,
@@ -2783,6 +2919,7 @@ impl<'a> Desktop<'a> {
     /// Bring stale window contents up to date.
     fn update_surfaces(&mut self) {
         let mut surfaces = core::mem::take(&mut self.surfaces);
+        let before = core::mem::take(&mut self.scratch);
         for app in APPS {
             if self.stale[app.index()] && self.windows[app.index()].drawn() {
                 self.stale[app.index()] = false;
@@ -2792,6 +2929,14 @@ impl<'a> Desktop<'a> {
                 if surface.len() < size {
                     surface.resize(size, 0);
                 }
+                // keep what was there, to put on the screen only the part
+                // that changes: a blinking caret or a lit row, not the
+                // whole window
+                let compare = self.surface_sizes[app.index()] == (w, h) && size <= before.len();
+                if compare {
+                    before[..size].copy_from_slice(&surface[..size]);
+                }
+                self.surface_sizes[app.index()] = (w, h);
                 let mut c = Canvas::new(&mut surface[..size], w as usize, h as usize);
                 let focused = self.focused == Some(app);
                 match app {
@@ -2822,13 +2967,30 @@ impl<'a> Desktop<'a> {
                         self.taskmgr.draw(&mut c);
                     }
                 }
+                let changed = if compare {
+                    changed_area(&before[..size], &surface[..size], w as usize)
+                } else {
+                    Rect::new(0, 0, w, h)
+                };
+                let win = self.windows[app.index()];
+                if win.visible() && !changed.is_empty() {
+                    let client = win.client();
+                    self.damage(changed.offset(client.x, client.y).intersect(&client));
+                }
             }
         }
+        self.scratch = before;
         self.surfaces = surfaces;
     }
 
     /// Draw everything but the pointer inside the canvas's clip.
     fn draw_scene(&self, c: &mut Canvas, scratch: &mut [u32]) {
+        self.draw_scene_from(c, scratch, None);
+    }
+
+    /// `draw_scene`, leaving out the background and the windows below
+    /// `order[i]` when `from` is `Some(i)`: that window covers the clip.
+    fn draw_scene_from(&self, c: &mut Canvas, scratch: &mut [u32], from: Option<usize>) {
         match self.phase {
             Phase::Boot(since) => return self.draw_boot(c, since),
             Phase::Power(what, since) => return self.draw_power(c, what, since),
@@ -2845,17 +3007,19 @@ impl<'a> Desktop<'a> {
         if self.tv.open {
             self.draw_task_view(c, scratch);
         } else {
-            c.blit(
-                0,
-                0,
-                self.width,
-                self.height,
-                self.wallpaper,
-                self.width as usize,
-            );
-            self.draw_desk_icons(c);
-            self.draw_icon_rename(c);
-            for i in 0..self.order_len {
+            if from.is_none() {
+                c.blit(
+                    0,
+                    0,
+                    self.width,
+                    self.height,
+                    self.wallpaper,
+                    self.width as usize,
+                );
+                self.draw_desk_icons(c);
+                self.draw_icon_rename(c);
+            }
+            for i in from.unwrap_or(0)..self.order_len {
                 let app = self.order[i];
                 if self.windows[app.index()].drawn() {
                     self.draw_window(c, app, scratch);
@@ -3038,7 +3202,7 @@ impl<'a> Desktop<'a> {
             if !c.visible(w.bounds()) || !w.visible() {
                 return;
             }
-            c.shadow(r, WINDOW_RADIUS, SPREAD, SHADOW_DROP, strength);
+            c.shadow_under(r, WINDOW_RADIUS, SPREAD, SHADOW_DROP, strength);
             {
                 let mut win = c.sub(Rect::new(0, 0, c.width, c.height));
                 win.clip_round(r, WINDOW_RADIUS);
@@ -3070,8 +3234,9 @@ impl<'a> Desktop<'a> {
         c.outline_round_alpha(frame, WINDOW_RADIUS, border, alpha);
     }
 
-    /// The title bar and contents of a window whose frame is `r` on `win`.
-    fn draw_window_body(&self, win: &mut Canvas, app: App, r: Rect) {
+    /// The title bar of a window whose frame is `r` on `win`: the icon,
+    /// the title and the round buttons.
+    fn draw_title_bar(&self, win: &mut Canvas, app: App, r: Rect) {
         let focused = self.focused == Some(app);
         let title_face = if focused {
             theme::title_active()
@@ -3080,6 +3245,7 @@ impl<'a> Desktop<'a> {
         };
         let title_bar = Rect::new(r.x, r.y, r.w, TITLE_H);
         win.fill(title_bar, title_face);
+
         let ink = if focused {
             theme::text()
         } else {
@@ -3145,7 +3311,15 @@ impl<'a> Desktop<'a> {
                 }
             }
         }
+    }
 
+    /// The title bar and contents of a window whose frame is `r` on `win`.
+    fn draw_window_body(&self, win: &mut Canvas, app: App, r: Rect) {
+        // the title, its fitting and the buttons cost time: skip them
+        // when only the inside of the window is drawn again
+        if win.visible(Rect::new(r.x, r.y, r.w, TITLE_H)) {
+            self.draw_title_bar(win, app, r);
+        }
         let client = Rect::new(
             r.x + BORDER,
             r.y + TITLE_H,
@@ -3409,6 +3583,46 @@ fn fade_row(out: &mut [u32], a: &[u32], b: &[u32], alpha: u32) {
 
 /// Caption button `k` (0 close, 1 minimise, 2 maximise) of a window
 /// framed by `r`.
+/// The smallest rectangle around the pixels that differ between two
+/// pictures `w` pixels wide, empty when they are the same.
+fn changed_area(old: &[u32], new: &[u32], w: usize) -> Rect {
+    let (mut x0, mut x1, mut y0, mut y1) = (w, 0, usize::MAX, 0);
+    for (y, (a, b)) in old.chunks_exact(w).zip(new.chunks_exact(w)).enumerate() {
+        if a == b {
+            continue;
+        }
+        let first = a.iter().zip(b).position(|(p, q)| p != q).unwrap_or(0);
+        let last = a.iter().zip(b).rposition(|(p, q)| p != q).unwrap_or(w - 1);
+        x0 = x0.min(first);
+        x1 = x1.max(last + 1);
+        y0 = y0.min(y);
+        y1 = y + 1;
+    }
+    if y0 == usize::MAX {
+        return Rect::default();
+    }
+    Rect::new(x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32)
+}
+
+/// `r` without the part `o` inside it, as up to four rectangles.
+fn around(r: Rect, o: Rect) -> impl Iterator<Item = Rect> {
+    [
+        Rect::new(r.x, r.y, r.w, o.y - r.y),
+        Rect::new(r.x, o.bottom(), r.w, r.bottom() - o.bottom()),
+        Rect::new(r.x, o.y, o.x - r.x, o.h),
+        Rect::new(o.right(), o.y, r.right() - o.right(), o.h),
+    ]
+    .into_iter()
+    .filter(|p| !p.is_empty())
+}
+
+/// FNV-1a of a window title, to notice when it changes.
+fn title_hash(title: &str) -> u64 {
+    title.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
 fn caption_button(r: Rect, k: i32) -> Rect {
     Rect::new(r.x + 10 + k * 22, r.y + 5, 22, 22)
 }
@@ -3492,12 +3706,53 @@ fn shut_down() {
     }
 }
 
+/// How often the vmmouse queue is looked at without a PS/2 packet saying
+/// it has something, in timer ticks.
+const VM_CHECK_TICKS: u64 = 1;
+
+/// Hand everything queued in the vmmouse to the desktop. Moves in a row
+/// with the same buttons held collapse into the last one, so a burst of
+/// them draws one frame instead of one each. Returns how many events
+/// there were.
+fn read_vmmouse(desk: &mut Desktop) -> i32 {
+    let mut count = 0;
+    let mut last: Option<vmmouse::Event> = None;
+    while let Some(ev) = vmmouse::poll() {
+        count += 1;
+        if let Some(prev) = last.take() {
+            if prev.buttons != ev.buttons || prev.wheel != 0 {
+                desk.on_vmmouse(prev);
+            }
+        }
+        last = Some(ev);
+    }
+    if let Some(ev) = last {
+        desk.on_vmmouse(ev);
+    }
+    count
+}
+
 // ---- main loop ----------------------------------------------------------------
 
 /// Run the desktop forever.
 pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
+    // the resolution chosen in Settings before the restart
+    let fb = match crate::display::saved() {
+        Some((w, h)) if (w, h) != (fb.width, fb.height) && w <= MAX_W && h <= MAX_H => {
+            match crate::display::set_mode(&fb, w, h) {
+                Some(new) => {
+                    CONSOLE.lock().set_framebuffer(new);
+                    serial::write_str(&alloc::format!("screen: {}x{}\n", w, h));
+                    new
+                }
+                None => fb,
+            }
+        }
+        _ => fb,
+    };
     clear_screen(&fb);
     let mut desk = Desktop::new(fb, boot);
+    desk.settings.screen_modes = desk.screen_modes;
     // the boot animation starts once everything is ready to draw
     desk.phase = Phase::Boot(interrupts::ticks());
     // the shell now prints into the terminal window
@@ -3522,6 +3777,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
     // bring the network up now, so the taskbar can show it
     crate::net::init();
     let mut next_blink = 0;
+    // vmmouse events whose PS/2 packet has not come in yet
+    let mut vm_owed = 0;
+    let mut next_vm_check = 0;
     let mut last_second = u64::MAX;
     // look for an update once, after signing in with the network up
     let mut update_checked = false;
@@ -3534,13 +3792,23 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         }
         while let Some(byte) = MOUSE_BYTES.pop() {
             if let Some(packet) = mouse.feed(byte) {
+                if absolute {
+                    // the packet may say the vmmouse has news: read it
+                    // first, then drop the packet if it only said that
+                    vm_owed += read_vmmouse(&mut desk);
+                    if vm_owed > 0 && vmmouse::is_nudge(packet.dx, packet.dy, packet.left, packet.right, packet.wheel) {
+                        vm_owed = (vm_owed - packet.dx).max(0);
+                        continue;
+                    }
+                }
                 desk.on_ps2(packet);
             }
         }
-        if absolute {
-            while let Some(ev) = vmmouse::poll() {
-                desk.on_vmmouse(ev);
-            }
+        // the vmmouse is read when PS/2 packets come in; now and then
+        // also without one, in case a packet was lost
+        if absolute && interrupts::ticks() >= next_vm_check {
+            next_vm_check = interrupts::ticks() + VM_CHECK_TICKS;
+            vm_owed += read_vmmouse(&mut desk);
         }
         while let Some(request) = REQUESTS.pop() {
             let app = APPS[(request & !CLOSE) as usize % APPS.len()];
@@ -3567,6 +3835,10 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         }
         desk.layout = keyboard.layout();
         desk.poll_apps();
+        let screen = SCREEN_REQUEST.swap(0, Ordering::Relaxed);
+        if screen != 0 && matches!(desk.phase, Phase::Desktop) {
+            desk.change_screen((screen >> 16) as usize, (screen & 0xffff) as usize);
+        }
         if let Some(background) = personalize::take_changed() {
             desk.apply_look(background);
         }
@@ -3638,6 +3910,8 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
                 desk.damage(Search::field(desk.search_panel()));
             } else if let Some((i, _)) = &desk.desk_icons.renaming {
                 desk.damage_icon_rename(*i);
+            } else if desk.focused == Some(App::Explorer) && !desk.explorer.typing() {
+                // no caret: nothing to blink
             } else if let Some(
                 app @ (App::Terminal | App::Notepad | App::Explorer | App::Telegram | App::Vpn),
             ) = desk.focused
