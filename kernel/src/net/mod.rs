@@ -7,6 +7,7 @@
 
 pub mod e1000;
 pub mod realtek;
+pub mod tls;
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -587,43 +588,5 @@ impl TcpStream {
             Conn::Direct(s) => s.write_all(data),
             Conn::Vpn(t) => t.write_all(data),
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct IoError;
-
-impl core::fmt::Display for IoError {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.write_str("network error")
-    }
-}
-
-impl core::error::Error for IoError {}
-
-impl embedded_io::Error for IoError {
-    fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
-    }
-}
-
-impl embedded_io::ErrorType for TcpStream {
-    type Error = IoError;
-}
-
-impl embedded_io::Read for TcpStream {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        TcpStream::read(self, buf).map_err(|_| IoError)
-    }
-}
-
-impl embedded_io::Write for TcpStream {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, IoError> {
-        self.write_all(buf).map_err(|_| IoError)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        Ok(())
     }
 }

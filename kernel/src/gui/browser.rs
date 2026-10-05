@@ -88,7 +88,24 @@ enum Pressed {
     Go,
     /// Dragging the scroll bar thumb, grabbed this far from its top.
     Thumb(i32),
+    /// Dragging over the page to select text.
+    Select,
 }
+
+/// Text chosen on the page, held as points on the page (not on the
+/// screen) so it survives scrolling and the page laying out again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    anchor: (i32, i32),
+    focus: (i32, i32),
+    /// Grow both ends to whole words (a double-click).
+    words: bool,
+    /// All the text on the page (Ctrl+A).
+    all: bool,
+}
+
+/// A place in the page's text: a text item and a character in it.
+type TextPos = (usize, usize);
 
 /// Parts of the tab strip, for pressing and hovering.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,6 +162,9 @@ struct Tab {
     open_in_new_tab: Option<Nav>,
     /// Stop (or Escape) was pressed while loading.
     stop_requested: bool,
+    selection: Option<Selection>,
+    /// The last press on the page, for telling a double-click.
+    last_press: (u64, i32, i32),
 }
 
 /// What the page area of the window shows now, so drawing can skip the
@@ -157,6 +177,7 @@ struct Drawn {
     scroll: i32,
     focus: Focus,
     field: u64,
+    selection: u64,
 }
 
 pub struct Browser {
@@ -672,6 +693,7 @@ impl Browser {
             } else {
                 0
             },
+            selection: tab.selection_hash(),
         };
         let before = self.drawn.replace(Some(now));
         let view = Rect::new(0, 0, area.w, area.h);
@@ -778,6 +800,139 @@ impl Browser {
     }
 }
 
+// ---- text selection helpers ---------------------------------------------------
+
+fn is_text(item: &Item) -> bool {
+    matches!(item, Item::Text { text, .. } if !text.is_empty())
+}
+
+fn text_len(item: &Item) -> usize {
+    match item {
+        Item::Text { text, .. } => text.chars().count(),
+        _ => 0,
+    }
+}
+
+fn font_of(face: &layout::Face) -> webfont::Face {
+    webfont::Face {
+        bold: face.bold,
+        italic: face.italic,
+        mono: face.mono,
+    }
+}
+
+/// The top and bottom of the line a text item sits on.
+fn text_row(baseline: i32, size: f32) -> (i32, i32) {
+    let s = size as i32;
+    (baseline - s * 19 / 20 - 2, baseline + s * 3 / 10 + 2)
+}
+
+/// Where each character of a text item starts, and where the last ends,
+/// relative to the item's left edge.
+fn char_edges(item: &Item) -> Vec<i32> {
+    let Item::Text { text, face, size, .. } = item else {
+        return Vec::new();
+    };
+    let f = font_of(face);
+    let mut edges = Vec::with_capacity(text.len() + 1);
+    let mut pen = 0;
+    edges.push(0);
+    let mut buf = [0u8; 4];
+    for ch in text.chars() {
+        pen += webfont::width16(f, *size, ch.encode_utf8(&mut buf));
+        edges.push((pen + 8) / 16);
+    }
+    edges
+}
+
+/// The place in the page's text nearest to a point: the text on the line
+/// under it, or on the closest line, and the character edge nearest to it.
+fn text_pos(items: &[Item], px: i32, py: i32) -> Option<TextPos> {
+    let mut best: Option<(i32, i32, usize)> = None;
+    for (i, item) in items.iter().enumerate() {
+        let Item::Text { x, baseline, w, text, size, .. } = item else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let (top, bottom) = text_row(*baseline, *size);
+        let dy = if py < top {
+            top - py
+        } else if py >= bottom {
+            py - bottom + 1
+        } else {
+            0
+        };
+        let dx = if px < *x {
+            x - px
+        } else if px >= x + w {
+            px - (x + w) + 1
+        } else {
+            0
+        };
+        if best.is_none_or(|(by, bx, _)| (dy, dx) < (by, bx)) {
+            best = Some((dy, dx, i));
+        }
+    }
+    let (_, _, i) = best?;
+    let Item::Text { x, .. } = &items[i] else {
+        return None;
+    };
+    let edges = char_edges(&items[i]);
+    let rel = px - x;
+    // the edge nearest to the pointer
+    let mut c = 0;
+    while c + 1 < edges.len() && rel > (edges[c] + edges[c + 1]) / 2 {
+        c += 1;
+    }
+    Some((i, c))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '\''
+}
+
+fn word_start(item: &Item, at: usize) -> usize {
+    let Item::Text { text, .. } = item else {
+        return at;
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = at.min(chars.len());
+    while i > 0 && is_word_char(chars[i - 1]) {
+        i -= 1;
+    }
+    i
+}
+
+fn word_end(item: &Item, at: usize) -> usize {
+    let Item::Text { text, .. } = item else {
+        return at;
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = at.min(chars.len());
+    while i < chars.len() && is_word_char(chars[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// Paint the selection colour behind characters `from..to` of a text item.
+fn draw_chosen(c: &mut Canvas, item: &Item, from: usize, to: usize, dy: i32) {
+    let Item::Text { x, baseline, size, .. } = item else {
+        return;
+    };
+    let edges = char_edges(item);
+    let last = edges.len() - 1;
+    let (from, to) = (from.min(last), to.min(last));
+    if from >= to {
+        return;
+    }
+    let (top, bottom) = text_row(baseline + dy, *size);
+    let r = Rect::new(x + edges[from], top, edges[to] - edges[from], bottom - top);
+    c.fill_round_alpha(r, 0, theme::accent_base(), 110);
+}
+
 /// A turning arc, the loading sign.
 fn draw_spinner(c: &mut Canvas, cx: f32, cy: f32, frame: u32, color: Color) {
     let start = frame as f32 * 0.45;
@@ -820,6 +975,8 @@ impl Tab {
             hover: None,
             open_in_new_tab: None,
             stop_requested: false,
+            selection: None,
+            last_press: (0, 0, 0),
         };
         if let Some(nav) = nav {
             tab.navigate(nav);
@@ -965,6 +1122,9 @@ impl Tab {
         }
         let secs = (interrupts::ticks() - started) as f32 / interrupts::TIMER_HZ as f32;
         self.status = alloc::format!("Done in {}.{} s", secs as u32, (secs * 10.0) as u32 % 10);
+        if let Some(notice) = self.page.notice.take() {
+            self.status = notice;
+        }
         let mut line = crate::StackString::<64>::new();
         let _ = core::fmt::write(
             &mut line,
@@ -1098,6 +1258,7 @@ impl Tab {
         self.scroll = 0;
         self.hover = None;
         self.select_all = false;
+        self.selection = None;
     }
 
     fn back(&mut self) {
@@ -1126,6 +1287,106 @@ impl Tab {
         let old = self.scroll;
         self.scroll = (self.scroll + dy).clamp(0, self.max_scroll());
         self.scroll != old
+    }
+
+    // ---- selecting text on the page ---------------------------------------
+
+    /// The mouse went down on the page at `(px, py)` (page coordinates).
+    fn start_select(&mut self, px: i32, py: i32) {
+        let now = interrupts::ticks();
+        let (at, lx, ly) = self.last_press;
+        let double =
+            now - at < interrupts::TIMER_HZ / 2 && (px - lx).abs() <= 4 && (py - ly).abs() <= 4;
+        self.last_press = if double { (0, 0, 0) } else { (now, px, py) };
+        self.selection = Some(Selection {
+            anchor: (px, py),
+            focus: (px, py),
+            words: double,
+            all: false,
+        });
+        self.pressed = Pressed::Select;
+    }
+
+    /// The mouse moved with the button held after pressing on the page.
+    fn drag_select(&mut self, x: i32, y: i32) -> bool {
+        let area = content_rect(self.bare);
+        // dragging past the top or bottom scrolls the page along
+        if y < area.y {
+            self.scroll_by(-(area.y - y).min(60));
+        } else if y >= area.bottom() {
+            self.scroll_by((y - area.bottom() + 1).min(60));
+        }
+        let x = x.clamp(area.x, area.right() - 1);
+        let y = y.clamp(area.y, area.bottom() - 1);
+        let point = (x - area.x, y - area.y + self.scroll);
+        let before = self.selection_hash();
+        if let Some(sel) = &mut self.selection {
+            sel.focus = point;
+        }
+        self.selection_hash() != before
+    }
+
+    /// The chosen text as the first and last place, in page order, or
+    /// None when nothing is chosen.
+    fn selection_range(&self) -> Option<(TextPos, TextPos)> {
+        let sel = self.selection?;
+        let items = &self.page.layout.items;
+        if sel.all {
+            let first = items.iter().position(is_text)?;
+            let last = items.iter().rposition(is_text)?;
+            return Some(((first, 0), (last, text_len(&items[last]))));
+        }
+        let a = text_pos(items, sel.anchor.0, sel.anchor.1)?;
+        let b = text_pos(items, sel.focus.0, sel.focus.1)?;
+        let (mut a, mut b) = if a <= b { (a, b) } else { (b, a) };
+        if sel.words {
+            a.1 = word_start(&items[a.0], a.1);
+            b.1 = word_end(&items[b.0], b.1);
+        }
+        (a != b).then_some((a, b))
+    }
+
+    /// Changes whenever a different piece of text is chosen.
+    fn selection_hash(&self) -> u64 {
+        match self.selection_range() {
+            Some((a, b)) => {
+                let v = [a.0 as u64, a.1 as u64, b.0 as u64, b.1 as u64];
+                v.iter().fold(0xcbf2_9ce4_8422_2325, |h, &x| {
+                    (h ^ x).wrapping_mul(0x0100_0000_01b3)
+                })
+            }
+            None => 0,
+        }
+    }
+
+    /// The chosen text, with line breaks where the lines break.
+    fn selected_text(&self) -> String {
+        let Some((a, b)) = self.selection_range() else {
+            return String::new();
+        };
+        let mut out = String::new();
+        let mut prev: Option<(i32, i32)> = None;
+        for (i, item) in self.page.layout.items.iter().enumerate().take(b.0 + 1).skip(a.0) {
+            let Item::Text { x, baseline, w, text, .. } = item else {
+                continue;
+            };
+            let from = if i == a.0 { a.1 } else { 0 };
+            let to = if i == b.0 { b.1 } else { usize::MAX };
+            let part: String = text.chars().skip(from).take(to.saturating_sub(from)).collect();
+            if let Some((end, line)) = prev {
+                if *baseline != line {
+                    while out.ends_with(' ') {
+                        out.pop();
+                    }
+                    out.push('\n');
+                } else if *x > end + 1 && !out.ends_with(' ') && !part.starts_with(' ') {
+                    out.push(' ');
+                }
+            }
+            out.push_str(&part.replace('\u{a0}', " "));
+            prev = Some((x + w, *baseline));
+        }
+        out.trim().to_string()
     }
 
     // ---- editing the address bar and form fields --------------------------
@@ -1282,6 +1543,33 @@ impl Tab {
                 return true;
             }
         }
+        match key {
+            Key::Ctrl('c') => {
+                let text = self.selected_text();
+                if !text.is_empty() {
+                    super::widgets::copy(&text);
+                    crate::serial::write_str(&alloc::format!(
+                        "\nbrowser: copied {} characters\n",
+                        text.chars().count()
+                    ));
+                }
+                return true;
+            }
+            Key::Ctrl('a') => {
+                self.selection = Some(Selection {
+                    anchor: (0, 0),
+                    focus: (0, 0),
+                    words: false,
+                    all: true,
+                });
+                return true;
+            }
+            Key::Escape if self.selection.is_some() && !self.loading() => {
+                self.selection = None;
+                return true;
+            }
+            _ => {}
+        }
         let page = content_rect(self.bare).h - 40;
         match key {
             Key::Up => self.scroll_by(-40),
@@ -1329,6 +1617,9 @@ impl Tab {
             MouseKind::Down { right: false } => self.press(ev.x, ev.y),
             MouseKind::Down { right: true } => false,
             MouseKind::Move => {
+                if self.pressed == Pressed::Select {
+                    return self.drag_select(ev.x, ev.y);
+                }
                 if let Pressed::Thumb(grab) = self.pressed {
                     let track = scrollbar_rect(self.bare);
                     let (_, thumb_h) = self.thumb();
@@ -1442,6 +1733,7 @@ impl Tab {
             let area = content_rect(self.bare);
             let (px, py) = (x - area.x, y - area.y + self.scroll);
             self.focus = Focus::Page;
+            self.start_select(px, py);
             let Some(node) = self.page.element_at(px, py) else {
                 return true;
             };
@@ -1469,6 +1761,8 @@ impl Tab {
             self.page.dispatch(node, "mousedown", px, py);
             self.page.dispatch(node, "mouseup", px, py);
             if is_field {
+                self.selection = None;
+                self.pressed = Pressed::None;
                 self.focus = Focus::Field(node);
                 self.field_text = self.page.field_value(node);
                 self.cursor = self.field_text.chars().count();
@@ -1622,7 +1916,8 @@ impl Tab {
         let dy = -self.scroll;
         let view = Rect::new(0, 0, area.w, area.h).intersect(&band);
         let mut clips: Vec<Rect> = alloc::vec![view];
-        for item in &self.page.layout.items {
+        let chosen = self.selection_range();
+        for (i, item) in self.page.layout.items.iter().enumerate() {
             let clip = *clips.last().unwrap();
             let r = |r: &layout::Rect| Rect::new(r.x, r.y + dy, r.w, r.h);
             match item {
@@ -1667,6 +1962,13 @@ impl Tab {
             }
             let mut sub = page.sub(Rect::new(0, 0, area.w, area.h));
             sub.clip_to(clip);
+            if let (Some((a, b)), Item::Text { .. }) = (chosen, item) {
+                if a.0 <= i && i <= b.0 {
+                    let from = if i == a.0 { a.1 } else { 0 };
+                    let to = if i == b.0 { b.1 } else { usize::MAX };
+                    draw_chosen(&mut sub, item, from, to, dy);
+                }
+            }
             self.draw_item(&mut sub, item, dy);
         }
     }

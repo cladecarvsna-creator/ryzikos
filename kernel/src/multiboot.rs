@@ -11,6 +11,7 @@ const TAG_CMDLINE: u32 = 1;
 const TAG_MODULE: u32 = 3;
 const TAG_BOOTLOADER_NAME: u32 = 2;
 const TAG_BASIC_MEMINFO: u32 = 4;
+const TAG_MEMORY_MAP: u32 = 6;
 const TAG_FRAMEBUFFER: u32 = 8;
 
 const FRAMEBUFFER_TYPE_RGB: u8 = 1;
@@ -20,7 +21,14 @@ pub struct BootInfo {
     pub bootloader: &'static str,
     /// Memory above 1 MiB, in KiB, as reported by the BIOS.
     pub upper_memory_kib: u32,
+    /// RAM the BIOS says is free to use, as (start, length).
+    pub ram: [(u64, u64); MAX_RAM],
+    /// Where the information structure itself lies, which must be kept.
+    pub info: (usize, usize),
 }
+
+/// Free RAM areas kept from the memory map.
+pub const MAX_RAM: usize = 8;
 
 /// Files GRUB loaded next to the kernel (`module2` in grub.cfg), by
 /// name. The live CD brings the files the installer writes this way,
@@ -62,8 +70,11 @@ pub unsafe fn parse(info: usize) -> BootInfo {
         framebuffer: None,
         bootloader: "unknown",
         upper_memory_kib: 0,
+        ram: [(0, 0); MAX_RAM],
+        info: (0, 0),
     };
     let total_size = read::<u32>(info) as usize;
+    boot.info = (info, total_size);
     let mut tag = info + 8;
     while tag + 8 <= info + total_size {
         let kind = read::<u32>(tag);
@@ -92,6 +103,21 @@ pub unsafe fn parse(info: usize) -> BootInfo {
                 }
             }
             TAG_BASIC_MEMINFO => boot.upper_memory_kib = read::<u32>(tag + 12),
+            TAG_MEMORY_MAP => {
+                let entry = read::<u32>(tag + 8) as usize;
+                let mut at = tag + 16;
+                let mut n = 0;
+                while entry >= 24 && at + entry <= tag + size && n < MAX_RAM {
+                    let (base, len, kind) =
+                        (read::<u64>(at), read::<u64>(at + 8), read::<u32>(at + 16));
+                    // type 1: available RAM
+                    if kind == 1 && len > 0 {
+                        boot.ram[n] = (base, len);
+                        n += 1;
+                    }
+                    at += entry;
+                }
+            }
             TAG_FRAMEBUFFER if read::<u8>(tag + 29) == FRAMEBUFFER_TYPE_RGB => {
                 let bpp = read::<u8>(tag + 28);
                 if matches!(bpp, 16 | 24 | 32) {
