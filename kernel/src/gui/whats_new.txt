@@ -1,6 +1,9 @@
 Moving the mouse and windows is smoother now: RyzikOS redraws only the part of the screen that changed, and window shadows and edges draw about three times faster.
 In a virtual machine the pointer no longer jumps a pixel or two after every move.
 If fullscreen looks stretched, open Settings > System > Resolution and pick a size with the shape of your monitor, such as 1920 x 1200 for a 16:10 screen. The Terminal command "screen 1920x1200" does the same, and RyzikOS keeps your choice.
+Screenshots: Ctrl+Alt+S and a Screenshot button in quick settings, for when Windows keeps PrintScreen to itself.
+Shared clipboard with Windows: run RyzikOS with run-windows.bat and ryzikos-clipboard.ps1, and text copied on either side pastes on the other.
+Date and time in Settings > Time & language: set automatically from the internet, pick your time zone, or set it by hand.
 Telegram can now reply to, edit, delete, pin and forward messages. Right-click a message to see every action, or press Up in an empty box to edit your last message.
 Replies show the quoted message above the text, and a click on the quote jumps to it. Pinned messages show in a bar at the top of the chat.
 Pick "Select" to choose several messages, then forward, copy or delete them together.

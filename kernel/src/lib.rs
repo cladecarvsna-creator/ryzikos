@@ -6,6 +6,7 @@
 extern crate alloc;
 
 mod archive;
+mod clock;
 mod console;
 mod crash;
 mod display;
@@ -15,6 +16,7 @@ mod framebuffer;
 mod fs;
 mod gui;
 mod heap;
+mod hostclip;
 mod install;
 mod interrupts;
 mod js;
@@ -67,6 +69,8 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     fs::init();
     users::load();
     update::clean_up();
+    clock::init();
+    hostclip::init();
     crash::init();
     let sound = sound::init();
 

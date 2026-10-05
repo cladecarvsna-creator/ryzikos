@@ -16,7 +16,7 @@ use super::widgets::{self, Item};
 use super::{MouseEvent, MouseKind};
 use crate::fs;
 use crate::keyboard::{self, Key};
-use crate::{interrupts, rtc, users};
+use crate::{interrupts, users};
 
 pub const CLIENT_W: i32 = 1000;
 pub const CLIENT_H: i32 = 640;
@@ -634,8 +634,7 @@ impl Notepad {
                 };
             }
             Cmd::TimeDate => {
-                let (h, m, _) = rtc::time();
-                let (y, mo, d) = rtc::date();
+                let ((y, mo, d), (h, m, _)) = crate::clock::now();
                 let mut s = String::new();
                 let _ = write!(s, "{:02}:{:02} {:02}.{:02}.{}", h, m, d, mo, y);
                 self.edit(EditKind::Other);

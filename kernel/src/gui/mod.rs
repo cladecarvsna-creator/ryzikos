@@ -85,7 +85,7 @@ use crate::interrupts::{self, KEYBOARD_BYTES, MOUSE_BYTES};
 use crate::keyboard::{self, Key, Keyboard, Layout};
 use crate::multiboot::BootInfo;
 use crate::sync::{ByteQueue, IrqMutex, StaticBuffer};
-use crate::{console::CONSOLE, fs, port, ps2, rtc, serial, users, vmmouse, StackString};
+use crate::{console::CONSOLE, fs, port, ps2, serial, users, vmmouse, StackString};
 
 const MAX_W: usize = 1920;
 const MAX_H: usize = 1200;
@@ -738,6 +738,8 @@ pub struct Desktop<'a> {
     popup: Option<Popup>,
     /// Picking an area for a screenshot.
     snip: Option<Box<snip::Snip>>,
+    /// When to start a screenshot asked for from quick settings.
+    snip_at: Option<u64>,
     /// "Screenshot copied" for a few seconds.
     toast: Option<snip::Toast>,
     search: Box<Search>,
@@ -882,6 +884,7 @@ impl<'a> Desktop<'a> {
             peeked: Vec::new(),
             popup: None,
             snip: None,
+            snip_at: None,
             toast: None,
             search: Box::new(Search::new()),
             confirm_empty: false,
@@ -1051,6 +1054,10 @@ impl<'a> Desktop<'a> {
             self.damage(self.screen());
         }
         self.tick_tip();
+        if self.snip_at.is_some_and(|t| interrupts::ticks() >= t) {
+            self.snip_at = None;
+            self.start_snip();
+        }
         if self.toast.as_ref().is_some_and(|t| t.expired()) {
             if let Some(t) = self.toast.take() {
                 self.damage(t.rect(self.width, self.height - TASKBAR_H).inset(-16));
@@ -1867,7 +1874,10 @@ impl<'a> Desktop<'a> {
             }
             return;
         }
-        if let Key::PrintScreen = key {
+        // Ctrl+Alt+S too: on Windows, PrintScreen and Win+Shift+S open
+        // Windows' own screenshot tool and never reach RyzikOS in QEMU
+        let ctrl_alt_s = matches!(key, Key::Ctrl('s')) && keyboard::alt_held();
+        if matches!(key, Key::PrintScreen) || ctrl_alt_s {
             self.start_snip();
             return;
         }
@@ -2645,6 +2655,11 @@ impl<'a> Desktop<'a> {
     fn quick_click(&mut self, r: Rect, x: i32, y: i32) {
         match self.tray.target_at(r, x, y) {
             Some(tray::Target::LayoutTile) => self.toggle_layout = true,
+            Some(tray::Target::ShotTile) => {
+                // once the panel has slid away, so it isn't in the picture
+                self.close_panel();
+                self.snip_at = Some(interrupts::ticks() + interrupts::TIMER_HZ / 3);
+            }
             Some(tray::Target::VpnTile) => {
                 self.close_panel();
                 self.open(App::Vpn);
@@ -2913,6 +2928,7 @@ impl<'a> Desktop<'a> {
             clock: self.clock.as_str(),
             date: self.date.as_str(),
             uptime_minutes: interrupts::ticks() / interrupts::TIMER_HZ / 60,
+            caret: self.cursor_on,
         }
     }
 
@@ -3804,6 +3820,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
                 desk.on_ps2(packet);
             }
         }
+        if let Some(text) = crate::hostclip::poll() {
+            widgets::copy_from_host(&text);
+        }
         // the vmmouse is read when PS/2 packets come in; now and then
         // also without one, in case a packet was lost
         if absolute && interrupts::ticks() >= next_vm_check {
@@ -3861,6 +3880,9 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
         if !update_checked && matches!(desk.phase, Phase::Desktop) && crate::net::configured() {
             update_checked = true;
             desk.settings.updater.start();
+        }
+        if matches!(desk.phase, Phase::Desktop) && crate::net::configured() {
+            desk.settings.check_clock();
         }
         if desk.settings.busy() && desk.settings.tick() {
             desk.app_changed(App::Settings);
@@ -3921,13 +3943,14 @@ pub fn run(fb: Framebuffer, boot: &BootInfo) -> ! {
                 desk.damage_client(app);
             } else if desk.focused == Some(App::Archiver) && desk.archiver.typing() {
                 desk.damage_client(App::Archiver);
+            } else if desk.focused == Some(App::Settings) && desk.settings.typing() {
+                desk.damage_client(App::Settings);
             }
         }
         let second = now / interrupts::TIMER_HZ;
         if second != last_second {
             last_second = second;
-            let (h, m, _) = rtc::time();
-            let (year, month, day) = rtc::date();
+            let ((year, month, day), (h, m, _)) = crate::clock::now();
             let mut clock = StackString::<16>::new();
             let _ = write!(clock, "{:02}:{:02}", h, m);
             let changed = clock.as_str() != desk.clock.as_str();

@@ -227,8 +227,7 @@ fn random() -> u32 {
 
 /// FAT date and time now.
 fn now() -> (u16, u16) {
-    let (year, month, day) = crate::rtc::date();
-    let (h, m, s) = crate::rtc::time();
+    let ((year, month, day), (h, m, s)) = crate::clock::now();
     let date = (year.saturating_sub(1980) << 9) | (month as u16) << 5 | day as u16;
     let time = (h as u16) << 11 | (m as u16) << 5 | (s as u16 / 2);
     (date, time)
