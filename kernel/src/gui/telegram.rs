@@ -11,9 +11,17 @@
 //! name at the top opens the chat's profile with its @name to copy, and
 //! the search box also looks on Telegram for people and channels.
 //!
+//! A right-click on a message answers, edits, pins, forwards, selects
+//! or deletes it. Answers show what they quote (a click goes there), the
+//! newest pinned message sits over the chat, bots' buttons sit under
+//! their messages, and the top says who is online or typing. Selected
+//! messages are forwarded, copied or deleted together, and the paper
+//! clip sends several files at once.
+//!
 //! The client itself (crate::tg) runs in a fiber; this file only draws
 //! what it shares and passes on what the user does.
 
+use alloc::collections::BTreeSet;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -28,7 +36,9 @@ use super::widgets::{self, FieldEvent, TextField};
 use super::{theme, App, MouseEvent, MouseKind};
 use crate::fiber::Fiber;
 use crate::keyboard::Key;
-use crate::tg::{self, Chat, ChatKind, Cmd, History, Message, Peer, Preview, Shared, Stage};
+use crate::tg::{
+    self, ButtonAction, Chat, ChatKind, Cmd, History, Message, Peer, Preview, Shared, Stage, Status,
+};
 use crate::{fs, users};
 
 pub const CLIENT_W: i32 = 1100;
@@ -68,6 +78,26 @@ const SECTION_H: i32 = 30;
 const SEARCH_WAIT_MS: i64 = 600;
 /// How long a note over the chat stays.
 const NOTE_MS: i64 = 4000;
+/// The pinned message over the chat.
+const PIN_H: i32 = 46;
+/// What the message being written answers or edits, over the box.
+const COMPOSE_H: i32 = 46;
+/// What a message quotes, in its bubble.
+const QUOTE_H: i32 = 2 * LINE_H + 8;
+/// A bot's inline button under its message.
+const BTN_H: i32 = 34;
+/// A row of a bot's keyboard over the box.
+const KB_ROW: i32 = 40;
+/// Tell the chat we are typing at most this often.
+const TYPING_EVERY_MS: i64 = 4000;
+/// How long a message we jumped to stays lit.
+const FLASH_MS: i64 = 1500;
+/// Selected messages move right to make room for their tick.
+const SELECT_W: i32 = 34;
+/// The Forward to... dialog.
+const FWD_W: i32 = 400;
+const FWD_H: i32 = 520;
+const FWD_ROW: i32 = 52;
 
 /// Telegram's colours for avatars and names in groups.
 const PALETTE: [Color; 7] = [
@@ -352,6 +382,58 @@ enum Hit {
     EmojiTab(u8),
     /// A panel (the emoji picker, the profile) where clicks do nothing.
     Blank,
+    /// What a message quotes: go to the message it answers.
+    Quote(i64),
+    /// An inline button: message, row, column.
+    Key(i64, usize, usize),
+    /// A button of a bot's keyboard: the text it sends.
+    KeyText(String),
+    /// The pinned message over the chat.
+    PinBar,
+    /// Stop answering or editing.
+    CloseCompose,
+    Selection(SelAct),
+    /// Forward to this chat.
+    ForwardTo(Peer),
+    /// Delete (true) or cancel in the dialog.
+    Confirm(bool),
+    /// The "also delete for" box.
+    Revoke,
+}
+
+/// What can be done with the selected messages.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SelAct {
+    Forward,
+    Copy,
+    Delete,
+    Cancel,
+}
+
+/// The message being written answers or changes a message.
+#[derive(Clone, Copy, PartialEq)]
+enum Compose {
+    None,
+    Reply(i64),
+    Edit(i64),
+}
+
+/// "Delete messages?"
+struct Confirm {
+    ids: Vec<i64>,
+    /// The box to also delete them for the others, and whether it is
+    /// ticked; None where there is no such choice.
+    revoke: Option<bool>,
+    /// The words beside that box.
+    revoke_text: String,
+}
+
+/// "Forward to...": the messages, and the chat list to pick from.
+struct ForwardTo {
+    from: Peer,
+    ids: Vec<i64>,
+    search: TextField,
+    top: usize,
 }
 
 /// What the right-click menu of a message can do.
@@ -360,6 +442,12 @@ enum Action {
     Copy(String),
     Open(String),
     Save(i64),
+    Reply(i64),
+    Edit(i64),
+    Pin(i64, bool),
+    Forward(i64),
+    Select(i64),
+    Delete(i64),
 }
 
 struct Context {
@@ -425,8 +513,15 @@ enum LaidKind {
 struct Bubble {
     index: usize,
     w: i32,
+    /// The height of the bubble itself, without the buttons under it.
+    body_h: i32,
     /// The name above the text, in groups.
     name: Option<String>,
+    /// "Forwarded from ...".
+    fwd: Option<String>,
+    /// What it answers: who wrote that, its text, and their id for the
+    /// colour.
+    quote: Option<(String, String, i64)>,
     /// A picture on top (a photo, or the first frame of a video): its
     /// size as drawn.
     pic: Option<(i32, i32)>,
@@ -490,6 +585,23 @@ pub struct Telegram {
     /// What was last looked for on Telegram, and when the box changed.
     searched: String,
     search_changed: i64,
+    compose: Compose,
+    /// Messages picked for Forward, Copy or Delete; picking goes on
+    /// while there are some.
+    selection: Vec<i64>,
+    confirm: Option<Confirm>,
+    forward: Option<ForwardTo>,
+    /// Which pinned message the bar shows, counting back from the newest.
+    pin_index: usize,
+    /// A message to scroll to, and how many pages were loaded looking
+    /// for it.
+    jump: Option<(i64, u32)>,
+    /// A message lit up after a jump, until when.
+    flash: Option<(i64, i64)>,
+    /// When we last said we are typing.
+    typing_sent: i64,
+    /// Quoted messages asked for.
+    quotes_asked: BTreeSet<(Peer, i64)>,
 }
 
 impl Telegram {
@@ -530,6 +642,15 @@ impl Telegram {
             picker_scroll: 0,
             searched: String::new(),
             search_changed: 0,
+            compose: Compose::None,
+            selection: Vec::new(),
+            confirm: None,
+            forward: None,
+            pin_index: 0,
+            jump: None,
+            flash: None,
+            typing_sent: 0,
+            quotes_asked: BTreeSet::new(),
         }
     }
 
@@ -563,14 +684,18 @@ impl Telegram {
             }
         }
         let mut redraw = false;
-        let (goto, to_open, notice) = {
+        let (goto, to_open, notice, follow) = {
             let mut s = self.shared.borrow_mut();
             (
                 s.goto.take(),
                 core::mem::take(&mut s.to_open),
                 s.notice.take(),
+                s.follow.take(),
             )
         };
+        if let Some(url) = follow {
+            self.follow(&url);
+        }
         if let Some(peer) = goto {
             self.search.set("");
             self.list_top = 0;
@@ -587,6 +712,10 @@ impl Telegram {
         let now = tg::mtproto::now_ms();
         if self.note.as_ref().is_some_and(|n| now >= n.1) {
             self.note = None;
+            redraw = true;
+        }
+        if self.flash.is_some_and(|f| now >= f.1) {
+            self.flash = None;
             redraw = true;
         }
         // look on Telegram once the search box is still
@@ -672,13 +801,74 @@ impl Telegram {
         widgets::menu_rect(10, 50, &Self::menu_items())
     }
 
-    fn chat_area() -> Rect {
-        Rect::new(
-            LIST_W + 1,
-            TOP_H,
-            cw() - LIST_W - 1,
-            ch() - TOP_H - INPUT_H,
-        )
+    /// Where the messages are: under the header and the pinned message,
+    /// over the box to write in and what sits on it.
+    fn chat_area(&self) -> Rect {
+        let top = TOP_H + self.pin_h();
+        let bottom = ch() - INPUT_H - self.compose_h() - self.keyboard_h();
+        let mut w = cw() - LIST_W - 1;
+        if self.profile {
+            w -= PROFILE_W;
+        }
+        Rect::new(LIST_W + 1, top, w, bottom - top)
+    }
+
+    /// The width of the open chat, without the profile.
+    fn chat_w(&self) -> i32 {
+        let mut w = cw() - LIST_W - 1;
+        if self.profile {
+            w -= PROFILE_W;
+        }
+        w
+    }
+
+    fn pin_h(&self) -> i32 {
+        let Some(peer) = self.open else {
+            return 0;
+        };
+        let has = self
+            .shared
+            .borrow()
+            .pinned
+            .get(&peer)
+            .is_some_and(|v| !v.is_empty());
+        if has {
+            PIN_H
+        } else {
+            0
+        }
+    }
+
+    fn compose_h(&self) -> i32 {
+        if self.compose == Compose::None || self.outside() {
+            0
+        } else {
+            COMPOSE_H
+        }
+    }
+
+    /// The keyboard of the newest bot message that has one.
+    fn keyboard(&self) -> Vec<Vec<String>> {
+        let Some(peer) = self.open else {
+            return Vec::new();
+        };
+        let s = self.shared.borrow();
+        s.history
+            .get(&peer)
+            .and_then(|h| h.messages.iter().rev().find_map(|m| m.keyboard.clone()))
+            .unwrap_or_default()
+    }
+
+    fn keyboard_h(&self) -> i32 {
+        if self.outside() {
+            return 0;
+        }
+        let rows = self.keyboard().len().min(4) as i32;
+        if rows == 0 {
+            0
+        } else {
+            rows * KB_ROW + 8
+        }
     }
 
     fn input_rect() -> Rect {
@@ -699,17 +889,48 @@ impl Telegram {
     }
 
     fn join_rect(&self) -> Rect {
-        let mut w = cw() - LIST_W - 1;
-        if self.profile {
-            w -= PROFILE_W;
-        }
+        let w = self.chat_w();
         Rect::new(LIST_W + 1 + w / 2 - 110, ch() - INPUT_H + 9, 220, 38)
     }
 
-    fn picker_rect() -> Rect {
+    fn confirm_rect(&self) -> Rect {
+        let w = 400;
+        let h = if self.confirm.as_ref().is_some_and(|c| c.revoke.is_some()) {
+            196
+        } else {
+            156
+        };
+        Rect::new(LIST_W + 1 + (self.chat_w() - w) / 2, (ch() - h) / 2, w, h)
+    }
+
+    fn forward_rect() -> Rect {
+        Rect::new((cw() - FWD_W) / 2, (ch() - FWD_H) / 2, FWD_W, FWD_H)
+    }
+
+    /// The chats to forward to, filtered by the dialog's search box.
+    fn forward_chats(&self) -> Vec<Chat> {
+        let Some(f) = &self.forward else {
+            return Vec::new();
+        };
+        let q = f.search.string().trim().to_lowercase();
+        self.shared
+            .borrow()
+            .chats
+            .iter()
+            .filter(|c| !c.left)
+            .filter(|c| {
+                q.is_empty()
+                    || c.title.to_lowercase().contains(&q)
+                    || c.username.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn picker_rect(&self) -> Rect {
         let w = EMOJI_COLS * EMOJI_CELL + 16;
         let h = 7 * EMOJI_CELL + EMOJI_TABS_H + 16;
-        Rect::new(cw() - w - 8, ch() - INPUT_H - h - 6, w, h)
+        Rect::new(cw() - w - 8, ch() - INPUT_H - h - 6 - self.compose_h(), w, h)
     }
 
     fn profile_rect() -> Rect {
@@ -865,6 +1086,74 @@ impl Telegram {
             self.context = None;
             return true;
         }
+        if self.confirm.is_some() {
+            match key {
+                Key::Escape => self.confirm = None,
+                Key::Enter => self.click_hit(Hit::Confirm(true)),
+                _ => return false,
+            }
+            return true;
+        }
+        if let Some(f) = &mut self.forward {
+            match key {
+                Key::Escape => self.forward = None,
+                Key::Enter => {
+                    if let Some(c) = self.forward_chats().first() {
+                        let peer = c.peer;
+                        self.click_hit(Hit::ForwardTo(peer));
+                    }
+                }
+                _ => {
+                    let before = f.search.text.clone();
+                    let event = f.search.on_key(key);
+                    if f.search.text != before {
+                        f.top = 0;
+                    }
+                    return event != FieldEvent::None;
+                }
+            }
+            return true;
+        }
+        if !self.selection.is_empty() {
+            match key {
+                Key::Escape => self.selection.clear(),
+                Key::Delete => self.click_hit(Hit::Selection(SelAct::Delete)),
+                Key::Ctrl('c') => self.click_hit(Hit::Selection(SelAct::Copy)),
+                _ => return false,
+            }
+            return true;
+        }
+        match key {
+            Key::Escape if self.compose != Compose::None => {
+                if matches!(self.compose, Compose::Edit(_)) {
+                    self.input.set("");
+                }
+                self.compose = Compose::None;
+                return true;
+            }
+            // like Telegram: Up in an empty box edits our last message
+            Key::Up
+                if self.focus == Focus::Input
+                    && self.input.text.is_empty()
+                    && self.compose == Compose::None =>
+            {
+                let last = self.open.and_then(|peer| {
+                    let s = self.shared.borrow();
+                    s.history.get(&peer).and_then(|h| {
+                        h.messages
+                            .iter()
+                            .rev()
+                            .find(|m| m.out && m.id != 0 && !m.service && m.fwd.is_none())
+                            .map(|m| m.id)
+                    })
+                });
+                if let Some(id) = last {
+                    self.start_edit(id);
+                    return true;
+                }
+            }
+            _ => {}
+        }
         match key {
             Key::Escape if self.picker => {
                 self.picker = false;
@@ -915,13 +1204,54 @@ impl Telegram {
             self.paste_image();
             return true;
         }
-        match self.input.on_key(key) {
+        let before = self.input.text.len();
+        let event = self.input.on_key(key);
+        match event {
             FieldEvent::Enter => {
                 self.send();
                 true
             }
             FieldEvent::None => false,
-            _ => true,
+            _ => {
+                // others see "typing..." while we write
+                let now = tg::mtproto::now_ms();
+                let wrote = self.input.text.len() > before;
+                if wrote
+                    && !matches!(self.compose, Compose::Edit(_))
+                    && now - self.typing_sent > TYPING_EVERY_MS
+                {
+                    if let Some(peer) = self.open {
+                        self.typing_sent = now;
+                        self.command(Cmd::Typing(peer));
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Put a message of ours in the box to change it.
+    fn start_edit(&mut self, id: i64) {
+        let Some(peer) = self.open else {
+            return;
+        };
+        let text = self
+            .shared
+            .borrow()
+            .find(peer, id)
+            .map(|m| m.text.clone())
+            .unwrap_or_default();
+        self.compose = Compose::Edit(id);
+        self.input.set(&text);
+        self.focus = Focus::Input;
+        self.picker = false;
+    }
+
+    /// What the message being written answers, for what is sent next.
+    fn reply_to(&self) -> i64 {
+        match self.compose {
+            Compose::Reply(id) => id,
+            _ => 0,
         }
     }
 
@@ -951,9 +1281,27 @@ impl Telegram {
         if text.trim().is_empty() {
             return;
         }
+        let text = String::from(text.trim());
         self.input.set("");
-        self.scroll = 0;
-        self.command(Cmd::Send(peer, String::from(text.trim())));
+        self.typing_sent = 0;
+        match self.compose {
+            Compose::Edit(id) => {
+                let same = self
+                    .shared
+                    .borrow()
+                    .find(peer, id)
+                    .is_some_and(|m| m.text == text);
+                if !same {
+                    self.command(Cmd::Edit(peer, id, text));
+                }
+            }
+            _ => {
+                self.scroll = 0;
+                let reply_to = self.reply_to();
+                self.command(Cmd::Send(peer, text, reply_to));
+            }
+        }
+        self.compose = Compose::None;
     }
 
     fn dialog_event(&mut self, event: filedialog::Event) -> bool {
@@ -969,6 +1317,13 @@ impl Telegram {
                 self.send_file(path);
                 true
             }
+            filedialog::Event::ChosenMany(paths) => {
+                self.dialog = None;
+                for path in paths {
+                    self.send_file(path);
+                }
+                true
+            }
         }
     }
 
@@ -978,14 +1333,19 @@ impl Telegram {
         };
         self.scroll = 0;
         self.note = None;
-        self.command(Cmd::SendFile(peer, path));
+        // the first file answers what we were answering
+        let reply_to = self.reply_to();
+        if reply_to != 0 {
+            self.compose = Compose::None;
+        }
+        self.command(Cmd::SendFile(peer, path, reply_to));
     }
 
-    /// Choose a file to send in the open chat.
+    /// Choose files to send in the open chat.
     fn attach(&mut self) {
         let user = users::current_name().unwrap_or_default();
         let dir = fs::home(user.as_str());
-        self.dialog = Some(FileDialog::new(Mode::Open, &dir, ""));
+        self.dialog = Some(FileDialog::new(Mode::OpenMany, &dir, ""));
     }
 
     /// Ctrl+V with a picture on the clipboard: send it as a photo.
@@ -1026,6 +1386,12 @@ impl Telegram {
         self.newest = 0;
         self.focus = Focus::Input;
         self.context = None;
+        self.compose = Compose::None;
+        self.selection.clear();
+        self.confirm = None;
+        self.pin_index = 0;
+        self.jump = None;
+        self.flash = None;
         // pictures of other chats make room
         self.shared.borrow_mut().previews.retain(|k, _| k.0 == peer);
         self.command(Cmd::Open(peer));
@@ -1136,7 +1502,165 @@ impl Telegram {
                 self.picker_tab = t;
                 self.picker_scroll = 0;
             }
+            Hit::Quote(id) => self.go_to(id),
+            Hit::Key(id, row, col) => self.press_key(id, row, col),
+            Hit::KeyText(text) => {
+                if let Some(peer) = self.open {
+                    self.scroll = 0;
+                    self.command(Cmd::Send(peer, text, 0));
+                }
+            }
+            Hit::PinBar => {
+                let Some(peer) = self.open else {
+                    return;
+                };
+                let ids: Vec<i64> = self
+                    .shared
+                    .borrow()
+                    .pinned
+                    .get(&peer)
+                    .map(|v| v.iter().map(|m| m.id).collect())
+                    .unwrap_or_default();
+                if !ids.is_empty() {
+                    // like Telegram: each click goes one pinned message back
+                    let id = ids[self.pin_index % ids.len()];
+                    self.pin_index = (self.pin_index + 1) % ids.len();
+                    self.go_to(id);
+                }
+            }
+            Hit::CloseCompose => {
+                if matches!(self.compose, Compose::Edit(_)) {
+                    self.input.set("");
+                }
+                self.compose = Compose::None;
+            }
+            Hit::Selection(act) => self.selection_act(act),
+            Hit::ForwardTo(to) => {
+                if let Some(f) = self.forward.take() {
+                    self.selection.clear();
+                    self.command(Cmd::Forward(f.from, f.ids, to));
+                }
+            }
+            Hit::Confirm(yes) => {
+                let Some(c) = self.confirm.take() else {
+                    return;
+                };
+                if let (true, Some(peer)) = (yes, self.open) {
+                    self.selection.clear();
+                    self.command(Cmd::Delete(peer, c.ids, c.revoke.unwrap_or(true)));
+                }
+            }
+            Hit::Revoke => {
+                if let Some(Confirm {
+                    revoke: Some(r), ..
+                }) = &mut self.confirm
+                {
+                    *r = !*r;
+                }
+            }
         }
+    }
+
+    /// Scroll to a message of the open chat (loading older messages
+    /// until it is there) and light it up.
+    fn go_to(&mut self, id: i64) {
+        self.jump = Some((id, 0));
+    }
+
+    /// An inline button under a message was pressed.
+    fn press_key(&mut self, id: i64, row: usize, col: usize) {
+        let Some(peer) = self.open else {
+            return;
+        };
+        let action = self
+            .shared
+            .borrow()
+            .find(peer, id)
+            .and_then(|m| m.buttons.get(row)?.get(col).cloned())
+            .map(|b| b.action);
+        match action {
+            Some(ButtonAction::Url(url)) => self.follow(&url),
+            Some(ButtonAction::Callback(data)) => self.command(Cmd::Callback(peer, id, data)),
+            Some(ButtonAction::Copy(text)) => {
+                widgets::copy(&text);
+                self.say("Copied");
+            }
+            Some(ButtonAction::Other) => self.say("This button works only in Telegram's own apps"),
+            None => {}
+        }
+    }
+
+    fn selection_act(&mut self, act: SelAct) {
+        let Some(peer) = self.open else {
+            return;
+        };
+        let mut ids = self.selection.clone();
+        ids.sort_unstable();
+        match act {
+            SelAct::Cancel => self.selection.clear(),
+            SelAct::Forward => self.start_forward(peer, ids),
+            SelAct::Copy => {
+                let text = {
+                    let s = self.shared.borrow();
+                    let tz = s.tz;
+                    let mut out = String::new();
+                    for id in &ids {
+                        let Some(m) = s.find(peer, *id) else {
+                            continue;
+                        };
+                        if !out.is_empty() {
+                            out.push_str("\n\n");
+                        }
+                        let who = if m.out { s.me.as_str() } else { m.from.as_str() };
+                        out.push_str(&alloc::format!("{}, [{}]\n", who, clock(m.date + tz)));
+                        out.push_str(&tg::client::preview(m));
+                    }
+                    out
+                };
+                widgets::copy(&text);
+                self.selection.clear();
+                self.say("Copied");
+            }
+            SelAct::Delete => self.ask_delete(peer, ids),
+        }
+    }
+
+    fn start_forward(&mut self, from: Peer, ids: Vec<i64>) {
+        self.forward = Some(ForwardTo {
+            from,
+            ids,
+            search: TextField::default(),
+            top: 0,
+        });
+        self.context = None;
+    }
+
+    /// "Delete messages?", with "also for the others" where that is a
+    /// choice.
+    fn ask_delete(&mut self, peer: Peer, ids: Vec<i64>) {
+        let (revoke, revoke_text) = {
+            let s = self.shared.borrow();
+            let chat = s.chat(peer);
+            let all_ours = ids
+                .iter()
+                .all(|&id| s.find(peer, id).is_some_and(|m| m.out));
+            match (peer, chat.map(|c| c.kind)) {
+                (Peer::User(_), Some(ChatKind::Private | ChatKind::Bot)) => (
+                    Some(true),
+                    alloc::format!("Also delete for {}", chat.map_or("", |c| c.title.as_str())),
+                ),
+                (Peer::Chat(_), _) if all_ours => {
+                    (Some(true), String::from("Delete for everyone"))
+                }
+                _ => (None, String::new()),
+            }
+        };
+        self.confirm = Some(Confirm {
+            ids,
+            revoke,
+            revoke_text,
+        });
+        self.context = None;
     }
 
     /// Whether a right-click at (x, y) opens this window's own menu (on
@@ -1144,7 +1668,9 @@ impl Telegram {
     pub fn own_menu(&self, x: i32, y: i32) -> bool {
         self.stage() == Stage::Ready
             && self.open.is_some()
-            && Self::chat_area().contains(x, y)
+            && self.confirm.is_none()
+            && self.forward.is_none()
+            && self.chat_area().contains(x, y)
             && self.hits.iter().any(|(r, h)| {
                 r.contains(x, y) && matches!(h, Hit::Bubble(_) | Hit::Media(_) | Hit::Link(_))
             })
@@ -1179,6 +1705,17 @@ impl Telegram {
             return false;
         };
         let mut items: Vec<(&'static str, Action)> = Vec::new();
+        let writable = s.chat(peer).is_none_or(|c| !c.left);
+        if writable && !m.service {
+            items.push(("Reply", Action::Reply(id)));
+        }
+        let editable = m.out
+            && !m.service
+            && m.fwd.is_none()
+            && (!m.text.is_empty() || m.photo.is_some() || m.file.is_some());
+        if editable {
+            items.push(("Edit", Action::Edit(id)));
+        }
         if let Some(l) = link {
             items.push(("Open link", Action::Open(l.clone())));
             items.push(("Copy link", Action::Copy(l)));
@@ -1189,6 +1726,18 @@ impl Telegram {
         if (m.photo.is_some() || m.file.is_some()) && id != 0 {
             items.push(("Save to Downloads", Action::Save(id)));
         }
+        if writable && !m.service {
+            if m.pinned {
+                items.push(("Unpin", Action::Pin(id, false)));
+            } else {
+                items.push(("Pin", Action::Pin(id, true)));
+            }
+        }
+        if !m.service {
+            items.push(("Forward", Action::Forward(id)));
+        }
+        items.push(("Select", Action::Select(id)));
+        items.push(("Delete", Action::Delete(id)));
         drop(s);
         if items.is_empty() {
             return false;
@@ -1222,6 +1771,33 @@ impl Telegram {
                     self.say("Saving to Downloads...");
                 }
             }
+            Action::Reply(id) => {
+                if matches!(self.compose, Compose::Edit(_)) {
+                    self.input.set("");
+                }
+                self.compose = Compose::Reply(id);
+                self.focus = Focus::Input;
+            }
+            Action::Edit(id) => self.start_edit(id),
+            Action::Pin(id, pin) => {
+                if let Some(peer) = self.open {
+                    self.command(Cmd::Pin(peer, id, pin));
+                }
+            }
+            Action::Forward(id) => {
+                if let Some(peer) = self.open {
+                    self.start_forward(peer, alloc::vec![id]);
+                }
+            }
+            Action::Select(id) => {
+                self.selection = alloc::vec![id];
+                self.picker = false;
+            }
+            Action::Delete(id) => {
+                if let Some(peer) = self.open {
+                    self.ask_delete(peer, alloc::vec![id]);
+                }
+            }
         }
     }
 
@@ -1239,6 +1815,10 @@ impl Telegram {
             MouseKind::Down { right: true } => {
                 self.menu = None;
                 let had = self.context.take().is_some();
+                let busy = self.confirm.is_some() || self.forward.is_some();
+                if busy || !self.selection.is_empty() {
+                    return had;
+                }
                 if self.stage() == Stage::Ready && x > LIST_W {
                     return self.context_menu(x, y) || had;
                 }
@@ -1316,6 +1896,35 @@ impl Telegram {
             Stage::Ready => {
                 if self.note.is_some() {
                     self.note = None;
+                }
+                if self.confirm.is_some() || self.forward.is_some() {
+                    // only the dialog takes clicks; outside it closes it
+                    match self.hit_at(x, y) {
+                        Some(h @ (Hit::Confirm(_) | Hit::Revoke | Hit::ForwardTo(_))) => {
+                            self.click_hit(h)
+                        }
+                        Some(Hit::Blank) => {}
+                        _ => {
+                            self.confirm = None;
+                            self.forward = None;
+                        }
+                    }
+                    return true;
+                }
+                if !self.selection.is_empty() && self.chat_area().contains(x, y) {
+                    let id = self.hits.iter().rev().find_map(|(r, h)| match h {
+                        Hit::Bubble(i) | Hit::Media(i) if r.contains(x, y) => Some(*i),
+                        _ => None,
+                    });
+                    if let Some(id) = id {
+                        match self.selection.iter().position(|&s| s == id) {
+                            Some(i) => {
+                                self.selection.remove(i);
+                            }
+                            None => self.selection.push(id),
+                        }
+                    }
+                    return true;
                 }
                 if let Some(b) = self.button_at(x, y) {
                     self.pressed = Some(b);
@@ -1413,7 +2022,7 @@ impl Telegram {
                 if self.profile && self.open.is_some() && Self::profile_rect().contains(x, y) {
                     return None;
                 }
-                if self.picker && Self::picker_rect().contains(x, y) {
+                if self.picker && self.picker_rect().contains(x, y) {
                     None
                 } else if outside && self.join_rect().contains(x, y) {
                     Some(Button::Join)
@@ -1450,6 +2059,15 @@ impl Telegram {
         }
         if self.stage() != Stage::Ready {
             return false;
+        }
+        if self.forward.is_some() {
+            let n = self.forward_chats().len();
+            let rows = ((FWD_H - 110) / FWD_ROW) as usize;
+            if let Some(f) = &mut self.forward {
+                let top = (f.top as i32 + delta.signum() * 2).clamp(0, n.saturating_sub(rows) as i32);
+                f.top = top as usize;
+            }
+            return true;
         }
         if self.picker
             && self
@@ -1725,11 +2343,13 @@ impl Telegram {
 
     fn draw_main(&mut self, c: &mut Canvas, caret: bool) {
         c.fill_rect(0, 0, cw(), ch(), panel());
-        self.draw_list(c, caret);
+        // the Forward to... dialog has the caret while it is open
+        let under = caret && self.forward.is_none();
+        self.draw_list(c, under);
         c.fill_rect(LIST_W, 0, 1, ch(), line());
         match self.open {
             Some(peer) => {
-                self.draw_chat(c, peer, caret);
+                self.draw_chat(c, peer, under);
                 if self.profile {
                     self.draw_profile(c, peer);
                 }
@@ -1748,7 +2368,7 @@ impl Telegram {
             }
         }
         if let Some((n, _)) = &self.note {
-            let area = Self::chat_area();
+            let area = self.chat_area();
             let n = fit(&UI, n, area.w - 60);
             draw_pill(c, area.x + area.w / 2, area.bottom() - 22, &n);
         }
@@ -1759,6 +2379,8 @@ impl Telegram {
         if let Some(ctx) = &self.context {
             widgets::draw_menu(c, ctx.rect(), &ctx.list(), ctx.hover);
         }
+        self.draw_confirm(c);
+        self.draw_forward(c, caret);
     }
 
     fn draw_list(&mut self, c: &mut Canvas, caret: bool) {
@@ -1803,6 +2425,7 @@ impl Telegram {
                 s.error.clone(),
             )
         };
+        let now_ms = now * 1000;
         let now = now + tz;
         let rows = self.rows();
         let s = self.shared.borrow();
@@ -1848,7 +2471,10 @@ impl Telegram {
             } else if self.hover_row == Some(pos) {
                 c.fill(r, hover());
             }
-            draw_row(c, chat, y, is_open, matches!(row, Row::Found(_)), now, tz);
+            let typing = typing_line(&s, chat.peer, chat.kind, now_ms);
+            let online = is_online(&s, chat.peer, chat.kind, now_ms / 1000 + s.time_offset);
+            let found = matches!(row, Row::Found(_));
+            draw_row(c, chat, y, is_open, found, now, tz, typing, online);
             y += ROW_H;
         }
         if rows.is_empty() {
@@ -1867,6 +2493,13 @@ impl Telegram {
     }
 
     fn draw_chat(&mut self, c: &mut Canvas, peer: Peer, caret: bool) {
+        // the header: a click opens the profile; while picking messages,
+        // what can be done with them
+        let head = Rect::new(LIST_W + 1, 0, cw() - LIST_W - 1, TOP_H);
+        c.fill(head, panel());
+        if !self.selection.is_empty() {
+            self.draw_selection_bar(c, head);
+        }
         let s = self.shared.borrow();
         let chat = s.chat(peer).cloned();
         let (title, kind, username, left) = chat.as_ref().map_or(
@@ -1875,50 +2508,72 @@ impl Telegram {
         );
         let read_out = chat.as_ref().map_or(0, |c| c.read_out);
         let tz = s.tz;
+        let now_ms = tg::mtproto::now_ms();
+        let now = now_ms / 1000 + s.time_offset;
 
-        // the header: a click opens the profile
-        let head = Rect::new(LIST_W + 1, 0, cw() - LIST_W - 1, TOP_H);
-        c.fill(head, panel());
-        if self.hover_hit == Some(Hit::Header) {
-            c.fill(head, hover());
+        if self.selection.is_empty() {
+            if self.hover_hit == Some(Hit::Header) {
+                c.fill(head, hover());
+            }
+            rich::draw_fit(c, &UI_BOLD, head.x + 20, 10, &title, head.w - 40, text());
+            let (subtitle, lit) = subtitle(&s, peer, kind, now, now_ms, tz);
+            let mut sx = head.x + 20;
+            if !username.is_empty() && kind != ChatKind::Saved && !lit {
+                sx += c.draw_text(sx, 30, &alloc::format!("@{}", username), BLUE);
+                sx += c.draw_text(sx, 30, "  \u{2022}  ", dim());
+            }
+            let sub = fit(&UI, &subtitle, head.right() - 20 - sx);
+            c.draw_text(sx, 30, &sub, if lit { BLUE } else { dim() });
+            self.hits.push((head, Hit::Header));
         }
-        rich::draw_fit(c, &UI_BOLD, head.x + 20, 10, &title, head.w - 40, text());
-        let members = s.info.get(&peer).map_or(0, |i| i.members);
-        let mut subtitle = String::from(match kind {
-            ChatKind::Saved => "your cloud storage",
-            ChatKind::Bot => "bot",
-            ChatKind::Group => "group",
-            ChatKind::Channel => "channel",
-            ChatKind::Private => "private chat",
-        });
-        if members > 0 {
-            let what = if kind == ChatKind::Channel {
-                "subscribers"
-            } else {
-                "members"
-            };
-            subtitle = alloc::format!("{} {}", group_digits(members), what);
-        }
-        let mut sx = head.x + 20;
-        if !username.is_empty() && kind != ChatKind::Saved {
-            sx += c.draw_text(sx, 30, &alloc::format!("@{}", username), BLUE);
-            sx += c.draw_text(sx, 30, "  \u{2022}  ", dim());
-        }
-        c.draw_text(sx, 30, &subtitle, dim());
         c.fill_rect(head.x, TOP_H - 1, head.w, 1, line());
-        self.hits.push((head, Hit::Header));
+
+        // the newest pinned message (or the one a click went back to)
+        let pins = s.pinned.get(&peer).map_or(&[][..], |v| v.as_slice());
+        if !pins.is_empty() {
+            let pr = Rect::new(LIST_W + 1, TOP_H, self.chat_w(), PIN_H);
+            let k = self.pin_index % pins.len();
+            let m = &pins[k];
+            c.fill(pr, panel());
+            if self.hover_hit == Some(Hit::PinBar) {
+                c.fill(pr, hover());
+            }
+            c.fill_round(Rect::new(pr.x + 14, pr.y + 7, 3, PIN_H - 14), 1, BLUE);
+            let label = if pins.len() > 1 {
+                alloc::format!("Pinned message #{}", pins.len() - k)
+            } else {
+                String::from("Pinned message")
+            };
+            c.draw_text_in(&UI_BOLD, pr.x + 26, pr.y + 5, &label, BLUE);
+            let line_text = one_line(&tg::client::preview(m));
+            rich::draw_fit(c, &UI, pr.x + 26, pr.y + 24, &line_text, pr.w - 46, text());
+            c.fill_rect(pr.x, pr.bottom() - 1, pr.w, 1, line());
+            self.hits.push((pr, Hit::PinBar));
+        }
 
         // the messages
-        let mut area = Self::chat_area();
-        if self.profile {
-            area.w -= PROFILE_W;
-        }
+        let area = self.chat_area();
         c.vertical_gradient(area, wall_top(), wall_bottom());
         let empty = History::default();
         let h = s.history.get(&peer).unwrap_or(&empty);
         let group = matches!(kind, ChatKind::Group);
-        let max_w = BUBBLE_MAX.min(area.w * 7 / 10);
-        let laid = layout(&h.messages, group, max_w, tz);
+        let selecting = !self.selection.is_empty();
+        let max_w = BUBBLE_MAX.min(area.w * 7 / 10) - if selecting { SELECT_W } else { 0 };
+        let mut missing = Vec::new();
+        let quote_of = |id: i64| -> Option<(String, String, i64)> {
+            let m = s.find(peer, id)?;
+            let who = if m.service {
+                String::new()
+            } else if m.out {
+                s.me.clone()
+            } else if m.from.is_empty() {
+                title.clone()
+            } else {
+                m.from.clone()
+            };
+            Some((who, one_line(&tg::client::preview(m)), m.from_id))
+        };
+        let laid = layout(&h.messages, group, max_w, tz, &quote_of, &mut missing);
         let total = laid.last().map_or(0, |l| l.y + l.h) + 12;
         // keep the view still when new messages come while scrolled up
         let newest = h.messages.last().map_or(0, |m| m.id.max(m.date));
@@ -1929,8 +2584,28 @@ impl Telegram {
         self.content_h = total;
         self.newest = newest;
         let view = area.h;
-        self.scroll = self.scroll.min((total - view).max(0));
-        let wants_older = !h.complete && !h.loading && self.scroll + view + 200 > total;
+        // a message to go to: there once it is loaded
+        let mut load_more = false;
+        if let Some((id, tries)) = self.jump {
+            let found = laid.iter().find(|l| match &l.kind {
+                LaidKind::Bubble(b) => h.messages[b.index].id == id,
+                _ => false,
+            });
+            if let Some(l) = found {
+                self.scroll = total - l.y - l.h / 2 - view / 2;
+                self.flash = Some((id, now_ms + FLASH_MS));
+                self.jump = None;
+            } else if h.complete || tries > 50 {
+                self.jump = None;
+                self.note = Some((String::from("That message is no longer here"), now_ms + NOTE_MS));
+            } else if !h.loading {
+                self.jump = Some((id, tries + 1));
+                load_more = true;
+            }
+        }
+        self.scroll = self.scroll.clamp(0, (total - view).max(0));
+        let wants_older =
+            load_more || (!h.complete && !h.loading && self.scroll + view + 200 > total);
         // everything is laid out top down; the bottom of it sits at the
         // bottom of the area, moved down by the scroll
         let base = area.bottom() - total + self.scroll;
@@ -1949,6 +2624,7 @@ impl Telegram {
                     "No messages here yet",
                 );
             }
+            let flash = self.flash.map(|f| f.0);
             let mut ctx = Draw {
                 s: &s,
                 peer,
@@ -1968,12 +2644,29 @@ impl Telegram {
                     LaidKind::Service(t) => draw_pill(c, area.x + area.w / 2, y + 14, t),
                     LaidKind::Bubble(b) => {
                         let m = &h.messages[b.index];
+                        let row = Rect::new(area.x, y - 2, area.w, l.h + 4);
+                        let picked = self.selection.contains(&m.id);
+                        if picked || flash == Some(m.id) {
+                            c.fill_round_alpha(row, 0, selected(), 70);
+                        }
                         let x = if m.out {
                             area.right() - 16 - b.w
                         } else {
-                            area.x + 16
+                            area.x + 16 + if selecting { SELECT_W } else { 0 }
                         };
-                        draw_bubble(c, &mut ctx, m, b, x, y, l.h);
+                        draw_bubble(c, &mut ctx, m, b, x, y);
+                        if selecting && m.id != 0 {
+                            // a round tick on the left; the whole row picks
+                            let r = Rect::new(area.x + 14, y + b.body_h - 26, 22, 22);
+                            if picked {
+                                c.fill_round(r, 11, BLUE);
+                                draw_check(c, r.x + 5, r.y + 6, rgb(0xff, 0xff, 0xff));
+                            } else {
+                                c.fill_round_alpha(r, 11, rgb(0, 0, 0), 60);
+                                c.outline_round(r, 11, rgb(0xff, 0xff, 0xff));
+                            }
+                            ctx.hit(c, row, Hit::Bubble(m.id));
+                        }
                     }
                 }
             }
@@ -1984,6 +2677,10 @@ impl Telegram {
         drop(s);
         if wants_older {
             self.command(Cmd::Older(peer));
+        }
+        missing.retain(|&id| self.quotes_asked.insert((peer, id)));
+        if !missing.is_empty() {
+            self.command(Cmd::Quote(peer, missing));
         }
         if !want.is_empty() {
             let mut s = self.shared.borrow_mut();
@@ -2019,6 +2716,8 @@ impl Telegram {
             c.text_centered_in(&UI_BOLD, jr, label, BLUE);
             return;
         }
+        self.draw_keyboard(c);
+        self.draw_compose(c, peer);
         let ir = Self::input_rect();
         let focused = self.focus == Focus::Input;
         {
@@ -2058,7 +2757,267 @@ impl Telegram {
         if self.hover_button == Some(Button::Send) {
             c.fill_round(sr, 20, hover());
         }
-        draw_plane(c, sr.x + 8, sr.y + 10, 24, color);
+        if matches!(self.compose, Compose::Edit(_)) {
+            // a tick: save the change
+            let face = if active { BLUE } else { dim() };
+            c.fill_round(Rect::new(sr.x + 6, sr.y + 6, 28, 28), 14, face);
+            draw_check(c, sr.x + 14, sr.y + 15, rgb(0xff, 0xff, 0xff));
+        } else {
+            draw_plane(c, sr.x + 8, sr.y + 10, 24, color);
+        }
+    }
+
+    /// "3 messages" and Forward, Copy, Delete, Cancel, over the chat.
+    fn draw_selection_bar(&mut self, c: &mut Canvas, head: Rect) {
+        let n = self.selection.len();
+        let label = if n == 1 {
+            String::from("1 message")
+        } else {
+            alloc::format!("{} messages", n)
+        };
+        c.draw_text_in(&UI_BOLD, head.x + 20, 19, &label, text());
+        let mut x = head.x + self.chat_w() - 12;
+        for (act, name) in [
+            (SelAct::Cancel, "Cancel"),
+            (SelAct::Delete, "Delete"),
+            (SelAct::Copy, "Copy"),
+            (SelAct::Forward, "Forward"),
+        ] {
+            let w = UI_BOLD.width(name) + 28;
+            x -= w + 6;
+            let r = Rect::new(x, 11, w, 34);
+            let hit = Hit::Selection(act);
+            let face = if act == SelAct::Forward || act == SelAct::Delete {
+                if self.hover_hit.as_ref() == Some(&hit) {
+                    mix(BLUE, rgb(0, 0, 0), 20)
+                } else {
+                    BLUE
+                }
+            } else if self.hover_hit.as_ref() == Some(&hit) {
+                hover()
+            } else {
+                panel()
+            };
+            c.fill_round(r, 8, face);
+            let fg = match act {
+                SelAct::Forward | SelAct::Delete => rgb(0xff, 0xff, 0xff),
+                _ => BLUE,
+            };
+            c.text_centered_in(&UI_BOLD, r, name, fg);
+            self.hits.push((r, hit));
+        }
+    }
+
+    /// What the message being written answers or changes, over the box.
+    fn draw_compose(&mut self, c: &mut Canvas, peer: Peer) {
+        let (id, editing) = match self.compose {
+            Compose::None => return,
+            Compose::Reply(id) => (id, false),
+            Compose::Edit(id) => (id, true),
+        };
+        let r = Rect::new(
+            LIST_W + 1,
+            ch() - INPUT_H - COMPOSE_H,
+            cw() - LIST_W - 1,
+            COMPOSE_H,
+        );
+        c.fill(r, panel());
+        c.fill_rect(r.x, r.y, r.w, 1, line());
+        let (who, what) = {
+            let s = self.shared.borrow();
+            match s.find(peer, id) {
+                Some(m) => (
+                    if m.out {
+                        s.me.clone()
+                    } else if m.from.is_empty() {
+                        s.chat(peer).map_or(String::new(), |c| c.title.clone())
+                    } else {
+                        m.from.clone()
+                    },
+                    one_line(&tg::client::preview(m)),
+                ),
+                None => (String::new(), String::new()),
+            }
+        };
+        // an arrow back (answering) or a pencil (editing)
+        let (ix, iy) = (r.x + 22, r.y + 14);
+        if editing {
+            c.fill_polygon(
+                &[(ix, iy + 18), (ix + 1, iy + 13), (ix + 13, iy + 1), (ix + 17, iy + 5), (ix + 5, iy + 17)],
+                BLUE,
+            );
+        } else {
+            c.fill_polygon(&[(ix, iy + 7), (ix + 8, iy), (ix + 8, iy + 14)], BLUE);
+            c.fill_rect(ix + 8, iy + 5, 8, 4, BLUE);
+            c.fill_rect(ix + 14, iy + 5, 4, 12, BLUE);
+        }
+        c.fill_round(Rect::new(r.x + 50, r.y + 7, 2, COMPOSE_H - 14), 1, BLUE);
+        let head = if editing {
+            String::from("Edit message")
+        } else {
+            alloc::format!("Reply to {}", who)
+        };
+        let tw = r.w - 110;
+        rich::draw_fit(c, &UI_BOLD, r.x + 60, r.y + 5, &head, tw, BLUE);
+        rich::draw_fit(c, &UI, r.x + 60, r.y + 24, &what, tw, text());
+        let close = Rect::new(r.right() - 46, r.y + 7, 32, 32);
+        if self.hover_hit == Some(Hit::CloseCompose) {
+            c.fill_round(close, 16, hover());
+        }
+        draw_cross(c, close, dim());
+        self.hits.push((close, Hit::CloseCompose));
+    }
+
+    /// A bot's keyboard over the box: its buttons send their text.
+    fn draw_keyboard(&mut self, c: &mut Canvas) {
+        let rows = self.keyboard();
+        if rows.is_empty() {
+            return;
+        }
+        let h = self.keyboard_h();
+        let r = Rect::new(
+            LIST_W + 1,
+            ch() - INPUT_H - self.compose_h() - h,
+            cw() - LIST_W - 1,
+            h,
+        );
+        c.fill(r, panel());
+        c.fill_rect(r.x, r.y, r.w, 1, line());
+        for (i, row) in rows.iter().take(4).enumerate() {
+            let n = row.len().max(1) as i32;
+            let bw = (r.w - 16 - (n - 1) * 6) / n;
+            for (j, label) in row.iter().enumerate() {
+                let b = Rect::new(
+                    r.x + 8 + j as i32 * (bw + 6),
+                    r.y + 6 + i as i32 * KB_ROW,
+                    bw,
+                    KB_ROW - 6,
+                );
+                let hit = Hit::KeyText(label.clone());
+                let face = if self.hover_hit.as_ref() == Some(&hit) {
+                    pick(rgb(0xe4, 0xee, 0xf6), rgb(0x2b, 0x52, 0x78))
+                } else {
+                    pick(rgb(0xf1, 0xf4, 0xf7), rgb(0x24, 0x2f, 0x3d))
+                };
+                c.fill_round(b, 6, face);
+                let tw = rich::width(&UI, label).min(bw - 16);
+                let ty = b.y + (b.h - LINE_H) / 2 + 2;
+                rich::draw_fit(c, &UI, b.x + (bw - tw) / 2, ty, label, bw - 16, text());
+                self.hits.push((b, hit));
+            }
+        }
+    }
+
+    /// "Delete messages?" over the chat.
+    fn draw_confirm(&mut self, c: &mut Canvas) {
+        let Some(conf) = &self.confirm else {
+            return;
+        };
+        let r = self.confirm_rect();
+        c.fill_round_alpha(full(), 0, rgb(0, 0, 0), 90);
+        c.shadow(r, 12, 10, 3, 90);
+        c.fill_round(r, 12, panel());
+        self.hits.push((r, Hit::Blank));
+        let n = conf.ids.len();
+        let title = if n == 1 {
+            String::from("Delete message")
+        } else {
+            alloc::format!("Delete {} messages", n)
+        };
+        c.draw_text_in(&UI_BOLD, r.x + 24, r.y + 20, &title, text());
+        let question = if n == 1 {
+            "Are you sure you want to delete this message?"
+        } else {
+            "Are you sure you want to delete these messages?"
+        };
+        c.draw_text(r.x + 24, r.y + 52, &fit(&UI, question, r.w - 48), text());
+        if let Some(on) = conf.revoke {
+            let b = Rect::new(r.x + 24, r.y + 92, 20, 20);
+            if on {
+                c.fill_round(b, 4, BLUE);
+                draw_check(c, b.x + 4, b.y + 5, rgb(0xff, 0xff, 0xff));
+            } else {
+                c.outline_round(b, 4, dim());
+            }
+            let label = fit(&UI, &clean(&conf.revoke_text), r.w - 90);
+            c.draw_text(b.right() + 10, b.y + 1, &label, text());
+            let row = Rect::new(r.x + 16, r.y + 86, r.w - 32, 32);
+            self.hits.push((row, Hit::Revoke));
+        }
+        let by = r.bottom() - 52;
+        let del = Rect::new(r.right() - 120, by, 100, 36);
+        let cancel = Rect::new(del.x - 110, by, 100, 36);
+        for (b, label, hit, color) in [
+            (cancel, "Cancel", Hit::Confirm(false), BLUE),
+            (del, "Delete", Hit::Confirm(true), theme::error()),
+        ] {
+            if self.hover_hit.as_ref() == Some(&hit) {
+                c.fill_round(b, 8, hover());
+            }
+            c.text_centered_in(&UI_BOLD, b, label, color);
+            self.hits.push((b, hit));
+        }
+    }
+
+    /// "Forward to...": a search box and the chats.
+    fn draw_forward(&mut self, c: &mut Canvas, caret: bool) {
+        if self.forward.is_none() {
+            return;
+        }
+        let chats = self.forward_chats();
+        let r = Self::forward_rect();
+        c.fill_round_alpha(full(), 0, rgb(0, 0, 0), 90);
+        c.shadow(r, 12, 10, 3, 90);
+        c.fill_round(r, 12, panel());
+        self.hits.push((r, Hit::Blank));
+        c.draw_text_in(&UI_BOLD, r.x + 24, r.y + 18, "Forward to...", text());
+        let Some(f) = &mut self.forward else {
+            return;
+        };
+        let sr = Rect::new(r.x + 20, r.y + 50, r.w - 40, 34);
+        c.fill_round(sr, 17, pick(rgb(0xf1, 0xf1, 0xf1), rgb(0x24, 0x2f, 0x3d)));
+        c.outline_round(sr, 17, BLUE);
+        if f.search.text.is_empty() {
+            c.draw_text(sr.x + 14, sr.y + 9, "Search", dim());
+            if caret {
+                c.fill_rect(sr.x + 14, sr.y + 8, 1, 18, text());
+            }
+        } else {
+            let q = f.search.string();
+            rich::draw_fit(c, &UI, sr.x + 14, sr.y + 9, &q, sr.w - 28, text());
+            if caret {
+                let before: String = f.search.text[..f.search.cursor].iter().collect();
+                c.fill_rect(sr.x + 15 + rich::width(&UI, &before), sr.y + 8, 1, 18, text());
+            }
+        }
+        let list = Rect::new(r.x, r.y + 96, r.w, r.h - 110);
+        let top = f.top;
+        let mut sub = c.sub(Rect::new(0, 0, c.width, c.height));
+        sub.clip_to(list);
+        let mut y = list.y;
+        for chat in chats.iter().skip(top) {
+            if y >= list.bottom() {
+                break;
+            }
+            let row = Rect::new(list.x, y, list.w, FWD_ROW);
+            let hit = Hit::ForwardTo(chat.peer);
+            if self.hover_hit.as_ref() == Some(&hit) {
+                sub.fill(row, hover());
+            }
+            let id = match chat.peer {
+                Peer::User(id) | Peer::Chat(id) | Peer::Channel(id) => id,
+            };
+            draw_avatar(&mut sub, row.x + 40, y + FWD_ROW / 2, 19, &chat.title, id, chat.kind);
+            rich::draw_fit(&mut sub, &UI_BOLD, row.x + 72, y + 16, &chat.title, row.w - 96, text());
+            let vis = row.intersect(&list);
+            if !vis.is_empty() {
+                self.hits.push((vis, hit));
+            }
+            y += FWD_ROW;
+        }
+        if chats.is_empty() {
+            sub.text_centered(Rect::new(list.x, list.y + 20, list.w, 20), "No chats found", dim());
+        }
     }
 
     /// The profile of the open chat, on the right: its @name and link to
@@ -2195,7 +3154,7 @@ impl Telegram {
 
     /// The emoji picker over the chat, above the smiley button.
     fn draw_picker(&mut self, c: &mut Canvas) {
-        let pr = Self::picker_rect();
+        let pr = self.picker_rect();
         c.shadow(pr, 12, 6, 2, 60);
         c.fill_round(pr, 12, panel());
         c.outline_round(pr, 12, line());
@@ -2260,7 +3219,18 @@ impl Telegram {
 
 /// A chat in the list: avatar, name, the last message or @name, the
 /// time and the unread count.
-fn draw_row(c: &mut Canvas, chat: &Chat, y: i32, is_open: bool, found: bool, now: i64, tz: i64) {
+#[allow(clippy::too_many_arguments)]
+fn draw_row(
+    c: &mut Canvas,
+    chat: &Chat,
+    y: i32,
+    is_open: bool,
+    found: bool,
+    now: i64,
+    tz: i64,
+    typing: Option<String>,
+    online: bool,
+) {
     let (fg, sub_fg) = if is_open {
         (rgb(0xff, 0xff, 0xff), rgb(0xe8, 0xf2, 0xfa))
     } else {
@@ -2278,6 +3248,13 @@ fn draw_row(c: &mut Canvas, chat: &Chat, y: i32, is_open: bool, found: bool, now
         id,
         chat.kind,
     );
+    if online {
+        // a green dot: online now
+        let ring = if is_open { selected() } else { panel() };
+        let (dx, dy) = (10 + AVATAR - 13, y + ROW_H / 2 + AVATAR / 2 - 13);
+        c.fill_round(Rect::new(dx, dy, 14, 14), 7, ring);
+        c.fill_round(Rect::new(dx + 2, dy + 2, 10, 10), 5, rgb(0x4f, 0xc3, 0x5a));
+    }
     let tx = 10 + AVATAR + 12;
     let date = if found || chat.date == 0 {
         String::new()
@@ -2338,12 +3315,138 @@ fn draw_row(c: &mut Canvas, chat: &Chat, y: i32, is_open: bool, found: bool, now
         );
         right -= w + 6;
     }
+    if let Some(t) = typing {
+        let color = if is_open { fg } else { BLUE };
+        c.draw_text(tx, y + 38, &fit(&UI, &t, right - tx), color);
+        return;
+    }
     let mut px = tx;
     if chat.last_out && chat.kind != ChatKind::Saved {
         let you = "You: ";
         px += c.draw_text(px, y + 38, you, if is_open { fg } else { BLUE });
     }
     rich::draw_fit(c, &UI, px, y + 38, &chat.last, right - px, sub_fg);
+}
+
+/// "typing...", "Alice is typing...", "Alice and Bob are typing...".
+fn typing_line(s: &Shared, peer: Peer, kind: ChatKind, now_ms: i64) -> Option<String> {
+    let who = s.typing_in(peer, now_ms);
+    let (first_id, what) = who.first()?.clone();
+    if !matches!(kind, ChatKind::Group | ChatKind::Channel) {
+        return Some(alloc::format!("{}...", what));
+    }
+    let name = |id: i64| {
+        let n = s
+            .history
+            .get(&peer)
+            .and_then(|h| h.messages.iter().rev().find(|m| m.from_id == id))
+            .map(|m| m.from.clone())
+            .unwrap_or_default();
+        let first = String::from(n.split_whitespace().next().unwrap_or(""));
+        if first.is_empty() {
+            String::from("Someone")
+        } else {
+            clean(&first)
+        }
+    };
+    Some(match who.len() {
+        1 if what == "typing" => alloc::format!("{} is typing...", name(first_id)),
+        1 => alloc::format!("{} is {}...", name(first_id), what),
+        2 => alloc::format!("{} and {} are typing...", name(first_id), name(who[1].0)),
+        n => alloc::format!("{} people are typing...", n),
+    })
+}
+
+/// A person (not a bot) online now, by Telegram's time.
+fn is_online(s: &Shared, peer: Peer, kind: ChatKind, now: i64) -> bool {
+    match (peer, kind) {
+        (Peer::User(id), ChatKind::Private) => {
+            matches!(s.status.get(&id), Some(Status::Online(until)) if *until > now)
+        }
+        _ => false,
+    }
+}
+
+/// The line under a chat's name: who is typing, when the person was
+/// online, or how many members; true when it is lit (blue).
+fn subtitle(s: &Shared, peer: Peer, kind: ChatKind, now: i64, now_ms: i64, tz: i64) -> (String, bool) {
+    if let Some(t) = typing_line(s, peer, kind, now_ms) {
+        return (t, true);
+    }
+    let members = s.info.get(&peer).map_or(0, |i| i.members);
+    if members > 0 && matches!(kind, ChatKind::Group | ChatKind::Channel) {
+        let what = if kind == ChatKind::Channel {
+            "subscribers"
+        } else {
+            "members"
+        };
+        return (alloc::format!("{} {}", group_digits(members), what), false);
+    }
+    let text = match kind {
+        ChatKind::Saved => "your cloud storage",
+        ChatKind::Bot => "bot",
+        ChatKind::Group => "group",
+        ChatKind::Channel => "channel",
+        ChatKind::Private => {
+            let Peer::User(id) = peer else {
+                return (String::from("private chat"), false);
+            };
+            return match s.status.get(&id) {
+                Some(Status::Online(until)) if *until > now => (String::from("online"), true),
+                Some(Status::Online(t) | Status::Offline(t)) => (last_seen(*t + tz, now + tz), false),
+                Some(Status::Recently) => (String::from("last seen recently"), false),
+                Some(Status::LastWeek) => (String::from("last seen within a week"), false),
+                Some(Status::LastMonth) => (String::from("last seen within a month"), false),
+                Some(Status::Hidden) => (String::from("last seen a long time ago"), false),
+                None => (String::from("private chat"), false),
+            };
+        }
+    };
+    (String::from(text), false)
+}
+
+/// "last seen just now", "... today at 14:05", "... yesterday at 9:30",
+/// "... 03.09.26", from local times.
+fn last_seen(t: i64, now: i64) -> String {
+    let (day, today) = (t.div_euclid(86400), now.div_euclid(86400));
+    if now - t < 60 {
+        String::from("last seen just now")
+    } else if now - t < 3600 {
+        let m = (now - t) / 60;
+        alloc::format!("last seen {} minute{} ago", m, if m == 1 { "" } else { "s" })
+    } else if day == today {
+        alloc::format!("last seen today at {}", clock(t))
+    } else if day + 1 == today {
+        alloc::format!("last seen yesterday at {}", clock(t))
+    } else {
+        let (y, m, d, _, _, _) = civil(t);
+        alloc::format!("last seen {:02}.{:02}.{:02}", d, m, y % 100)
+    }
+}
+
+/// A text on one line: line breaks become spaces.
+fn one_line(s: &str) -> String {
+    s.split(['\n', '\r'])
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A tick mark about 12 wide.
+fn draw_check(c: &mut Canvas, x: i32, y: i32, color: Color) {
+    for d in 0..2 {
+        c.line(x, y + 4 + d, x + 4, y + 8 + d, color);
+        c.line(x + 4, y + 8 + d, x + 12, y + d, color);
+    }
+}
+
+/// An X in the middle of `r`.
+fn draw_cross(c: &mut Canvas, r: Rect, color: Color) {
+    let (x, y) = (r.x + r.w / 2 - 6, r.y + r.h / 2 - 6);
+    for d in 0..2 {
+        c.line(x + d, y, x + 11 + d, y + 11, color);
+        c.line(x + 11 + d, y, x + d, y + 11, color);
+    }
 }
 
 /// Open a downloaded file with its app; files no app here reads are
@@ -2423,8 +3526,20 @@ fn media_parts(m: &Message) -> (Option<(i32, i32)>, bool, Option<String>) {
     (None, false, m.media.clone())
 }
 
+/// Who wrote a quoted message, one line of it, and their id.
+type QuoteOf<'a> = dyn Fn(i64) -> Option<(String, String, i64)> + 'a;
+
 /// Lay out the messages top down, with date lines between days.
-fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
+/// `quote_of` finds what answers quote; the ones it can't find are put in
+/// `missing`, to be loaded.
+fn layout(
+    messages: &[Message],
+    group: bool,
+    max_w: i32,
+    tz: i64,
+    quote_of: &QuoteOf,
+    missing: &mut Vec<i64>,
+) -> Vec<Laid> {
     let mut out = Vec::new();
     let mut y = 8;
     let mut last_day = i64::MIN;
@@ -2480,6 +3595,19 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
             rich::wrap(&UI, &rich::pieces(&UI, &text, &ranges), inner)
         };
         let name = (group && !m.out && m.from_id != last_from).then(|| clean(&m.from));
+        let fwd = m
+            .fwd
+            .as_ref()
+            .map(|f| clean(&alloc::format!("Forwarded from {}", f)));
+        let quote = (m.reply_to != 0).then(|| {
+            quote_of(m.reply_to).unwrap_or_else(|| {
+                if !missing.contains(&m.reply_to) {
+                    missing.push(m.reply_to);
+                }
+                (String::new(), String::from("Loading..."), 0)
+            })
+        });
+        let head = name.is_some() || fwd.is_some() || quote.is_some();
         let web = m.web.clone();
         let bare_pic = pic.is_some() && lines.is_empty() && web.is_none();
         let time_w = time_width(m);
@@ -2499,6 +3627,13 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
         if let Some(n) = &name {
             w = w.max(UI_BOLD.width(n).min(inner));
         }
+        if let Some(f) = &fwd {
+            w = w.max(UI.width(f).min(inner));
+        }
+        if let Some((who, t, _)) = &quote {
+            let qw = rich::width(&UI_BOLD, who).max(rich::width(&UI, t)) + 22;
+            w = w.max(qw.min(inner));
+        }
         if let Some((site, title)) = &web {
             let ww = rich::width(&UI_BOLD, site).max(rich::width(&UI, title)) + 12;
             w = w.max(ww.min(inner));
@@ -2506,17 +3641,30 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
         if file_row {
             w = w.max(260.min(inner));
         }
-        let w = match pic {
+        let mut w = match pic {
             Some((pw, _)) => pw + 8,
             None => w + 2 * PAD_X,
         };
-        let mut h = if pic.is_some() && name.is_none() {
-            4
-        } else {
-            PAD_Y
-        };
+        // room for the bot's buttons under it
+        let need = m
+            .buttons
+            .iter()
+            .map(|row| {
+                row.iter().map(|k| rich::width(&UI_BOLD, &k.text) + 32).sum::<i32>()
+                    + (row.len() as i32 - 1) * 4
+            })
+            .max()
+            .map_or(0, |n| n.max(220));
+        w = w.max(need.min(max_w));
+        let mut h = if pic.is_some() && !head { 4 } else { PAD_Y };
         if name.is_some() {
             h += LINE_H;
+        }
+        if fwd.is_some() {
+            h += LINE_H;
+        }
+        if quote.is_some() {
+            h += QUOTE_H + 4;
         }
         if let Some((_, ph)) = pic {
             h += ph + if bare_pic { 4 } else { 6 };
@@ -2534,6 +3682,8 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
         if !bare_pic {
             h += PAD_Y;
         }
+        let body_h = h;
+        h += m.buttons.len() as i32 * (BTN_H + 4);
         // messages in a row from the same person sit closer
         let gap = if m.from_id == last_from { 4 } else { 10 };
         last_from = m.from_id;
@@ -2543,7 +3693,10 @@ fn layout(messages: &[Message], group: bool, max_w: i32, tz: i64) -> Vec<Laid> {
             kind: LaidKind::Bubble(Bubble {
                 index: i,
                 w,
+                body_h,
                 name,
+                fwd,
+                quote,
                 pic,
                 file_row,
                 label: label.is_some(),
@@ -2620,8 +3773,9 @@ fn download_text(d: Option<&tg::Download>, size: i64) -> Option<String> {
     })
 }
 
-fn draw_bubble(c: &mut Canvas, d: &mut Draw, m: &Message, b: &Bubble, x: i32, y: i32, h: i32) {
+fn draw_bubble(c: &mut Canvas, d: &mut Draw, m: &Message, b: &Bubble, x: i32, y: i32) {
     let w = b.w;
+    let h = b.body_h;
     let r = Rect::new(x, y, w, h);
     let face = if m.out { bubble_out() } else { bubble_in() };
     c.shadow(r, 10, 2, 1, 30);
@@ -2631,15 +3785,39 @@ fn draw_bubble(c: &mut Canvas, d: &mut Draw, m: &Message, b: &Bubble, x: i32, y:
     }
     let tcolor = if m.out { time_out() } else { time_in() };
     let bare_pic = b.pic.is_some() && b.lines.is_empty() && b.web.is_none();
-    let mut ty = y + if b.pic.is_some() && b.name.is_none() {
-        4
-    } else {
-        PAD_Y
-    };
+    let head = b.name.is_some() || b.fwd.is_some() || b.quote.is_some();
+    let mut ty = y + if b.pic.is_some() && !head { 4 } else { PAD_Y };
     if let Some(n) = &b.name {
         let n = fit(&UI_BOLD, n, w - 2 * PAD_X);
         c.draw_text_in(&UI_BOLD, x + PAD_X, ty, &n, palette(m.from_id));
         ty += LINE_H;
+    }
+    if let Some(f) = &b.fwd {
+        let f = fit(&UI, f, w - 2 * PAD_X);
+        c.draw_text(x + PAD_X, ty, &f, link_color(m.out));
+        ty += LINE_H;
+    }
+    // what it answers: a click goes there
+    if let Some((who, t, from)) = &b.quote {
+        let qr = Rect::new(x + PAD_X - 4, ty + 2, w - 2 * PAD_X + 8, QUOTE_H);
+        let color = if who.is_empty() {
+            dim()
+        } else if m.out {
+            time_out()
+        } else {
+            palette(*from)
+        };
+        let hit = Hit::Quote(m.reply_to);
+        let alpha = if d.hover.as_ref() == Some(&hit) { 60 } else { 30 };
+        c.fill_round_alpha(qr, 6, color, alpha);
+        c.fill_round(Rect::new(qr.x, qr.y, 3, qr.h), 1, color);
+        let tw = qr.w - 16;
+        if !who.is_empty() {
+            rich::draw_fit(c, &UI_BOLD, qr.x + 10, qr.y + 3, &clean(who), tw, color);
+        }
+        rich::draw_fit(c, &UI, qr.x + 10, qr.y + 3 + LINE_H, t, tw, text());
+        d.hit(c, qr, hit);
+        ty += QUOTE_H + 4;
     }
     let download = d.s.downloads.get(&(d.peer, m.id));
     // the picture
@@ -2828,6 +4006,30 @@ fn draw_bubble(c: &mut Canvas, d: &mut Draw, m: &Message, b: &Bubble, x: i32, y:
                 draw_tick(c, cx + 5, cy + 1, tcolor);
             }
         }
+    }
+    // a bot's buttons under the message
+    let mut by = y + h + 4;
+    for (ri, row) in m.buttons.iter().enumerate() {
+        let n = row.len().max(1) as i32;
+        let bw = (w - (n - 1) * 4) / n;
+        for (ci, k) in row.iter().enumerate() {
+            let r = Rect::new(x + ci as i32 * (bw + 4), by, bw, BTN_H);
+            let hit = Hit::Key(m.id, ri, ci);
+            let alpha = if d.hover.as_ref() == Some(&hit) { 110 } else { 70 };
+            c.fill_round_alpha(r, 8, pick(rgb(0x2a, 0x4a, 0x30), rgb(0, 0, 0)), alpha);
+            let tw = rich::width(&UI_BOLD, &k.text).min(bw - 20);
+            let white = rgb(0xff, 0xff, 0xff);
+            rich::draw_fit(c, &UI_BOLD, r.x + (bw - tw) / 2, r.y + 8, &k.text, bw - 20, white);
+            if matches!(k.action, ButtonAction::Url(_)) {
+                // a small arrow: it opens a link
+                let (ax, ay) = (r.right() - 11, r.y + 5);
+                c.line(ax, ay, ax + 5, ay, rgb(0xff, 0xff, 0xff));
+                c.line(ax + 5, ay, ax + 5, ay + 5, rgb(0xff, 0xff, 0xff));
+                c.line(ax, ay + 5, ax + 5, ay, rgb(0xff, 0xff, 0xff));
+            }
+            d.hit(c, r, hit);
+        }
+        by += BTN_H + 4;
     }
 }
 

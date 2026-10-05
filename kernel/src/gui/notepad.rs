@@ -968,7 +968,10 @@ impl Notepad {
         };
         let mode = d.mode;
         match ev {
-            filedialog::Event::None | filedialog::Event::Redraw => {}
+            // ChosenMany: only Open dialogs for several files give it
+            filedialog::Event::None
+            | filedialog::Event::Redraw
+            | filedialog::Event::ChosenMany(_) => {}
             filedialog::Event::Cancel => {
                 self.dialog = None;
                 self.pending = None;
@@ -976,7 +979,7 @@ impl Notepad {
             filedialog::Event::Chosen(path) => {
                 self.dialog = None;
                 match mode {
-                    Mode::Open => self.load(&path),
+                    Mode::Open | Mode::OpenMany => self.load(&path),
                     Mode::Save => {
                         let same = self.path.as_deref() == Some(path.as_str());
                         if fs::exists(&path) && !same {

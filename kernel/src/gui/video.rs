@@ -911,6 +911,8 @@ impl Video {
         match event {
             filedialog::Event::None => false,
             filedialog::Event::Redraw => true,
+            // only Open dialogs for several files give these
+            filedialog::Event::ChosenMany(_) => false,
             filedialog::Event::Cancel => {
                 self.dialog = None;
                 true

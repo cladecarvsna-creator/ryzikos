@@ -1,5 +1,7 @@
 //! The Open and Save as dialogs: a folder's contents, places on the
-//! left, a file name box, and Open/Save and Cancel.
+//! left, a file name box, and Open/Save and Cancel. In the
+//! [`Mode::OpenMany`] dialog Ctrl+click and Shift+click pick several
+//! files, and Ctrl+A all of them.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,6 +22,8 @@ const DOUBLE_CLICK: u64 = interrupts::TIMER_HZ / 2;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Open,
+    /// Open one file or several.
+    OpenMany,
     Save,
 }
 
@@ -29,6 +33,8 @@ pub enum Event {
     Cancel,
     /// The file to open or save to.
     Chosen(String),
+    /// The files picked in a [`Mode::OpenMany`] dialog.
+    ChosenMany(Vec<String>),
 }
 
 pub struct FileDialog {
@@ -38,6 +44,8 @@ pub struct FileDialog {
     dir: String,
     items: Vec<Info>,
     selected: Option<usize>,
+    /// The files picked in a [`Mode::OpenMany`] dialog.
+    marked: Vec<usize>,
     /// First row shown.
     scroll: usize,
     name: TextField,
@@ -96,6 +104,7 @@ impl FileDialog {
             dir: String::new(),
             items: Vec::new(),
             selected: None,
+            marked: Vec::new(),
             scroll: 0,
             name: TextField::new(name),
             list_focus: false,
@@ -121,6 +130,7 @@ impl FileDialog {
                 self.dir = String::from(dir);
                 self.items = items;
                 self.selected = None;
+                self.marked.clear();
                 self.scroll = 0;
                 self.error = None;
             }
@@ -138,6 +148,9 @@ impl FileDialog {
         if !self.items[i].dir {
             let name = self.items[i].name.clone();
             self.name.set(&name);
+            self.marked = alloc::vec![i];
+        } else {
+            self.marked.clear();
         }
         let rows = Self::rows(list);
         if i < self.scroll {
@@ -154,13 +167,64 @@ impl FileDialog {
         if item.dir {
             self.go(&path);
             Event::Redraw
+        } else if self.mode == Mode::OpenMany {
+            Event::ChosenMany(alloc::vec![path])
         } else {
             Event::Chosen(path)
         }
     }
 
+    /// The names of the picked files as the name box shows them:
+    /// "a.png" "b.png".
+    fn marked_names(&self) -> String {
+        let mut s = String::new();
+        for &i in &self.marked {
+            if !s.is_empty() {
+                s.push(' ');
+            }
+            s.push('"');
+            s.push_str(&self.items[i].name);
+            s.push('"');
+        }
+        s
+    }
+
+    /// Ctrl+click (add or take away one file) or Shift+click (all from
+    /// the selected one to this one) in an OpenMany dialog.
+    fn mark(&mut self, i: usize, range: bool) {
+        if self.items[i].dir {
+            return;
+        }
+        if range {
+            let from = self.selected.unwrap_or(i);
+            let (a, b) = (from.min(i), from.max(i));
+            self.marked = (a..=b).filter(|&k| !self.items[k].dir).collect();
+        } else if let Some(p) = self.marked.iter().position(|&k| k == i) {
+            self.marked.remove(p);
+        } else {
+            self.marked.push(i);
+        }
+        self.list_focus = true;
+        if !range {
+            self.selected = Some(i);
+        }
+        let names = self.marked_names();
+        self.name.set(&names);
+    }
+
     /// Open or Save was pressed.
     fn accept(&mut self) -> Event {
+        if self.mode == Mode::OpenMany
+            && self.marked.len() > 1
+            && self.name.string() == self.marked_names()
+        {
+            let paths = self
+                .marked
+                .iter()
+                .map(|&i| fs::join(&self.dir, &self.items[i].name))
+                .collect();
+            return Event::ChosenMany(paths);
+        }
         let mut name = self.name.string();
         let trimmed = name.trim().trim_end_matches('.');
         if trimmed.is_empty() {
@@ -178,11 +242,12 @@ impl FileDialog {
             return Event::Redraw;
         }
         match self.mode {
-            Mode::Open if !fs::exists(&path) => {
+            Mode::Open | Mode::OpenMany if !fs::exists(&path) => {
                 self.error = Some(fs::Error::NotFound.message());
                 Event::Redraw
             }
             Mode::Open => Event::Chosen(path),
+            Mode::OpenMany => Event::ChosenMany(alloc::vec![path]),
             Mode::Save => {
                 let file = String::from(fs::file_name(&path));
                 if !fs::valid_name(&file) {
@@ -205,10 +270,21 @@ impl FileDialog {
         match key {
             Key::Escape => return Event::Cancel,
             Key::Enter => {
+                if self.marked.len() > 1 && self.list_focus {
+                    return self.accept();
+                }
                 if let Some(i) = self.selected.filter(|_| self.list_focus) {
                     return self.activate(i);
                 }
                 return self.accept();
+            }
+            Key::Ctrl('a') if self.mode == Mode::OpenMany && self.list_focus => {
+                self.marked = (0..self.items.len())
+                    .filter(|&k| !self.items[k].dir)
+                    .collect();
+                let names = self.marked_names();
+                self.name.set(&names);
+                return Event::Redraw;
             }
             Key::Up | Key::Down if !self.items.is_empty() => {
                 let i = match (self.selected, key) {
@@ -278,6 +354,13 @@ impl FileDialog {
                 self.selected = None;
                 return Event::Redraw;
             }
+            if self.mode == Mode::OpenMany
+                && (crate::keyboard::ctrl_held() || crate::keyboard::shift_held())
+            {
+                self.mark(i, crate::keyboard::shift_held());
+                self.last_click = (0, usize::MAX);
+                return Event::Redraw;
+            }
             let now = interrupts::ticks();
             let double = self.last_click.1 == i && now - self.last_click.0 <= DOUBLE_CLICK;
             self.last_click = (now, i);
@@ -299,7 +382,7 @@ impl FileDialog {
         c.fill_round(p, 8, theme::face());
         c.outline_round(p, 8, theme::frame());
         let title = match self.mode {
-            Mode::Open => "Open",
+            Mode::Open | Mode::OpenMany => "Open",
             Mode::Save => "Save as",
         };
         c.draw_text_in(&TITLE, p.x + 20, p.y + 16, title, theme::text());
@@ -340,7 +423,7 @@ impl FileDialog {
                     l.list.w - 4,
                     ROW,
                 );
-                if self.selected == Some(k) {
+                if self.selected == Some(k) || self.marked.contains(&k) {
                     lc.fill_round(r, 3, theme::selection());
                 }
                 if item.dir {
@@ -360,9 +443,16 @@ impl FileDialog {
         self.name.draw(c, l.name, true, caret);
         if let Some(e) = self.error {
             c.draw_text(p.x + 20, l.ok.y + 7, e, theme::error());
+        } else if self.mode == Mode::OpenMany {
+            let hint = if self.marked.len() > 1 {
+                alloc::format!("{} files picked", self.marked.len())
+            } else {
+                String::from("Ctrl+click picks several")
+            };
+            c.draw_text(p.x + 20, l.ok.y + 7, &hint, theme::text_dim());
         }
         let ok = match self.mode {
-            Mode::Open => "Open",
+            Mode::Open | Mode::OpenMany => "Open",
             Mode::Save => "Save",
         };
         theme::accent_button(c, l.ok, ok, false);

@@ -65,9 +65,26 @@ pub enum Cmd {
     Open(Peer),
     /// Load older messages of a chat.
     Older(Peer),
-    Send(Peer, String),
-    /// Send a file from the disk.
-    SendFile(Peer, String),
+    /// Send a message, as an answer to message `.2` unless it is 0.
+    Send(Peer, String, i64),
+    /// Send a file from the disk, as an answer like [`Cmd::Send`].
+    SendFile(Peer, String, i64),
+    /// Change the text of one of our messages.
+    Edit(Peer, i64, String),
+    /// Delete messages; `true` also for the other side.
+    Delete(Peer, Vec<i64>, bool),
+    /// Forward messages of a chat to another chat.
+    Forward(Peer, Vec<i64>, Peer),
+    /// Pin (true) or unpin a message.
+    Pin(Peer, i64, bool),
+    /// Load the pinned messages of a chat.
+    Pinned(Peer),
+    /// Load messages that messages answer, to show what they quote.
+    Quote(Peer, Vec<i64>),
+    /// Tell the chat we are typing.
+    Typing(Peer),
+    /// Press an inline button with callback data under a message.
+    Callback(Peer, i64, Vec<u8>),
     /// Load the picture of a message (a photo, or a file's preview) to
     /// show in the chat.
     Preview(Peer, i64),
@@ -88,6 +105,21 @@ pub enum Cmd {
     /// The client's own timer, not the window's.
     Wake,
     LogOut,
+}
+
+impl Cmd {
+    /// Done in the background: the window doesn't show it is waiting.
+    pub fn quiet(&self) -> bool {
+        matches!(
+            self,
+            Cmd::Typing(_)
+                | Cmd::Quote(..)
+                | Cmd::Pinned(_)
+                | Cmd::Preview(..)
+                | Cmd::Older(_)
+                | Cmd::Wake
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +174,45 @@ pub struct Message {
     pub links: Vec<(usize, usize, String)>,
     /// A link preview: the site and title.
     pub web: Option<(String, String)>,
+    /// The message this one answers; 0 for none.
+    pub reply_to: i64,
+    pub pinned: bool,
+    /// Who it was forwarded from.
+    pub fwd: Option<String>,
+    /// Inline buttons under the message, in rows.
+    pub buttons: Vec<Vec<KeyButton>>,
+    /// A bot's keyboard to show instead of the usual one: rows of texts
+    /// to send. `Some(empty)` hides an earlier one.
+    pub keyboard: Option<Vec<Vec<String>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct KeyButton {
+    pub text: String,
+    pub action: ButtonAction,
+}
+
+#[derive(Clone, Debug)]
+pub enum ButtonAction {
+    Url(String),
+    /// Data for the bot (messages.getBotCallbackAnswer).
+    Callback(Vec<u8>),
+    Copy(String),
+    /// Something this client can't do, like playing a game.
+    Other,
+}
+
+/// When someone was last online.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Status {
+    /// Online until this Telegram time.
+    Online(i64),
+    /// Last seen at this Telegram time.
+    Offline(i64),
+    Recently,
+    LastWeek,
+    LastMonth,
+    Hidden,
 }
 
 /// Where Telegram keeps a file, and which data centre has it.
@@ -241,6 +312,8 @@ pub struct Shared {
     pub version: u64,
     /// Seconds to add to a Telegram time to get the local time.
     pub tz: i64,
+    /// Seconds to add to [`mtproto::now_ms`] / 1000 for Telegram's time.
+    pub time_offset: i64,
     /// The chat the window shows: new messages there are read at once.
     pub open: Option<Peer>,
     /// Pictures for the chat by (chat, message).
@@ -256,6 +329,17 @@ pub struct Shared {
     /// A short note for the window to show once, like a link that led
     /// nowhere.
     pub notice: Option<String>,
+    /// A link for the window to follow (from a bot's button).
+    pub follow: Option<String>,
+    /// Who is typing where: (user, what they do, until when in ms).
+    pub typing: BTreeMap<Peer, Vec<(i64, String, i64)>>,
+    /// When people were last online, by user.
+    pub status: BTreeMap<i64, Status>,
+    /// The pinned messages of chats, newest first.
+    pub pinned: BTreeMap<Peer, Vec<Message>>,
+    /// Messages answered by messages on screen that are not loaded
+    /// themselves, for what they quote.
+    pub quoted: BTreeMap<(Peer, i64), Message>,
 }
 
 impl Shared {
@@ -271,6 +355,7 @@ impl Shared {
             commands: VecDeque::new(),
             version: 1,
             tz: 0,
+            time_offset: 0,
             open: None,
             previews: BTreeMap::new(),
             downloads: BTreeMap::new(),
@@ -279,6 +364,11 @@ impl Shared {
             info: BTreeMap::new(),
             to_open: Vec::new(),
             notice: None,
+            follow: None,
+            typing: BTreeMap::new(),
+            status: BTreeMap::new(),
+            pinned: BTreeMap::new(),
+            quoted: BTreeMap::new(),
         }
     }
 
@@ -288,6 +378,28 @@ impl Shared {
 
     pub fn chat(&self, peer: Peer) -> Option<&Chat> {
         self.chats.iter().find(|c| c.peer == peer)
+    }
+
+    /// A message of a chat, from its history or what was loaded to be
+    /// quoted.
+    pub fn find(&self, peer: Peer, id: i64) -> Option<&Message> {
+        self.history
+            .get(&peer)
+            .and_then(|h| h.messages.iter().find(|m| m.id == id))
+            .or_else(|| self.quoted.get(&(peer, id)))
+    }
+
+    /// Who is typing in a chat now, if anyone.
+    pub fn typing_in(&self, peer: Peer, now_ms: i64) -> Vec<(i64, String)> {
+        self.typing
+            .get(&peer)
+            .map(|v| {
+                v.iter()
+                    .filter(|t| t.2 > now_ms)
+                    .map(|t| (t.0, t.1.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
