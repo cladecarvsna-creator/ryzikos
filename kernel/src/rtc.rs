@@ -104,32 +104,6 @@ pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
     )
 }
 
-/// Today's date as (year, month 1-12, day 1-31).
-pub fn date() -> (u16, u8, u8) {
-    let sample = || {
-        while updating() {
-            core::hint::spin_loop();
-        }
-        (read(0x09), read(0x08), read(0x07))
-    };
-    let mut now = sample();
-    loop {
-        let again = sample();
-        if again == now {
-            break;
-        }
-        now = again;
-    }
-    let (y, m, d) = now;
-    let bcd = |v: u8| (v & 0x0f) + (v >> 4) * 10;
-    let (y, m, d) = if read(0x0b) & 0x04 == 0 {
-        (bcd(y), bcd(m), bcd(d))
-    } else {
-        (y, m, d)
-    };
-    (2000 + y as u16, m.clamp(1, 12), d.clamp(1, 31))
-}
-
 /// Day of the week, 0 is Sunday (Sakamoto's method).
 pub fn weekday(year: u16, month: u8, day: u8) -> u8 {
     const T: [u16; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];

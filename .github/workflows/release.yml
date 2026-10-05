@@ -62,7 +62,7 @@ jobs:
           gzip -9 -n -c build/kernel.bin > kernel.gz
           echo "${{ github.run_number }} $(sha256sum kernel.gz | cut -d' ' -f1)" > version.txt
           gh release create "v${version}" "ryzikos-${version}.iso" "ryzikos-${version}.iso.sha256" \
-            kernel.gz version.txt \
+            kernel.gz version.txt scripts/run-windows.bat scripts/ryzikos-clipboard.ps1 \
             --title "RyzikOS ${version}" \
             --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \
             --latest

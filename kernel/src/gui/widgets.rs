@@ -14,6 +14,20 @@ use crate::sync::IrqMutex;
 static CLIPBOARD: IrqMutex<String> = IrqMutex::new(String::new());
 
 pub fn copy(text: &str) {
+    set_text(text);
+    crate::hostclip::send(text);
+}
+
+/// Text copied on the computer RyzikOS runs in (see hostclip).
+pub fn copy_from_host(text: &str) {
+    set_text(text);
+    crate::serial::write_str(&alloc::format!(
+        "clipboard: {} characters from the host\n",
+        text.chars().count()
+    ));
+}
+
+fn set_text(text: &str) {
     *CLIP_IMAGE.lock() = None;
     let mut clip = CLIPBOARD.lock();
     clip.clear();

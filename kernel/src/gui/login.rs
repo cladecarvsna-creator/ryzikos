@@ -184,8 +184,7 @@ impl Login {
 
     /// Read the clock; mark the lock screen text if it changed.
     pub fn update_clock(&mut self) {
-        let (h, m, _) = rtc::time();
-        let (year, month, day) = rtc::date();
+        let ((year, month, day), (h, m, _)) = crate::clock::now();
         let mut clock = StackString::<8>::new();
         let _ = write!(clock, "{:02}:{:02}", h, m);
         if clock.as_str() != self.clock.as_str() {

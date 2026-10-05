@@ -77,7 +77,7 @@ pub fn now_ms() -> i64 {
     let ticks = interrupts::ticks() as i64;
     if BASE.load(Ordering::Relaxed) == i64::MIN {
         BASE_TICKS.store(ticks, Ordering::Relaxed);
-        BASE.store(crate::rtc::unix_time() * 1000, Ordering::Relaxed);
+        BASE.store(crate::clock::utc() * 1000, Ordering::Relaxed);
     }
     let elapsed = ticks - BASE_TICKS.load(Ordering::Relaxed);
     BASE.load(Ordering::Relaxed) + elapsed * 1000 / interrupts::TIMER_HZ as i64

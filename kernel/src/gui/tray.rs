@@ -15,7 +15,7 @@ use super::theme;
 use crate::keyboard::Layout;
 use crate::{net, rtc, StackString};
 
-pub const QUICK_W: i32 = 360;
+pub const QUICK_W: i32 = 468;
 pub const QUICK_H: i32 = 292;
 pub const CALENDAR_W: i32 = 336;
 pub const CALENDAR_H: i32 = 376;
@@ -88,6 +88,9 @@ pub enum Target {
     NetworkTile,
     LayoutTile,
     VpnTile,
+    /// Take a screenshot: for when PrintScreen doesn't reach RyzikOS
+    /// (Windows keeps it for itself when RyzikOS runs in a window).
+    ShotTile,
     Slider(Slider),
 }
 
@@ -152,6 +155,7 @@ impl Tray {
             (Target::NetworkTile, Self::tile(p, 0)),
             (Target::LayoutTile, Self::tile(p, 1)),
             (Target::VpnTile, Self::tile(p, 2)),
+            (Target::ShotTile, Self::tile(p, 3)),
             (
                 Target::Slider(Slider::Brightness),
                 Self::track(p, Slider::Brightness).inset(-14),
@@ -199,6 +203,7 @@ impl Tray {
             (Target::NetworkTile, online, "Ethernet"),
             (Target::LayoutTile, true, "Keyboard"),
             (Target::VpnTile, self.vpn, "VPN"),
+            (Target::ShotTile, false, "Screenshot"),
         ];
         for (i, (t, on, label)) in tiles.into_iter().enumerate() {
             let r = Self::tile(p, i as i32);
@@ -226,6 +231,7 @@ impl Tray {
             match t {
                 Target::NetworkTile => network_icon(c, cx - 8, cy - 8, self.net, ink, face),
                 Target::VpnTile => shield_icon(c, cx - 8, cy - 9, ink, face),
+                Target::ShotTile => camera_icon(c, cx - 10, cy - 8, ink, face),
                 _ => c.text_centered_in(&UI_BOLD, r, layout_label(layout), ink),
             }
             c.text_centered(
@@ -306,7 +312,7 @@ impl Tray {
 
     pub fn draw_calendar(c: &mut Canvas, p: Rect) {
         Self::panel_face(c, p);
-        let (year, month, day) = rtc::date();
+        let (year, month, day) = crate::clock::date();
         let weekday = rtc::weekday(year, month, day) as usize;
         let mut text = StackString::<48>::new();
         let _ = write!(
@@ -475,4 +481,13 @@ pub fn sun_icon(c: &mut Canvas, x: i32, y: i32, ink: Color) {
         let (cx, cy) = (x + 8, y + 8);
         c.line(cx + dx * 5, cy + dy * 5, cx + dx * 7, cy + dy * 7, ink);
     }
+}
+
+/// A small camera, 20x16, for the Screenshot tile.
+fn camera_icon(c: &mut Canvas, x: i32, y: i32, ink: u32, face: u32) {
+    c.fill_round(Rect::new(x + 6, y, 8, 4), 1, ink);
+    c.fill_round(Rect::new(x, y + 3, 20, 13), 3, ink);
+    c.fill_round(Rect::new(x + 2, y + 5, 16, 9), 2, face);
+    c.fill_round(Rect::new(x + 6, y + 6, 8, 8), 4, ink);
+    c.fill_round(Rect::new(x + 8, y + 8, 4, 4), 2, face);
 }
