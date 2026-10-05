@@ -65,6 +65,7 @@ pub extern "C" fn kernel_main(multiboot_info: usize) -> ! {
     let mouse = ps2::init();
     interrupts::enable();
     fs::init();
+    users::load();
     update::clean_up();
     crash::init();
     let sound = sound::init();

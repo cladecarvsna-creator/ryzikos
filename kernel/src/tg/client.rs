@@ -46,7 +46,10 @@ const UPLOAD_PART: usize = 128 * 1024;
 const MAX_UPLOAD: usize = 64 << 20;
 /// Downloads come in parts of this size (Telegram wants a power of two).
 const DOWNLOAD_PART: usize = 512 * 1024;
-const MAX_DOWNLOAD: usize = 256 << 20;
+/// Files are saved as they download, up to what FAT32 can hold.
+const MAX_DOWNLOAD: u64 = u32::MAX as u64;
+/// Pictures and other things kept in memory, not saved.
+const MAX_IN_MEMORY: usize = 32 << 20;
 /// Pictures in the chat are at most this many pixels wide and high.
 const PREVIEW_MAX: usize = 320;
 
@@ -1287,12 +1290,16 @@ impl Client {
 
     /// Download a file, or one size (`thumb`) of a photo or a file's
     /// preview. With `progress`, the download of that message counts up.
+    /// The parts go to `out` as they arrive, from byte `done` on, and
+    /// `done` counts them, so a retry carries on where this stopped.
     fn get_file(
         &mut self,
         f: &FileRef,
         thumb: &str,
         progress: Option<(Peer, i64)>,
-    ) -> Result<Vec<u8>> {
+        done: &mut u64,
+        out: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
         let location = Obj::new(
             if f.photo {
                 "inputPhotoFileLocation"
@@ -1307,13 +1314,12 @@ impl Client {
             ],
         );
         let mut dc = f.dc;
-        let mut data: Vec<u8> = Vec::new();
         loop {
             let req = Obj::new(
                 "upload.getFile",
                 &[
                     ("location", location.clone().into()),
-                    ("offset", Value::Long(data.len() as i64)),
+                    ("offset", Value::Long(*done as i64)),
                     ("limit", Value::Int(DOWNLOAD_PART as i32)),
                 ],
             );
@@ -1329,14 +1335,15 @@ impl Client {
                 .map(|o| o.bytes("bytes").to_vec())
                 .unwrap_or_default();
             let last = part.len() < DOWNLOAD_PART;
-            data.extend_from_slice(&part);
-            if data.len() > MAX_DOWNLOAD {
+            if *done + part.len() as u64 > MAX_DOWNLOAD {
                 return Err(Error::Other(String::from(
-                    "the file is too big (over 256 MB)",
+                    "the file is too big (over 4 GB)",
                 )));
             }
+            out(&part)?;
+            *done += part.len() as u64;
             if let Some(key) = progress {
-                let done = data.len() as i64;
+                let done = *done as i64;
                 self.update(|s| {
                     if let Some(d) = s.downloads.get_mut(&key) {
                         d.done = done;
@@ -1344,7 +1351,7 @@ impl Client {
                 });
             }
             if last {
-                return Ok(data);
+                return Ok(());
             }
             self.keep_alive()?;
         }
@@ -1423,14 +1430,36 @@ impl Client {
         preview: bool,
         progress: Option<(Peer, i64)>,
     ) -> Result<Vec<u8>> {
+        let mut data = Vec::new();
+        self.fetch_into(peer, id, preview, progress, &mut |part| {
+            if data.len() + part.len() > MAX_IN_MEMORY {
+                return Err(Error::Other(String::from("the file is too big to show")));
+            }
+            data.extend_from_slice(part);
+            Ok(())
+        })?;
+        Ok(data)
+    }
+
+    /// Download a message's file a part at a time into `out`, so a big
+    /// one never has to fit in memory.
+    fn fetch_into(
+        &mut self,
+        peer: Peer,
+        id: i64,
+        preview: bool,
+        progress: Option<(Peer, i64)>,
+        out: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
         let m = self.message(peer, id).ok_or("the message is gone")?;
         let (file, thumb, _, _) = Self::what(&m, preview).ok_or("nothing to download")?;
-        match self.get_file(&file, &thumb, progress) {
+        let mut done = 0;
+        match self.get_file(&file, &thumb, progress, &mut done, out) {
             Err(e) if matches!(&e, Error::Rpc { message, .. } if message.starts_with("FILE_REFERENCE_")) =>
             {
                 let m = self.refresh(peer, id)?.ok_or("the message is gone")?;
                 let (file, thumb, _, _) = Self::what(&m, preview).ok_or("nothing to download")?;
-                self.get_file(&file, &thumb, progress)
+                self.get_file(&file, &thumb, progress, &mut done, out)
             }
             other => other,
         }
@@ -1494,9 +1523,19 @@ impl Client {
             );
         });
         log(&format!("downloading {}", name));
-        let result = self
-            .fetch(peer, id, false, Some(key))
-            .and_then(|data| save_download(&name, &data).map_err(Error::Other));
+        // saved as it arrives: a big file never has to fit in memory
+        let result = new_download(&name).map_err(Error::Other).and_then(|path| {
+            let saved = self.fetch_into(peer, id, false, Some(key), &mut |part| {
+                fs::append(&path, part).map_err(|e| Error::Other(String::from(e.message())))
+            });
+            match saved {
+                Ok(()) => Ok(path),
+                Err(e) => {
+                    let _ = fs::remove(&path);
+                    Err(e)
+                }
+            }
+        });
         match result {
             Ok(path) => {
                 log(&format!("saved {}", path));
@@ -2645,9 +2684,9 @@ fn shrink(img: crate::web::image::Image, max_w: usize, max_h: usize) -> crate::w
     }
 }
 
-/// Save a downloaded file in the user's Downloads, under a name not
-/// taken yet. Returns its path.
-fn save_download(name: &str, data: &[u8]) -> core::result::Result<String, String> {
+/// Make an empty file for a download in the user's Downloads, under a
+/// name not taken yet. Returns its path.
+fn new_download(name: &str) -> core::result::Result<String, String> {
     let user = crate::users::current_name().unwrap_or_default();
     let dir = fs::join(&fs::home(user.as_str()), "Downloads");
     if !fs::is_dir(&dir) {
@@ -2669,7 +2708,7 @@ fn save_download(name: &str, data: &[u8]) -> core::result::Result<String, String
         _ => (safe.as_str(), ""),
     };
     let path = fs::join(&dir, &fs::unique_name(&dir, stem, ext));
-    fs::write(&path, data).map_err(|e| String::from(e.message()))?;
+    fs::write(&path, &[]).map_err(|e| String::from(e.message()))?;
     Ok(path)
 }
 

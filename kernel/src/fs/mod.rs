@@ -610,6 +610,11 @@ pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     changed(on_volume(path, |v, p| v.write(p, data)))
 }
 
+/// Add bytes to the end of a file that is already there.
+pub fn append(path: &str, data: &[u8]) -> Result<(), Error> {
+    changed(on_volume(path, |v, p| v.append(p, data)))
+}
+
 pub fn create_dir(path: &str) -> Result<(), Error> {
     changed(on_volume(path, |v, p| v.create_dir(p)))
 }
