@@ -109,6 +109,7 @@ def document(did, name, mime, data, attrs=(), thumb=None):
 
 
 OLD_RSA_ONLY = False
+BIG_MB = 0
 
 
 def sha1(*p):
@@ -203,6 +204,11 @@ class World:
                  fwd_from=types.MessageFwdHeader(date=now - 9000, from_id=types.PeerChannel(CHANNEL)))
         bot = ("user", 1003)
         self.add(bot, 1003, "Pick one:", now - 200, reply_markup=self.bot_buttons())
+        if BIG_MB:
+            # a file bigger than the memory RyzikOS keeps for itself
+            big = bytes(range(256)) * (BIG_MB * 4096)
+            self.add(a, 1001, "A big file", now - 60,
+                     media=document(603, "big-file.bin", "application/octet-stream", big))
         self.unread = {a: 1, ("user", 1003): 1}
         self.read_out = {a: 0}
         self.pending = []  # (when, peer, from, text)
@@ -280,7 +286,7 @@ class World:
         ]
 
 
-WORLD = World()
+WORLD = None
 
 
 def peer_key(p):
@@ -672,7 +678,7 @@ class Handler(socketserver.BaseRequestHandler):
             if loc.thumb_size == "m":
                 data = thumb
             log("  file", loc.id, loc.thumb_size or "whole", obj.offset, "of", len(data))
-            time.sleep(0.2)
+            time.sleep(0.2 if len(data) < 8 << 20 else 0.01)
             return types.upload.File(type=types.storage.FileUnknown(), mtime=0,
                                      bytes=data[obj.offset:obj.offset + obj.limit])
         if n == "ExportAuthorizationRequest":
@@ -878,10 +884,14 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8443)
     ap.add_argument("--key", default="tg-test-server.key", help="where to keep the RSA key")
     ap.add_argument("--conf", help="also write a telegram.conf for RyzikOS here")
+    ap.add_argument("--big", type=int, default=0, metavar="MB",
+                    help="also send a file of this many MB, to try big downloads")
     ap.add_argument("--old-rsa-only", action="store_true",
                     help="answer RSA_PAD with -404, like a server that can't read it")
     args = ap.parse_args()
     OLD_RSA_ONLY = args.old_rsa_only
+    BIG_MB = args.big
+    WORLD = World()
     RSA_N, RSA_D = rsa_key(args.key)
     Keys.load(args.key + ".sessions")
     FINGERPRINT = struct.unpack("<q", sha1(tl_bytes(ib(RSA_N)) + tl_bytes(b"\x01\x00\x01"))[-8:])[0]

@@ -107,8 +107,17 @@ pub fn address_to_url(text: &str) -> Option<Url> {
 /// Download a page, run its scripts and lay it out. Never fails: errors
 /// become an error page.
 pub fn load(url: &Url, form: Option<&String>, viewport: (i32, i32), scripts: bool) -> Page {
-    match http::get(url, form.map(|f| f.as_str())) {
+    // a big file is saved as it downloads rather than held in memory
+    let mut save_to = |resp: &http::Response| {
+        let ct = &resp.content_type;
+        let page = ct.is_empty() || ct.starts_with("text/") || ct.contains("html") || ct.contains("xml") || ct.contains("json") || ct.contains("javascript");
+        (wants_download(resp) || !page).then(|| download_path(resp).0)
+    };
+    match http::get_saving(url, form.map(|f| f.as_str()), &mut save_to) {
         Ok(resp) => {
+            if let Some(path) = resp.file.clone() {
+                return downloaded(resp.url, &path, viewport);
+            }
             let ct = resp.content_type.clone();
             if wants_download(&resp) {
                 return save_download(resp, viewport);
@@ -197,9 +206,9 @@ fn download_name(resp: &http::Response) -> String {
     }
 }
 
-/// Keep a downloaded file: programs go to Programs, everything else to
-/// Downloads. Returns the page that says where it went.
-fn save_download(resp: http::Response, viewport: (i32, i32)) -> Page {
+/// Where to keep a downloaded file: programs go to Programs, everything
+/// else to Downloads. The path, and whether it is a program.
+fn download_path(resp: &http::Response) -> (String, bool) {
     use crate::fs;
     let user = crate::users::current_name().unwrap_or_default();
     let name = download_name(&resp);
@@ -216,17 +225,32 @@ fn save_download(resp: http::Response, viewport: (i32, i32)) -> Page {
         };
         fs::unique_name(&dir, base, ext)
     };
-    let path = fs::join(&dir, &name);
-    let size = resp.body.len();
-    crate::serial::write_str(&format!("\nbrowser: downloaded {} ({} bytes)\n", name, size));
-    if let Err(e) = fs::write(&path, &resp.body) {
+    (fs::join(&dir, &name), program)
+}
+
+/// Keep a downloaded file that came in memory. Returns the page that
+/// says where it went.
+fn save_download(resp: http::Response, viewport: (i32, i32)) -> Page {
+    let (path, _) = download_path(&resp);
+    if let Err(e) = crate::fs::write(&path, &resp.body) {
         return message_page(
             Some(resp.url),
             "Download failed",
-            &format!("{} could not be saved: {}", name, e.message()),
+            &format!("{} could not be saved: {}", crate::fs::file_name(&path), e.message()),
             viewport,
         );
     }
+    downloaded(resp.url, &path, viewport)
+}
+
+/// The page that says a download was saved at `path`.
+fn downloaded(url: Url, path: &str, viewport: (i32, i32)) -> Page {
+    use crate::fs;
+    let name = String::from(fs::file_name(path));
+    let dir = fs::parent(path);
+    let program = name.to_ascii_lowercase().ends_with(PROGRAM_EXT);
+    let size = fs::open(path).map_or(0, |f| f.size as usize);
+    crate::serial::write_str(&format!("\nbrowser: downloaded {} ({} bytes)\n", name, size));
     let size_text = if size >= 1024 * 1024 {
         format!("{}.{} MB", size / (1024 * 1024), size % (1024 * 1024) * 10 / (1024 * 1024))
     } else {
@@ -253,12 +277,12 @@ fn save_download(resp: http::Response, viewport: (i32, i32)) -> Page {
          <p><a class=btn href=\"ryzikos:open:{path}\">{action}</a> <a class=btn2 href=\"ryzikos:folder:{dir}\">Show in Files</a> <a class=btn2 href=\"about:downloads\">All downloads</a></p></div>",
         title = title,
         text = text,
-        path = escape(&path),
+        path = escape(path),
         dir = escape(&dir),
         action = action,
         STYLE = SPECIAL_STYLE,
     );
-    from_html(Some(resp.url), &source, viewport)
+    from_html(Some(url), &source, viewport)
 }
 
 const SPECIAL_STYLE: &str = "<style>body{font-family:sans-serif;margin:0;background:#f4f6fb;color:#1d2230}\

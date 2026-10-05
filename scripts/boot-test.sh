@@ -19,12 +19,14 @@ monitor="$dir/monitor.sock"
 disk="$dir/disk.img"
 qemu=""
 trap 'kill $qemu "$web" 2> /dev/null; rm -rf "$dir"' EXIT
-truncate -s 64M "$disk"
+truncate -s 256M "$disk"
 
 mkdir "$dir/www"
 echo '<html><head><title>EverOS test page</title></head><body><h1>It works</h1><a href="/x">x</a></body></html>' \
     > "$dir/www/index.html"
 echo '<title>Test program</title><p>hello</p>' > "$dir/www/test.rzapp"
+# bigger than half the kernel's memory: saved as it downloads
+head -c 73400320 /dev/zero > "$dir/www/big.zip"
 python3 -m http.server 8123 --bind 127.0.0.1 --directory "$dir/www" > /dev/null 2>&1 &
 web=$!
 
@@ -44,9 +46,10 @@ boot() {
 }
 boot
 
-# wait for a line starting with $1 in the serial log
+# wait for a line starting with $1 in the serial log, for $2 half
+# seconds (30 seconds if not given)
 wait_for() {
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 "${2:-60}"); do
         if grep -q "^$1" "$log" 2> /dev/null; then
             return 0
         fi
@@ -231,6 +234,15 @@ wait_for "desktop: opened Terminal" || fail "the desktop did not start again"
 type_keys c a t spc s a v e d dot t x t ret
 wait_for "saved-ok" || fail "the file was gone after restarting"
 echo "files survive a restart"
+
+# a 70 MB download goes to the disk as it arrives instead of filling
+# the memory (it used to stop with a blue screen)
+type_keys b r o w s e r spc 1 0 dot 0 dot 2 dot 2 shift-semicolon 8 1 2 3 slash b i g dot z i p ret
+wait_for "browser: downloaded big.zip (73400320 bytes)" 240 || fail "the browser could not download a 70 MB file"
+echo "the browser downloads files bigger than the memory"
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
 type_keys s e t t i n g s ret
 wait_for "desktop: opened Settings" || fail "the shell could not open Settings"
 echo "Settings opens"
@@ -252,12 +264,15 @@ wait_for "desktops: task view" || fail "Win+Tab did not open Task View"
 echo "virtual desktops and Task View work"
 
 # the blue screen: a panic saves a report on the disk and restarts (QEMU
-# quits on the restart), and the next sign-in says why it restarted
+# quits on the restart), and the next sign-in says why it restarted; an
+# account made before it is still there after
 type_keys esc
 sleep 1
 type_keys meta_l-s
 type_keys t e r m ret
 sleep 1
+type_keys u s e r a d d spc j a c k spc s e c r e t ret
+wait_for "added jack" || fail "useradd did not add a user"
 type_keys p a n i c ret
 wait_for "bsod: PANIC_REQUESTED" || fail "panic did not show the blue screen"
 wait_for "crash: report saved to the disk" || fail "the blue screen did not save the crash report"
@@ -267,7 +282,16 @@ wait "$qemu" 2> /dev/null
 echo "panic shows the blue screen and saves a report"
 boot disk
 wait_for "crash: the last run stopped with PANIC_REQUESTED" || fail "the crash report was not found after restarting"
+wait_for "users: loaded the saved accounts" || fail "the accounts were not read back after the blue screen"
 sign_in
 wait_for "crash: showing the report, PANIC_REQUESTED" || fail "the crash report window did not open"
 echo "after the restart, the crash report explains what happened"
+type_keys esc
+sleep 1
+type_keys meta_l-s
+type_keys t e r m ret
+sleep 1
+type_keys u s e r s ret
+wait_for "jack  *password set" || fail "the account made before the blue screen was gone"
+echo "accounts survive the blue screen"
 echo "boot test passed"
