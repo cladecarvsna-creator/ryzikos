@@ -1,16 +1,24 @@
 //! User accounts: a small table of names and password hashes that the
-//! login screen checks. At boot there is one user, `root`, with an empty
+//! login screen checks. At first there is one user, `root`, with an empty
 //! password; the shell's `useradd` and `passwd` add users and passwords.
 //!
+//! The table is saved in [`FILE`] on the system disk every time it
+//! changes and read back at boot, so accounts survive a restart, the
+//! blue screen's included.
+//!
 //! Passwords are kept only as salted hashes, never as text. The hash is
-//! FNV-1a stretched over many rounds: fine for a hobby OS whose table
-//! lives in memory, not a real password hash like Argon2.
+//! FNV-1a stretched over many rounds: fine for a hobby OS, not a real
+//! password hash like Argon2.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::sync::IrqMutex;
-use crate::StackString;
+use crate::{fs, serial, StackString};
+
+/// Where the table is kept: one `name salt hash` line per user, the
+/// numbers in hex. Hidden from Explorer, like the Recycle Bin.
+pub const FILE: &str = "/$users.txt";
 
 pub const MAX_NAME: usize = 16;
 pub const MAX_USERS: usize = 8;
@@ -85,6 +93,63 @@ pub fn init() {
     }
 }
 
+/// At boot, after the disks: read the saved table, if there is one.
+pub fn load() {
+    let Ok(data) = fs::read(FILE) else {
+        return;
+    };
+    let mut loaded: Vec<User> = Vec::new();
+    for line in String::from_utf8_lossy(&data).lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(name), Some(salt), Some(hash), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let (Ok(salt), Ok(hash)) = (u64::from_str_radix(salt, 16), u64::from_str_radix(hash, 16))
+        else {
+            continue;
+        };
+        if valid_name(name) && !loaded.iter().any(|u| u.name == name) && loaded.len() < MAX_USERS {
+            loaded.push(User {
+                name: String::from(name),
+                salt,
+                hash,
+            });
+        }
+    }
+    if loaded.is_empty() {
+        serial::write_str("users: the saved accounts can't be read, keeping root\n");
+        return;
+    }
+    let mut users = USERS.lock();
+    // root is always there, first
+    if !loaded.iter().any(|u| u.name == "root") {
+        if let Some(root) = users.iter().position(|u| u.name == "root") {
+            loaded.insert(0, users.remove(root));
+            loaded.truncate(MAX_USERS);
+        }
+    }
+    *users = loaded;
+    serial::write_str("users: loaded the saved accounts\n");
+}
+
+/// Write the table to [`FILE`]. The text is made under the lock, the
+/// file is written after it is let go.
+fn save() {
+    let text = {
+        let users = USERS.lock();
+        let mut text = String::new();
+        for u in users.iter() {
+            text.push_str(&alloc::format!("{} {:016x} {:016x}\r\n", u.name, u.salt, u.hash));
+        }
+        text
+    };
+    if fs::write(FILE, text.as_bytes()).is_err() {
+        serial::write_str("users: could not save the accounts\n");
+    }
+}
+
 pub fn add(name: &str, password: &str) -> Result<(), Error> {
     if !valid_name(name) {
         return Err(Error::BadName);
@@ -102,6 +167,8 @@ pub fn add(name: &str, password: &str) -> Result<(), Error> {
         salt,
         hash: hash(salt, password),
     });
+    drop(users);
+    save();
     Ok(())
 }
 
@@ -113,6 +180,8 @@ pub fn set_password(name: &str, password: &str) -> Result<(), Error> {
         .ok_or(Error::NoSuchUser)?;
     user.salt = new_salt();
     user.hash = hash(user.salt, password);
+    drop(users);
+    save();
     Ok(())
 }
 

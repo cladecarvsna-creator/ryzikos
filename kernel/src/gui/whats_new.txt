@@ -1,3 +1,6 @@
 You can now select text on web pages: drag over it with the mouse, double-click a word, or press Ctrl+A for the whole page, then Ctrl+C to copy it.
 Big web pages and HTML files open now. RyzikOS uses all of your computer's memory instead of a fixed 128 MB, and a page too big even for that shows the part that fits instead of a blue screen.
 Sites that failed with a certificate error open now: HTTPS uses RyzikOS's own TLS, which handles long certificate chains and sites that still speak only TLS 1.2.
+Moving the mouse and windows is smoother now: RyzikOS redraws only the part of the screen that changed, and window shadows and edges draw about three times faster.
+In a virtual machine the pointer no longer jumps a pixel or two after every move.
+If fullscreen looks stretched, open Settings > System > Resolution and pick a size with the shape of your monitor, such as 1920 x 1200 for a 16:10 screen. The Terminal command "screen 1920x1200" does the same, and RyzikOS keeps your choice.

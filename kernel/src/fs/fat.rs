@@ -953,6 +953,83 @@ impl Volume {
         self.sync()
     }
 
+    /// Write `bytes` into a chain from byte `at`. A cluster the bytes
+    /// start inside is read first, so what is before them stays.
+    fn write_at(&mut self, chain: &[u32], mut at: usize, mut bytes: &[u8]) -> Result<(), Error> {
+        let cb = self.cluster_bytes;
+        let mut buf = vec![0u8; cb];
+        while !bytes.is_empty() {
+            let c = *chain.get(at / cb).ok_or(Error::Io)?;
+            let skip = at % cb;
+            let lba = self.cluster_lba(c);
+            if skip > 0 {
+                self.dev.read(lba, &mut buf)?;
+            } else {
+                buf.fill(0);
+            }
+            let n = (cb - skip).min(bytes.len());
+            buf[skip..skip + n].copy_from_slice(&bytes[..n]);
+            self.dev.write(lba, &buf)?;
+            at += n;
+            bytes = &bytes[n..];
+        }
+        Ok(())
+    }
+
+    /// Add `bytes` to the end of a file, so a big download can be saved
+    /// a part at a time instead of being held in memory whole.
+    pub fn append(&mut self, path: &str, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let (parent, name) = split(path);
+        let dir_cluster = self.dir_cluster(parent)?;
+        let mut dir = self.load_dir(dir_cluster)?;
+        let e = Self::find(&dir, name).ok_or(Error::NotFound)?;
+        if e.is_dir() {
+            return Err(Error::IsADirectory);
+        }
+        let size = e.size as usize;
+        let new_size = size
+            .checked_add(bytes.len())
+            .filter(|&n| n <= u32::MAX as usize)
+            .ok_or(Error::Full)?;
+        let cb = self.cluster_bytes;
+        let mut chain = self.chain(e.cluster);
+        chain.truncate(size.div_ceil(cb));
+        let need = new_size.div_ceil(cb);
+        let mut first = e.cluster;
+        let old_len = chain.len();
+        if need > old_len {
+            let more = self.alloc(need - old_len)?;
+            match chain.last() {
+                Some(&last) => self.set(last, more[0]),
+                None => first = more[0],
+            }
+            chain.extend_from_slice(&more);
+        }
+        if let Err(err) = self.write_at(&chain, size, bytes) {
+            // give back the clusters this added; the file stays as it was
+            if need > old_len {
+                if let Some(last) = old_len.checked_sub(1).map(|i| chain[i]) {
+                    self.set(last, END);
+                }
+                self.free(chain[old_len]);
+            }
+            return Err(err);
+        }
+        let (date, time) = now();
+        let raw = &mut dir.data[e.slot * ENTRY..(e.slot + 1) * ENTRY];
+        raw[11] |= ATTR_ARCHIVE;
+        put16(raw, 20, (first >> 16) as u16);
+        put16(raw, 26, first as u16);
+        put32(raw, 28, new_size as u32);
+        put16(raw, 22, time);
+        put16(raw, 24, date);
+        self.save_dir(&dir)?;
+        self.sync()
+    }
+
     pub fn create_dir(&mut self, path: &str) -> Result<(), Error> {
         let (parent, name) = split(path);
         if !valid_name(name) {

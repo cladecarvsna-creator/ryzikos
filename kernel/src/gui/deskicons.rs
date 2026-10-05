@@ -309,6 +309,12 @@ impl Desktop<'_> {
         self.damage(self.icons_area());
     }
 
+    /// Place the icons again, for a new screen size.
+    pub(super) fn relayout_icons(&mut self) {
+        self.desk_icons.seen = None;
+        self.refresh_icons();
+    }
+
     /// Read the Desktop folder again if files changed.
     pub(super) fn refresh_icons(&mut self) {
         let changes = fs::changes();
