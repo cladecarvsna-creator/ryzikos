@@ -126,6 +126,13 @@ impl Login {
         login
     }
 
+    /// The screen changed size: blur the background at the new size.
+    pub fn resize(&mut self, wallpaper: &[u32], width: i32, height: i32) {
+        self.width = width;
+        self.height = height;
+        self.set_wallpaper(wallpaper);
+    }
+
     /// The wallpaper changed: blur the new one.
     pub fn set_wallpaper(&mut self, wallpaper: &[u32]) {
         make_backdrop(

@@ -258,7 +258,7 @@ impl<'a> Canvas<'a> {
         let row = y as usize * self.stride;
         let run = &mut self.pixels[row + x0 as usize..row + x1 as usize];
         if a >= 256 {
-            run.fill(c);
+            fill_pixels(run, c);
             return;
         }
         // mix(p, c, t) with c's share worked out once for the whole run
@@ -303,7 +303,7 @@ impl<'a> Canvas<'a> {
             let (x0, x1) = (x0.max(r.x), x1.min(r.right()));
             if x0 < x1 {
                 let start = row as usize * self.stride;
-                self.pixels[start + x0 as usize..start + x1 as usize].fill(c);
+                fill_pixels(&mut self.pixels[start + x0 as usize..start + x1 as usize], c);
             }
         }
     }
@@ -546,8 +546,10 @@ impl<'a> Canvas<'a> {
         ];
         let ring = radius * 256 - 128;
         for (x0, y0, cx, cy) in corners {
-            for y in y0..y0 + radius {
-                for x in x0..x0 + radius {
+            // only the part of the corner inside the clip
+            let k = Rect::new(x0, y0, radius, radius).intersect(&self.clip);
+            for y in k.y..k.bottom() {
+                for x in k.x..k.right() {
                     let d = distance256(2 * x + 1 - 2 * cx, 2 * y + 1 - 2 * cy);
                     let cover = (256 - (d - ring).abs()).clamp(0, 256);
                     self.blend(x, y, c, cover);
@@ -559,6 +561,24 @@ impl<'a> Canvas<'a> {
     /// A soft shadow around the rounded rectangle `r`, fading out over
     /// `spread` pixels and shifted down by `drop`.
     pub fn shadow(&mut self, r: Rect, radius: i32, spread: i32, drop: i32, strength: i32) {
+        self.shadow_around(r, radius, spread, drop, strength, false);
+    }
+
+    /// `shadow` for a rounded rectangle that is drawn over it straight
+    /// after, solid: what it will cover is left alone.
+    pub fn shadow_under(&mut self, r: Rect, radius: i32, spread: i32, drop: i32, strength: i32) {
+        self.shadow_around(r, radius, spread, drop, strength, true);
+    }
+
+    fn shadow_around(
+        &mut self,
+        r: Rect,
+        radius: i32,
+        spread: i32,
+        drop: i32,
+        strength: i32,
+        covered: bool,
+    ) {
         let s = r.offset(self.ox, self.oy + drop);
         let outer = Rect::new(
             s.x - spread,
@@ -567,31 +587,82 @@ impl<'a> Canvas<'a> {
             s.h + 2 * spread,
         );
         let area = outer.intersect(&self.clip);
+        if area.is_empty() {
+            return;
+        }
         let inner = r.offset(self.ox, self.oy).inset(radius);
+        // with `covered`, all of `r` but its corner squares is skipped
+        let body = r.offset(self.ox, self.oy);
+        let (wide, tall) = if covered {
+            (
+                Rect::new(body.x, inner.y, body.w, inner.h),
+                Rect::new(inner.x, body.y, inner.w, body.h),
+            )
+        } else {
+            (inner, inner)
+        };
+        // darkness at `d` 1/256 pixels past the rounded rectangle
+        let alpha = |d: i32| {
+            let t = 256 - (d.max(0) / spread).min(256);
+            strength * t * t / 65536
+        };
+        // along the straight edges it only depends on the whole pixels
+        // out from the edge: work those out once, not for every pixel
+        let mut edge = [0i32; 64];
+        let near = (radius + spread + 1).clamp(0, edge.len() as i32);
+        for (n, a) in edge.iter_mut().enumerate().take(near as usize) {
+            *a = alpha(n as i32 * 256 - radius * 256);
+        }
+        let straight = |n: i32| {
+            if n < near {
+                edge[n as usize]
+            } else {
+                alpha(n * 256 - radius * 256)
+            }
+        };
         for y in area.y..area.bottom() {
             let (x0, x1) = self.row_span(y);
             let (x0, x1) = (x0.max(area.x), x1.min(area.right()));
+            if x0 >= x1 {
+                continue;
+            }
             // the window covers the middle of the shadow: skip over it
-            let (skip0, skip1) = if !inner.is_empty() && y >= inner.y && y < inner.bottom() {
-                let skip0 = inner.x.clamp(x0, x1.max(x0));
-                (skip0, inner.right().clamp(skip0, x1.max(skip0)))
+            let hole = if !inner.is_empty() && y >= wide.y && y < wide.bottom() {
+                wide
+            } else {
+                tall
+            };
+            let (skip0, skip1) = if !inner.is_empty() && y >= hole.y && y < hole.bottom() {
+                let skip0 = hole.x.clamp(x0, x1);
+                (skip0, hole.right().clamp(skip0, x1))
             } else {
                 (x1, x1)
             };
-            for x in (x0..skip0).chain(skip1..x1) {
-                // distance from the rounded rectangle, in 1/256 pixels
-                let dx = (s.x + radius - x).max(x - (s.right() - 1 - radius)).max(0);
-                let dy = (s.y + radius - y).max(y - (s.bottom() - 1 - radius)).max(0);
-                // straight edges need no square root, only the corners do
-                let d = match (dx, dy) {
-                    (0, d) | (d, 0) => d * 256,
-                    _ => distance256(2 * dx, 2 * dy),
-                } - radius * 256;
-                let t = 256 - (d.max(0) / spread).min(256);
-                let a = strength * t * t / 65536;
-                if a > 0 {
-                    let p = &mut self.pixels[y as usize * self.stride + x as usize];
-                    *p = mix(*p, 0, a as u32);
+            let dy = (s.y + radius - y).max(y - (s.bottom() - 1 - radius)).max(0);
+            // the columns where the distance is straight down or up
+            let mid1 = s.right() - radius;
+            let row = y as usize * self.stride;
+            for (a0, a1) in [(x0, skip0), (skip1, x1)] {
+                let mut x = a0;
+                while x < a1 {
+                    let dx = (s.x + radius - x).max(x - (s.right() - 1 - radius)).max(0);
+                    if dx == 0 {
+                        // a run with the same darkness all along
+                        let end = a1.min(mid1);
+                        darken_run(&mut self.pixels[row + x as usize..row + end as usize], straight(dy));
+                        x = end;
+                        continue;
+                    }
+                    let a = if dy == 0 {
+                        straight(dx)
+                    } else {
+                        alpha(corner_distance(dx, dy) - radius * 256)
+                    };
+                    if a > 0 {
+                        let p = &mut self.pixels[row + x as usize];
+                        *p = darken(*p, 255 - (a as u32).min(255));
+                    }
+                    x += 1;
                 }
             }
         }
@@ -677,11 +748,13 @@ impl<'a> Canvas<'a> {
         }
         let radius = radius.min(r.w / 2).min(r.h / 2).max(1);
         let b = r.offset(self.ox, self.oy);
-        for x in b.x + radius..b.right() - radius {
+        // the straight sides, only where they cross the clip
+        let clip = self.clip;
+        for x in (b.x + radius).max(clip.x)..(b.right() - radius).min(clip.right()) {
             self.blend(x, b.y, c, alpha);
             self.blend(x, b.bottom() - 1, c, alpha);
         }
-        for y in b.y + radius..b.bottom() - radius {
+        for y in (b.y + radius).max(clip.y)..(b.bottom() - radius).min(clip.bottom()) {
             self.blend(b.x, y, c, alpha);
             self.blend(b.right() - 1, y, c, alpha);
         }
@@ -694,8 +767,9 @@ impl<'a> Canvas<'a> {
         ] {
             let cx = if x0 == b.x { b.x + radius } else { x0 };
             let cy = if y0 == b.y { b.y + radius } else { y0 };
-            for y in y0..y0 + radius {
-                for x in x0..x0 + radius {
+            let k = Rect::new(x0, y0, radius, radius).intersect(&self.clip);
+            for y in k.y..k.bottom() {
+                for x in k.x..k.right() {
                     let d = distance256(2 * x + 1 - 2 * cx, 2 * y + 1 - 2 * cy);
                     let cover = (256 - (d - ring).abs()).clamp(0, 256);
                     self.blend(x, y, c, cover * alpha / 256);
@@ -733,6 +807,49 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// Set every pixel of a run to `c`, two pixels per store. The kernel has
+/// no vector registers, and a loop of single 4-byte stores is the
+/// slowest part of filling big areas, the worst of all in an emulator.
+#[inline]
+pub fn fill_pixels(run: &mut [Color], c: Color) {
+    // SAFETY: any bit pattern is a valid u32 and u64
+    let (head, middle, tail) = unsafe { run.align_to_mut::<u64>() };
+    head.fill(c);
+    let pair = (c as u64) << 32 | c as u64;
+    for chunk in middle.chunks_exact_mut(4) {
+        chunk[0] = pair;
+        chunk[1] = pair;
+        chunk[2] = pair;
+        chunk[3] = pair;
+    }
+    let rest = middle.len() / 4 * 4;
+    middle[rest..].fill(pair);
+    tail.fill(c);
+}
+
+/// `mix(p, 0, a)` for every pixel of a run: darken it towards black.
+fn darken_run(run: &mut [Color], a: i32) {
+    if a <= 0 {
+        return;
+    }
+    let keep = 255 - (a as u32).min(255);
+    for p in run {
+        *p = darken(*p, keep);
+    }
+}
+
+/// `mix(p, 0, 255 - keep)`, with red and blue worked out together.
+/// `(v + 1 + (v >> 8)) >> 8` is exactly `v / 255` for every product of
+/// two bytes, and the two halves never carry into each other.
+#[inline]
+fn darken(p: Color, keep: u32) -> Color {
+    let rb = (p & 0xff00ff) * keep;
+    let g = (p >> 8 & 0xff) * keep;
+    let rb = (rb + 0x01_0001 + (rb >> 8 & 0xff00ff)) >> 8 & 0xff00ff;
+    let g = (g + 1 + (g >> 8)) >> 8;
+    rb | g << 8
+}
+
 /// A pixel `p` with `c` blended over it at coverage `a` (1 to 256).
 #[inline]
 fn blended(p: Color, c: Color, a: i32) -> Color {
@@ -764,13 +881,37 @@ struct RoundClip {
 
 /// Length of the vector (dx/2, dy/2) in 1/256 pixels. Taking doubled
 /// coordinates lets callers measure from pixel centres.
-fn distance256(dx2: i32, dy2: i32) -> i32 {
+const fn distance256(dx2: i32, dy2: i32) -> i32 {
     let (x, y) = (dx2 as i64, dy2 as i64);
     let squared = (x * x + y * y) as u64 * 16384;
     isqrt(squared) as i32
 }
 
-pub fn isqrt(n: u64) -> u64 {
+/// Shadow corners measure from whole pixels; their distances fit in a
+/// table worked out when the kernel is built, instead of a square root
+/// per pixel.
+const CORNER: usize = 48;
+static CORNER_DISTANCE: [i32; CORNER * CORNER] = {
+    let mut t = [0; CORNER * CORNER];
+    let mut i = 0;
+    while i < t.len() {
+        t[i] = distance256(2 * (i % CORNER) as i32, 2 * (i / CORNER) as i32);
+        i += 1;
+    }
+    t
+};
+
+/// `distance256(2 * dx, 2 * dy)`, from the table when it is near.
+#[inline]
+fn corner_distance(dx: i32, dy: i32) -> i32 {
+    if (dx as usize) < CORNER && (dy as usize) < CORNER {
+        CORNER_DISTANCE[dy as usize * CORNER + dx as usize]
+    } else {
+        distance256(2 * dx, 2 * dy)
+    }
+}
+
+pub const fn isqrt(n: u64) -> u64 {
     if n < 2 {
         return n;
     }
