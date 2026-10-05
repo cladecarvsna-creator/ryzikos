@@ -21,8 +21,6 @@ codegen-units = 1
 [dependencies]
 linked_list_allocator = "0.10"
 smoltcp = { version = "0.12", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dns", "socket-dhcpv4"] }
-embedded-tls = { version = "0.19", default-features = false }
-embedded-io = "0.7"
 rand_core = { version = "0.6", default-features = false }
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"] }
@@ -38,6 +36,7 @@ num-integer = { version = "0.1", default-features = false }
 zune-inflate = { version = "0.2", default-features = false, features = ["gzip"] }
 qrcodegen-no-heap = "1.8"
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "arithmetic"] }
 chacha20poly1305 = { version = "0.10", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
 hmac = { version = "0.12", default-features = false }

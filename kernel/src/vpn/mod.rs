@@ -10,7 +10,7 @@
 
 pub mod link;
 mod ss;
-mod tls;
+use crate::net::tls;
 mod vision;
 
 use alloc::format;

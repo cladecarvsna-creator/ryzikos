@@ -144,7 +144,9 @@ pub fn load(url: &Url, form: Option<&String>, viewport: (i32, i32), scripts: boo
             } else {
                 format!("<pre style=\"white-space:pre-wrap\">{}</pre>", escape(&source))
             };
+            let (source, notice) = fit_in_memory(source);
             let mut page = Page::new(Some(resp.url), dom::parse(&source), viewport);
+            page.notice = notice;
             if scripts {
                 page.run_scripts();
             }
@@ -152,16 +154,49 @@ pub fn load(url: &Url, form: Option<&String>, viewport: (i32, i32), scripts: boo
             crate::serial::write_str("\nbrowser: loaded page\n");
             page
         }
-        Err(e) => message_page(
-            Some(url.clone()),
-            "Не удаётся открыть страницу",
-            &format!(
-                "{}: {}. Проверьте, что QEMU запущен с сетью (-nic user,model=e1000) и у компьютера есть интернет.",
-                url.host, e
-            ),
-            viewport,
-        ),
+        Err(e) => {
+            crate::serial::write_str(&format!("\nbrowser: could not open {}: {}\n", url, e));
+            message_page(
+                Some(url.clone()),
+                "Can't open this page",
+                &format!("{}: {}. Check that the computer is connected to the internet.", url.host, e),
+                viewport,
+            )
+        }
     }
+}
+
+/// A page takes about this many times its size in memory once it is
+/// parsed, styled and laid out (a 1 MB page with 44 000 elements took
+/// 31 MB), with room to spare for its scripts and images.
+const MEMORY_PER_BYTE: usize = 40;
+
+/// Cut a page that would not fit in the free memory, at the start of a
+/// tag, so the part that fits still shows instead of the system running
+/// out of memory. Returns the source and what to tell the reader.
+fn fit_in_memory(mut source: String) -> (String, Option<String>) {
+    let room = crate::heap::free_bytes() / MEMORY_PER_BYTE;
+    if source.len() <= room {
+        return (source, None);
+    }
+    let total = source.len();
+    let mut cut = room.min(total);
+    while cut > 0 && !source.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if let Some(tag) = source[..cut].rfind('<') {
+        cut = tag;
+    }
+    source.truncate(cut);
+    source.shrink_to_fit();
+    let mib = |n: usize| format!("{}.{} MB", n >> 20, (n % (1 << 20)) * 10 >> 20);
+    let notice = format!(
+        "This page is too big for the free memory: showing the first {} of {}",
+        mib(cut),
+        mib(total)
+    );
+    crate::serial::write_str(&format!("\nbrowser: {}\n", notice));
+    (source, Some(notice))
 }
 
 /// Whether a reply is a file to keep rather than a page to show: the
@@ -306,7 +341,10 @@ pub fn special(address: &str, viewport: (i32, i32)) -> Page {
         return match crate::fs::read(path) {
             Ok(data) => {
                 let source = text::decode(&data, "text/html");
+                drop(data);
+                let (source, notice) = fit_in_memory(source);
                 let mut page = Page::new(None, dom::parse(&source), viewport);
+                page.notice = notice;
                 page.run_scripts();
                 page.update();
                 crate::serial::write_str("\nbrowser: opened a file from the disk\n");
@@ -491,7 +529,7 @@ fn from_html(url: Option<Url>, source: &str, viewport: (i32, i32)) -> Page {
 
 fn message_page(url: Option<Url>, title: &str, text: &str, viewport: (i32, i32)) -> Page {
     let source = format!(
-        "<title>{0}</title><style>body{{font-family:sans-serif;margin:60px auto;max-width:720px;color:#202124}}h1{{font-size:28px;font-weight:normal}}p{{line-height:1.5;color:#5f6368}}a{{color:#1a73e8}}</style><h1>{0}</h1><p>{1}</p><p><a href=\"about:home\">Домашняя страница</a></p>",
+        "<title>{0}</title><style>body{{font-family:sans-serif;margin:60px auto;max-width:720px;color:#202124}}h1{{font-size:28px;font-weight:normal}}p{{line-height:1.5;color:#5f6368}}a{{color:#1a73e8}}</style><h1>{0}</h1><p>{1}</p><p><a href=\"about:home\">Home page</a></p>",
         title,
         escape(text)
     );
@@ -533,26 +571,26 @@ h2 { font-size: 20px; margin: 8px 0 16px; }
 </style>
 <div class="hero">
   <h1>RyzikOS Browser</h1>
-  <p>Браузер RyzikOS: свой HTML, CSS и JavaScript (QuickJS), написанный с нуля на Rust.</p>
-  <form action="https://html.duckduckgo.com/html/"><input type="text" name="q" placeholder="Поиск в DuckDuckGo"><input type="submit" value="Найти"></form>
+  <p>The RyzikOS browser: its own HTML, CSS and JavaScript (QuickJS), written from scratch in Rust.</p>
+  <form action="https://html.duckduckgo.com/html/"><input type="text" name="q" placeholder="Search DuckDuckGo"><input type="submit" value="Search"></form>
 </div>
 <main>
-  <div class="card" style="margin-bottom:24px;border-color:#b9ccf7"><a href="about:programs">Программы для RyzikOS</a><p>Скачайте игры и утилиты: они установятся в папку Programs и появятся в лаунчере. Все скачанные файлы: <a href="about:downloads" style="font-size:14px">about:downloads</a></p></div>
-  <h2>Попробуйте эти сайты</h2>
+  <div class="card" style="margin-bottom:24px;border-color:#b9ccf7"><a href="about:programs">Programs for RyzikOS</a><p>Download games and tools: they install into the Programs folder and show up in the launcher. Everything you downloaded: <a href="about:downloads" style="font-size:14px">about:downloads</a></p></div>
+  <h2>Try these sites</h2>
   <div class="grid">
-    <div class="card"><a href="http://example.com/">example.com</a><p>Классическая страница-пример</p></div>
-    <div class="card"><a href="https://en.wikipedia.org/wiki/Operating_system">Wikipedia</a><p>Статья про операционные системы</p></div>
-    <div class="card"><a href="https://ru.wikipedia.org/wiki/Операционная_система">Википедия</a><p>То же по-русски</p></div>
-    <div class="card"><a href="http://info.cern.ch/hypertext/WWW/TheProject.html">info.cern.ch</a><p>Самый первый сайт в мире</p></div>
-    <div class="card"><a href="https://news.ycombinator.com/">Hacker News</a><p>Новости для программистов</p></div>
-    <div class="card"><a href="https://lite.duckduckgo.com/lite/">DuckDuckGo Lite</a><p>Поиск без лишнего</p></div>
-    <div class="card"><a href="https://text.npr.org/">NPR</a><p>Новости текстом</p></div>
-    <div class="card"><a href="http://68k.news/">68k.news</a><p>Новости для старых компьютеров</p></div>
-    <div class="card"><a href="http://frogfind.com/">FrogFind</a><p>Упрощает любые сайты</p></div>
+    <div class="card"><a href="http://example.com/">example.com</a><p>The classic example page</p></div>
+    <div class="card"><a href="https://en.wikipedia.org/wiki/Operating_system">Wikipedia</a><p>The article on operating systems</p></div>
+    <div class="card"><a href="https://ru.wikipedia.org/wiki/Операционная_система">Wikipedia (Russian)</a><p>The same in Russian</p></div>
+    <div class="card"><a href="http://info.cern.ch/hypertext/WWW/TheProject.html">info.cern.ch</a><p>The world's very first website</p></div>
+    <div class="card"><a href="https://news.ycombinator.com/">Hacker News</a><p>News for programmers</p></div>
+    <div class="card"><a href="https://lite.duckduckgo.com/lite/">DuckDuckGo Lite</a><p>Search without the clutter</p></div>
+    <div class="card"><a href="https://text.npr.org/">NPR</a><p>News as plain text</p></div>
+    <div class="card"><a href="http://68k.news/">68k.news</a><p>News for old computers</p></div>
+    <div class="card"><a href="http://frogfind.com/">FrogFind</a><p>Makes any site simple</p></div>
   </div>
-  <div class="note">Сейчас <span id="clock">...</span>. Эти часы идут благодаря JavaScript на этой странице.
-  Колёсико мыши, Page Up и Page Down прокручивают страницу, Ctrl+L переходит в адресную строку.
-  HTTPS шифрует соединение, но сертификаты сайтов не проверяются.</div>
+  <div class="note">It is <span id="clock">...</span> now. This clock runs on the JavaScript in this page.
+  The mouse wheel, Page Up and Page Down scroll the page; Ctrl+L goes to the address bar. Drag over text to select it and press Ctrl+C to copy.
+  HTTPS encrypts the connection, but site certificates are not checked.</div>
 </main>
 <script>
 const clock = document.getElementById('clock');

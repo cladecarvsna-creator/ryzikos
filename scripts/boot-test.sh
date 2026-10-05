@@ -18,7 +18,8 @@ log="$dir/serial.log"
 monitor="$dir/monitor.sock"
 disk="$dir/disk.img"
 qemu=""
-trap 'kill $qemu "$web" 2> /dev/null; rm -rf "$dir"' EXIT
+tls=""
+trap 'kill $qemu "$web" "$tls" 2> /dev/null; rm -rf "$dir"' EXIT
 truncate -s 256M "$disk"
 
 mkdir "$dir/www"
@@ -29,6 +30,14 @@ echo '<title>Test program</title><p>hello</p>' > "$dir/www/test.rzapp"
 head -c 73400320 /dev/zero > "$dir/www/big.zip"
 python3 -m http.server 8123 --bind 127.0.0.1 --directory "$dir/www" > /dev/null 2>&1 &
 web=$!
+# an HTTPS server speaking only TLS 1.2, with a certificate chain longer
+# than one TLS record, as some real sites send
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$dir/tls.key" -out "$dir/tls.crt" \
+    -days 2 -subj /CN=test 2> /dev/null
+for _ in $(seq 20); do cat "$dir/tls.crt"; done > "$dir/chain.pem"
+openssl s_server -accept 8443 -www -quiet -tls1_2 -cert "$dir/tls.crt" -key "$dir/tls.key" \
+    -cert_chain "$dir/chain.pem" > /dev/null 2>&1 &
+tls=$!
 
 # start QEMU with the disk, from the live CD or (with "disk") from the
 # hard disk without a CD; the serial log starts empty
@@ -110,6 +119,10 @@ echo "keyboard input works"
 type_keys f e t c h spc 1 0 dot 0 dot 2 dot 2 shift-semicolon 8 1 2 3 slash ret
 wait_for 'fetch: "EverOS test page"' || fail "the network test page did not load"
 echo "network and HTTP work"
+
+type_keys f e t c h spc h t t p s shift-semicolon slash slash 1 0 dot 0 dot 2 dot 2 shift-semicolon 8 4 4 3 slash ret
+wait_for 'fetch: "", ' || fail "the HTTPS page (TLS 1.2, long certificate chain) did not load"
+echo "HTTPS works with TLS 1.2 and long certificate chains"
 
 # the browser loads pages on a fiber, in the background
 type_keys b r o w s e r spc 1 0 dot 0 dot 2 dot 2 shift-semicolon 8 1 2 3 slash ret
