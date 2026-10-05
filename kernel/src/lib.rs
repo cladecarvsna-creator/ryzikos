@@ -9,6 +9,7 @@ mod archive;
 mod clock;
 mod console;
 mod crash;
+mod display;
 mod fiber;
 mod font;
 mod framebuffer;

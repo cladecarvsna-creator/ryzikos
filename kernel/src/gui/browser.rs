@@ -479,7 +479,7 @@ impl Browser {
 
     /// Called every pass of the desktop loop. Returns true to redraw.
     pub fn tick(&mut self) -> bool {
-        net::poll();
+        // the main loop has just polled the network
         let mut redraw = false;
         let requested = if self.bare { None } else { REQUESTED.lock().take() };
         if let Some(address) = requested {

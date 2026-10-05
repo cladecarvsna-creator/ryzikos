@@ -1593,6 +1593,12 @@ impl Explorer {
 
     // ---- drawing ---------------------------------------------------------------
 
+    /// Whether a text caret shows: in the address bar, the search box or
+    /// a name being changed. Only then does blinking it draw again.
+    pub fn typing(&self) -> bool {
+        self.focus != Focus::List || self.renaming.is_some()
+    }
+
     pub fn draw(&mut self, c: &mut Canvas, caret: bool) {
         c.fill(client(), theme::light());
         self.draw_nav(c, caret);

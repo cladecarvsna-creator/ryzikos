@@ -250,6 +250,14 @@ impl Console {
         }
     }
 
+    /// The desktop changed the screen's resolution: the panic screen
+    /// draws in the new mode.
+    pub fn set_framebuffer(&mut self, fb: Framebuffer) {
+        if let Surface::Offscreen(old) = &mut self.surface {
+            *old = fb;
+        }
+    }
+
     /// Take the screen back from the desktop, for the panic screen.
     pub fn reattach(&mut self) {
         if let Surface::Offscreen(fb) = self.surface {
