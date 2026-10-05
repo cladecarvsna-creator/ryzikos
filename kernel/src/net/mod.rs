@@ -124,8 +124,12 @@ impl phy::Device for Nic {
 
 struct Stack {
     nic: Nic,
-    /// The link was up at the last poll.
+    /// The link was up at the last look.
     link: bool,
+    /// When to read the card's link state again, in timer ticks. Each
+    /// read is a trip to the card (slow in an emulator), and polls come
+    /// many times a second.
+    next_link_check: u64,
     /// QEMU's network card (its MACs start 52:54:00), so QEMU's user
     /// network settings are a fair guess when DHCP is slow.
     emulated: bool,
@@ -137,6 +141,9 @@ struct Stack {
     started: u64,
     next_port: u16,
 }
+
+/// How often `poll` reads whether the cable is in: 4 times a second.
+const LINK_CHECK_TICKS: u64 = interrupts::TIMER_HZ / 4;
 
 static STACK: IrqMutex<Option<Stack>> = IrqMutex::new(None);
 
@@ -169,6 +176,7 @@ pub fn init() -> Option<[u8; 6]> {
     let dns = sockets.add(dns::Socket::new(&[], Vec::new()));
     *STACK.lock() = Some(Stack {
         link: nic.0.link_up(),
+        next_link_check: 0,
         emulated: mac[..3] == [0x52, 0x54, 0x00],
         nic,
         iface,
@@ -198,7 +206,7 @@ pub fn configured() -> bool {
 
 /// Whether there is a network card, and whether its cable is plugged in.
 pub fn link() -> Option<bool> {
-    STACK.lock().as_ref().map(|s| s.nic.0.link_up())
+    STACK.lock().as_ref().map(|s| s.link)
 }
 
 /// Our IP address as text, for the status bar.
@@ -224,12 +232,15 @@ impl Stack {
     fn poll(&mut self) {
         // a real card takes a few seconds to agree on a speed with the
         // switch; ask DHCP again as soon as the cable works
-        let link = self.nic.0.link_up();
-        if link && !self.link {
-            self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).reset();
-            self.started = interrupts::ticks();
+        if interrupts::ticks() >= self.next_link_check {
+            self.next_link_check = interrupts::ticks() + LINK_CHECK_TICKS;
+            let link = self.nic.0.link_up();
+            if link && !self.link {
+                self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).reset();
+                self.started = interrupts::ticks();
+            }
+            self.link = link;
         }
-        self.link = link;
         self.iface.poll(now(), &mut self.nic, &mut self.sockets);
         let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
         match event {

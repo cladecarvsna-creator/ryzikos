@@ -3,7 +3,8 @@
 //! up; the keyboard layout can be switched here, the About page opens
 //! "About RyzikOS", and Personalization changes the look: light or dark
 //! mode, the accent colour and the desktop background. Update finds a
-//! newer RyzikOS on GitHub and gets it ready for the next start.
+//! newer RyzikOS on GitHub and gets it ready for the next start. System
+//! picks the screen resolution, in virtual machines that allow it.
 
 use alloc::format;
 use alloc::string::String;
@@ -16,7 +17,8 @@ use super::icons::{self, Pic, SMALL};
 use super::personalize::{self, Background, Prefs, COLORS, FITS};
 use super::text::{TITLE, UI, UI_BOLD};
 use super::tray::{self, Net};
-use super::{picture, theme, wallpaper, App, MouseEvent, MouseKind};
+use super::{picture, theme, wallpaper, widgets, App, MouseEvent, MouseKind};
+use crate::display::MODES;
 use crate::fs;
 use crate::keyboard::{Key, Layout};
 use crate::update::{self, State, Updater};
@@ -41,6 +43,8 @@ const ROW_H: i32 = 56;
 /// What the pages show, collected by the desktop.
 pub struct Info<'a> {
     pub screen: (i32, i32),
+    /// Whether the resolution can be changed.
+    pub screen_modes: bool,
     pub memory_mib: u32,
     pub bootloader: &'a str,
     pub net: Net,
@@ -77,6 +81,7 @@ enum Button {
     SwitchLayout,
     OpenAbout,
     Update,
+    Resolution,
 }
 
 pub struct Settings {
@@ -91,6 +96,11 @@ pub struct Settings {
     /// Small pictures of the backgrounds, made when first shown.
     thumbs: RefCell<Thumbs>,
     pub updater: Updater,
+    /// The desktop says whether the resolution can be changed.
+    pub screen_modes: bool,
+    /// The list of resolutions is open, with the one under the mouse.
+    modes_open: bool,
+    mode_hover: Option<usize>,
 }
 
 #[derive(Default)]
@@ -236,6 +246,35 @@ fn row_button(i: usize) -> Rect {
     Rect::new(r.right() - 16 - 170, r.y + (ROW_H - 32) / 2, 170, 32)
 }
 
+/// "16:9" and the like, for a resolution.
+fn shape(w: usize, h: usize) -> &'static str {
+    match w * 100 / h {
+        160 => "16:10",
+        176..=178 => "16:9",
+        125 => "5:4",
+        _ => "4:3",
+    }
+}
+
+/// The resolutions as menu labels.
+fn mode_labels() -> Vec<(String, &'static str)> {
+    MODES
+        .iter()
+        .map(|&(w, h)| (format!("{} x {}", w, h), shape(w, h)))
+        .collect()
+}
+
+/// Where the list of resolutions opens: under the Change button, or
+/// above it when the window is too short.
+fn modes_rect() -> Rect {
+    let b = row_button(0);
+    let labels = mode_labels();
+    let items: Vec<widgets::Item> = labels.iter().map(|(l, s)| (l.as_str(), *s, true)).collect();
+    let h = widgets::menu_height(&items);
+    let y = if b.bottom() + 4 + h <= ch() { b.bottom() + 4 } else { (b.y - 4 - h).max(0) };
+    Rect::new(b.right() - widgets::MENU_W, y, widgets::MENU_W, h)
+}
+
 impl Settings {
     pub fn new() -> Self {
         Self {
@@ -246,6 +285,9 @@ impl Settings {
             error: None,
             thumbs: RefCell::new(Thumbs::default()),
             updater: Updater::new(),
+            screen_modes: false,
+            modes_open: false,
+            mode_hover: None,
         }
     }
 
@@ -355,11 +397,23 @@ impl Settings {
     /// Where the page's button is, if it has one.
     fn button(&self) -> Option<(Button, Rect)> {
         match self.page {
+            Page::System if self.screen_modes => Some((Button::Resolution, row_button(0))),
             Page::Time => Some((Button::SwitchLayout, row_button(1))),
             Page::About => Some((Button::OpenAbout, row_button(4))),
             Page::Update if self.update_label().is_some() => Some((Button::Update, row_button(0))),
             _ => None,
         }
+    }
+
+    /// The mouse moved to (`x`, `y`): light the resolution under it.
+    pub fn on_hover(&mut self, x: i32, y: i32) -> bool {
+        if !self.modes_open {
+            return false;
+        }
+        let labels = mode_labels();
+        let items: Vec<widgets::Item> = labels.iter().map(|(l, s)| (l.as_str(), *s, true)).collect();
+        let hover = widgets::menu_item_at(modes_rect(), &items, x, y);
+        core::mem::replace(&mut self.mode_hover, hover) != hover
     }
 
     pub fn on_mouse(&mut self, ev: MouseEvent) -> bool {
@@ -370,6 +424,21 @@ impl Settings {
                     None => filedialog::Event::None,
                 };
                 return self.dialog_event(event);
+            }
+            return false;
+        }
+        if self.modes_open {
+            if let MouseKind::Down { .. } = ev.kind {
+                self.modes_open = false;
+                self.mode_hover = None;
+                let labels = mode_labels();
+                let items: Vec<widgets::Item> =
+                    labels.iter().map(|(l, s)| (l.as_str(), *s, true)).collect();
+                if let Some(i) = widgets::menu_item_at(modes_rect(), &items, ev.x, ev.y) {
+                    let (w, h) = MODES[i];
+                    super::request_screen(w, h);
+                }
+                return true;
             }
             return false;
         }
@@ -402,6 +471,7 @@ impl Settings {
                         Button::OpenAbout => {
                             super::request_open(App::About);
                         }
+                        Button::Resolution => self.modes_open = true,
                         Button::Update => match self.updater.state() {
                             State::Ready(_) => {
                                 super::request_power(true);
@@ -444,8 +514,17 @@ impl Settings {
                     &[
                         (
                             "Display",
-                            "Resolution",
-                            &format!("{} x {}", info.screen.0, info.screen.1),
+                            if info.screen_modes {
+                                "Match the shape of your monitor"
+                            } else {
+                                "Resolution"
+                            },
+                            &format!(
+                                "{} x {} ({})",
+                                info.screen.0,
+                                info.screen.1,
+                                shape(info.screen.0 as usize, info.screen.1.max(1) as usize)
+                            ),
                         ),
                         (
                             "Memory",
@@ -456,6 +535,17 @@ impl Settings {
                         ("Uptime", "Time since RyzikOS started", &uptime),
                     ],
                 );
+                self.draw_button(c, Button::Resolution, "Change");
+                if self.modes_open {
+                    let now = (info.screen.0 as usize, info.screen.1 as usize);
+                    let labels = mode_labels();
+                    let items: Vec<widgets::Item> = labels
+                        .iter()
+                        .zip(MODES)
+                        .map(|((l, s), m)| (l.as_str(), if m == now { "current" } else { *s }, true))
+                        .collect();
+                    widgets::draw_menu(c, modes_rect(), &items, self.mode_hover);
+                }
             }
             Page::Network => {
                 let address = if info.address.is_empty() {

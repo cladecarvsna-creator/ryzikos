@@ -151,6 +151,7 @@ impl Shell {
                 println!("  explorer open Files (explorer <folder>)");
                 println!("  settings open Settings; 'about' shows About RyzikOS");
                 println!("  theme   theme light | theme dark");
+                println!("  screen  show or change the resolution: screen 1920x1200");
                 println!("  wallpaper <picture> or 'wallpaper next' changes the background");
                 println!("  restart restart the computer; 'shutdown' turns it off");
                 println!("  colors  show the text colours");
@@ -376,6 +377,7 @@ impl Shell {
                     println!("There is no lock screen in text mode.");
                 }
             }
+            "screen" | "resolution" => screen(args.trim()),
             "theme" => match args.trim() {
                 "dark" => gui::set_theme(true),
                 "light" => gui::set_theme(false),
@@ -857,4 +859,36 @@ fn js(source: &str) {
         "\njs: done in {} ms\n",
         crate::js::now_ms() - t0
     ));
+}
+
+/// `screen`: the resolution now and the ones to pick, or `screen WxH`
+/// to switch (in virtual machines whose graphics card allows it).
+fn screen(args: &str) {
+    let Some(fb) = CONSOLE.lock().framebuffer() else {
+        return error("No graphics screen.");
+    };
+    let mode = args
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)));
+    match mode {
+        Some(m) if crate::display::MODES.contains(&m) => {
+            if !crate::display::can_change(&fb) {
+                return error("This graphics card keeps the resolution the computer started with.");
+            }
+            crate::gui::request_screen(m.0, m.1);
+        }
+        _ if !args.is_empty() => error("Pick one of the resolutions 'screen' lists, like screen 1920x1200"),
+        _ => {
+            println!("Screen: {} x {}", fb.width, fb.height);
+            if crate::display::can_change(&fb) {
+                let list: alloc::vec::Vec<alloc::string::String> = crate::display::MODES
+                    .iter()
+                    .map(|(w, h)| alloc::format!("{}x{}", w, h))
+                    .collect();
+                println!("Can switch to: {}", list.join(", "));
+            } else {
+                println!("This graphics card keeps the resolution the computer started with.");
+            }
+        }
+    }
 }
